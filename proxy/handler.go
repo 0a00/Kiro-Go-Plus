@@ -1274,6 +1274,18 @@ func buildModelInfoWithLimits(id, ownedBy string, supportsImage bool, maxInputTo
 		"output": []string{"text"},
 	}
 
+	if entry, ok := config.GetConfiguredModelMetadata(id); ok {
+		maxInputTokens = entry.ContextWindow
+		maxOutputTokens = entry.MaxTokens
+	} else {
+		defaults := config.GetThinkingConfig()
+		if defaults.DefaultContextWindowTokens > 0 {
+			maxInputTokens = defaults.DefaultContextWindowTokens
+		}
+		if defaults.DefaultMaxOutputTokens > 0 {
+			maxOutputTokens = defaults.DefaultMaxOutputTokens
+		}
+	}
 	if maxInputTokens <= 0 {
 		maxInputTokens = getContextWindowSize(id)
 	}
@@ -1700,12 +1712,13 @@ func (h *Handler) handleCountTokens(w http.ResponseWriter, r *http.Request) {
 		h.sendClaudeError(w, 400, "invalid_request_error", "Invalid JSON")
 		return
 	}
+	thinkingCfg := config.GetThinkingConfig()
+	_ = applyClaudeTokenBudgetDefaults(&req)
 	if msg := validateClaudeThinkingConfig(req.Thinking, req.MaxTokens); msg != "" {
 		h.sendClaudeError(w, 400, "invalid_request_error", msg)
 		return
 	}
 
-	thinkingCfg := config.GetThinkingConfig()
 	actualModel, thinking := resolveClaudeThinkingMode(req.Model, req.Thinking, thinkingCfg.Suffix)
 	req.Model = actualModel
 	effectiveReq := cloneClaudeRequestForThinking(&req, thinking)
@@ -1751,13 +1764,14 @@ func (h *Handler) handleClaudeMessagesInternal(w http.ResponseWriter, r *http.Re
 		h.sendClaudeError(w, 400, "invalid_request_error", "Invalid JSON: "+err.Error())
 		return
 	}
+	thinkingCfg := config.GetThinkingConfig()
+	contextWindowTokens := applyClaudeTokenBudgetDefaults(&req)
 	if msg := validateClaudeRequestShape(&req); msg != "" {
 		h.sendClaudeError(w, 400, "invalid_request_error", msg)
 		return
 	}
 
 	// 解析模型和 thinking 模式
-	thinkingCfg := config.GetThinkingConfig()
 	if err := prepareClaudeToolPolicy(&req, thinkingCfg.EnforceAgentToolUse); err != nil {
 		h.sendClaudeError(w, 400, "invalid_request_error", err.Error())
 		return
@@ -1782,6 +1796,7 @@ func (h *Handler) handleClaudeMessagesInternal(w http.ResponseWriter, r *http.Re
 	// 转换请求
 	kiroPayload := ClaudeToKiro(&req, thinking)
 	kiroPayload.requestContext = r.Context()
+	kiroPayload.contextWindowTokens = contextWindowTokens
 
 	// Stream or non-stream
 	apiKeyID := apiKeyIDFromContext(r.Context())
@@ -2192,7 +2207,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 				credits = c
 			},
 			OnContextUsage: func(pct float64) {
-				realInputTokens = int(pct * float64(getContextWindowSize(model)) / 100.0)
+				realInputTokens = int(pct * float64(getPayloadContextWindowSize(payload, model)) / 100.0)
 			},
 		}
 
@@ -2549,7 +2564,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 				credits = c
 			},
 			OnContextUsage: func(pct float64) {
-				realInputTokens = int(pct * float64(getContextWindowSize(model)) / 100.0)
+				realInputTokens = int(pct * float64(getPayloadContextWindowSize(payload, model)) / 100.0)
 			},
 		}
 
@@ -2733,6 +2748,7 @@ func (h *Handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 		h.sendOpenAIError(w, 400, "invalid_request_error", "Invalid JSON")
 		return
 	}
+	contextWindowTokens := applyOpenAITokenBudgetDefaults(&req)
 	if msg := validateOpenAIRequestShape(&req); msg != "" {
 		h.sendOpenAIError(w, 400, "invalid_request_error", msg)
 		return
@@ -2755,6 +2771,7 @@ func (h *Handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 
 	kiroPayload := OpenAIToKiro(&req, thinking)
 	kiroPayload.requestContext = r.Context()
+	kiroPayload.contextWindowTokens = contextWindowTokens
 
 	apiKeyID := apiKeyIDFromContext(r.Context())
 	namespaceConversationID(kiroPayload, requestConversationNamespace(r, apiKeyID))
@@ -3090,7 +3107,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 				credits = c
 			},
 			OnContextUsage: func(pct float64) {
-				realInputTokens = int(pct * float64(getContextWindowSize(model)) / 100.0)
+				realInputTokens = int(pct * float64(getPayloadContextWindowSize(payload, model)) / 100.0)
 			},
 		}
 
@@ -3292,7 +3309,7 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 			OnTruncated: func(string) { truncated = true },
 			OnCredits:   func(c float64) { credits = c },
 			OnContextUsage: func(pct float64) {
-				realInputTokens = int(pct * float64(getContextWindowSize(model)) / 100.0)
+				realInputTokens = int(pct * float64(getPayloadContextWindowSize(payload, model)) / 100.0)
 			},
 		}
 
@@ -6064,26 +6081,30 @@ func (h *Handler) serveStaticFile(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) apiGetThinkingConfig(w http.ResponseWriter, r *http.Request) {
 	cfg := config.GetThinkingConfig()
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"suffix":              cfg.Suffix,
-		"openaiFormat":        cfg.OpenAIFormat,
-		"claudeFormat":        cfg.ClaudeFormat,
-		"defaultBudgetTokens": cfg.DefaultBudgetTokens,
-		"budgetCapTokens":     cfg.BudgetCapTokens,
-		"bufferToolStreams":   cfg.BufferToolStreams,
-		"enforceAgentToolUse": cfg.EnforceAgentToolUse,
+		"suffix":                     cfg.Suffix,
+		"openaiFormat":               cfg.OpenAIFormat,
+		"claudeFormat":               cfg.ClaudeFormat,
+		"defaultBudgetTokens":        cfg.DefaultBudgetTokens,
+		"budgetCapTokens":            cfg.BudgetCapTokens,
+		"defaultMaxOutputTokens":     cfg.DefaultMaxOutputTokens,
+		"defaultContextWindowTokens": cfg.DefaultContextWindowTokens,
+		"bufferToolStreams":          cfg.BufferToolStreams,
+		"enforceAgentToolUse":        cfg.EnforceAgentToolUse,
 	})
 }
 
 // apiUpdateThinkingConfig 更新 thinking 配置
 func (h *Handler) apiUpdateThinkingConfig(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Suffix              string `json:"suffix"`
-		OpenAIFormat        string `json:"openaiFormat"`
-		ClaudeFormat        string `json:"claudeFormat"`
-		DefaultBudgetTokens *int   `json:"defaultBudgetTokens"`
-		BudgetCapTokens     *int   `json:"budgetCapTokens"`
-		BufferToolStreams   *bool  `json:"bufferToolStreams"`
-		EnforceAgentToolUse *bool  `json:"enforceAgentToolUse"`
+		Suffix                     string `json:"suffix"`
+		OpenAIFormat               string `json:"openaiFormat"`
+		ClaudeFormat               string `json:"claudeFormat"`
+		DefaultBudgetTokens        *int   `json:"defaultBudgetTokens"`
+		BudgetCapTokens            *int   `json:"budgetCapTokens"`
+		DefaultMaxOutputTokens     *int   `json:"defaultMaxOutputTokens"`
+		DefaultContextWindowTokens *int   `json:"defaultContextWindowTokens"`
+		BufferToolStreams          *bool  `json:"bufferToolStreams"`
+		EnforceAgentToolUse        *bool  `json:"enforceAgentToolUse"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(400)
@@ -6113,6 +6134,14 @@ func (h *Handler) apiUpdateThinkingConfig(w http.ResponseWriter, r *http.Request
 	if req.BudgetCapTokens != nil {
 		budgetCapTokens = *req.BudgetCapTokens
 	}
+	defaultMaxOutputTokens := current.DefaultMaxOutputTokens
+	if req.DefaultMaxOutputTokens != nil {
+		defaultMaxOutputTokens = *req.DefaultMaxOutputTokens
+	}
+	defaultContextWindowTokens := current.DefaultContextWindowTokens
+	if req.DefaultContextWindowTokens != nil {
+		defaultContextWindowTokens = *req.DefaultContextWindowTokens
+	}
 	bufferToolStreams := current.BufferToolStreams
 	if req.BufferToolStreams != nil {
 		bufferToolStreams = *req.BufferToolStreams
@@ -6136,8 +6165,18 @@ func (h *Handler) apiUpdateThinkingConfig(w http.ResponseWriter, r *http.Request
 		json.NewEncoder(w).Encode(map[string]string{"error": "defaultBudgetTokens cannot exceed budgetCapTokens"})
 		return
 	}
+	if defaultMaxOutputTokens < 0 || defaultMaxOutputTokens > 1000000 {
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(map[string]string{"error": "defaultMaxOutputTokens must be between 0 and 1000000"})
+		return
+	}
+	if defaultContextWindowTokens < 0 || defaultContextWindowTokens > 10000000 || (defaultContextWindowTokens > 0 && defaultContextWindowTokens < 1024) {
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(map[string]string{"error": "defaultContextWindowTokens must be 0 or between 1024 and 10000000"})
+		return
+	}
 
-	if err := config.UpdateThinkingConfig(req.Suffix, req.OpenAIFormat, req.ClaudeFormat, defaultBudgetTokens, budgetCapTokens, bufferToolStreams, enforceAgentToolUse); err != nil {
+	if err := config.UpdateThinkingConfig(req.Suffix, req.OpenAIFormat, req.ClaudeFormat, defaultBudgetTokens, budgetCapTokens, defaultMaxOutputTokens, defaultContextWindowTokens, bufferToolStreams, enforceAgentToolUse); err != nil {
 		w.WriteHeader(500)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return

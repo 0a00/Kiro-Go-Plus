@@ -207,6 +207,7 @@ type KiroPayload struct {
 
 	requestContext          context.Context
 	attemptBudget           *upstreamAttemptBudget
+	contextWindowTokens     int
 	requireActionableOutput bool
 	requireToolUse          bool
 	tokenRefreshMu          sync.Mutex
@@ -951,6 +952,9 @@ func getContextWindowSize(model string) int {
 	if entry, ok := config.GetConfiguredModelMetadata(model); ok && entry.ContextWindow > 0 {
 		return entry.ContextWindow
 	}
+	if configured := config.GetThinkingConfig().DefaultContextWindowTokens; configured > 0 {
+		return configured
+	}
 	if limits, ok := getDiscoveredModelTokenLimits(model); ok && limits.MaxInputTokens > 0 {
 		return limits.MaxInputTokens
 	}
@@ -958,6 +962,13 @@ func getContextWindowSize(model string) int {
 		return 1_000_000
 	}
 	return 200_000
+}
+
+func getPayloadContextWindowSize(payload *KiroPayload, model string) int {
+	if payload != nil && payload.contextWindowTokens > 0 {
+		return payload.contextWindowTokens
+	}
+	return getContextWindowSize(model)
 }
 
 // claudeVersionExtractor matches both bare major versions and major/minor

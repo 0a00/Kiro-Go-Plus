@@ -107,12 +107,19 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 	if req.MaxOutputTokens != nil {
 		openaiReq.MaxTokens = *req.MaxOutputTokens
 	}
+	if req.ContextWindow != nil {
+		openaiReq.ContextWindow = *req.ContextWindow
+	}
+	if req.MaxInputTokens != nil {
+		openaiReq.MaxInputTokens = *req.MaxInputTokens
+	}
 	if err := applyOpenAIToolChoice(openaiReq); err != nil {
 		h.sendOpenAIError(w, 400, "invalid_request_error", err.Error())
 		return
 	}
 
 	thinkingCfg := config.GetThinkingConfig()
+	contextWindowTokens := applyOpenAITokenBudgetDefaults(openaiReq)
 	actualModel, thinking := ParseModelAndThinking(req.Model, thinkingCfg.Suffix)
 	openaiReq.Model = actualModel
 
@@ -124,6 +131,7 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 	}
 	kiroPayload := OpenAIToKiro(openaiReq, thinking)
 	kiroPayload.requestContext = r.Context()
+	kiroPayload.contextWindowTokens = contextWindowTokens
 
 	apiKeyID := apiKeyIDFromContext(r.Context())
 	namespaceConversationID(kiroPayload, requestConversationNamespace(r, apiKeyID))
@@ -205,7 +213,7 @@ func (h *Handler) handleResponsesNonStream(
 			OnTruncated: func(string) { truncated = true },
 			OnCredits:   func(c float64) { credits = c },
 			OnContextUsage: func(pct float64) {
-				realInputTokens = int(pct * float64(getContextWindowSize(model)) / 100.0)
+				realInputTokens = int(pct * float64(getPayloadContextWindowSize(payload, model)) / 100.0)
 			},
 		}
 
@@ -675,7 +683,7 @@ func (h *Handler) handleResponsesStream(
 			OnTruncated: func(string) { truncated = true },
 			OnCredits:   func(c float64) { credits = c },
 			OnContextUsage: func(pct float64) {
-				realInputTokens = int(pct * float64(getContextWindowSize(model)) / 100.0)
+				realInputTokens = int(pct * float64(getPayloadContextWindowSize(payload, model)) / 100.0)
 			},
 		}
 

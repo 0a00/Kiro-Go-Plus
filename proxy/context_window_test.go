@@ -1,12 +1,19 @@
 package proxy
 
-import "testing"
+import (
+	"kiro-go/config"
+	"path/filepath"
+	"testing"
+)
 
 // TestGetContextWindowSize verifies models are classified into the correct
 // context window. This drives the input-token count that clients use to decide
 // when to compact; misclassifying opus-4.8 (1M) as 200K under-reports tokens by
 // 5x and prevents timely compaction.
 func TestGetContextWindowSize(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
 	cases := []struct {
 		model string
 		want  int

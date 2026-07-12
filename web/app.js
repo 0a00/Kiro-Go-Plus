@@ -1914,14 +1914,22 @@
     $('claudeThinkingFormat').value = d.claudeFormat || 'thinking';
     $('thinkingDefaultBudget').value = d.defaultBudgetTokens || 4000;
     $('thinkingBudgetCap').value = d.budgetCapTokens == null ? 10000 : d.budgetCapTokens;
+    $('defaultMaxOutputTokens').value = d.defaultMaxOutputTokens || 0;
+    $('defaultContextWindowTokens').value = d.defaultContextWindowTokens || 0;
     $('bufferToolStreams').checked = d.bufferToolStreams !== false;
     $('enforceAgentToolUse').checked = d.enforceAgentToolUse !== false;
   }
   async function saveThinkingConfig() {
     const defaultBudgetTokens = Math.round(Number($('thinkingDefaultBudget').value) || 0);
     const budgetCapTokens = Math.round(Number($('thinkingBudgetCap').value) || 0);
+    const defaultMaxOutputTokens = Math.round(Number($('defaultMaxOutputTokens').value) || 0);
+    const defaultContextWindowTokens = Math.round(Number($('defaultContextWindowTokens').value) || 0);
     if (defaultBudgetTokens < 1024 || defaultBudgetTokens > 200000 || budgetCapTokens < 0 || budgetCapTokens > 200000 || (budgetCapTokens > 0 && (budgetCapTokens < 1024 || defaultBudgetTokens > budgetCapTokens))) {
       toast(t('settings.thinkingBudgetInvalid'), 'warning');
+      return;
+    }
+    if (defaultMaxOutputTokens < 0 || defaultMaxOutputTokens > 1000000 || defaultContextWindowTokens < 0 || defaultContextWindowTokens > 10000000 || (defaultContextWindowTokens > 0 && defaultContextWindowTokens < 1024)) {
+      toast(t('settings.tokenBudgetInvalid'), 'warning');
       return;
     }
     const res = await api('/thinking', {
@@ -1931,6 +1939,8 @@
         claudeFormat: $('claudeThinkingFormat').value,
         defaultBudgetTokens,
         budgetCapTokens,
+        defaultMaxOutputTokens,
+        defaultContextWindowTokens,
         bufferToolStreams: $('bufferToolStreams').checked,
         enforceAgentToolUse: $('enforceAgentToolUse').checked
       })

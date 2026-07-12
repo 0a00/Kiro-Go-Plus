@@ -135,17 +135,20 @@ func MapModel(model string) string {
 // ==================== Claude API 类型 ====================
 
 type ClaudeRequest struct {
-	Model        string                `json:"model"`
-	Messages     []ClaudeMessage       `json:"messages"`
-	MaxTokens    int                   `json:"max_tokens"`
-	Temperature  float64               `json:"temperature,omitempty"`
-	TopP         float64               `json:"top_p,omitempty"`
-	Stream       bool                  `json:"stream,omitempty"`
-	System       interface{}           `json:"system,omitempty"` // string or []SystemBlock
-	Thinking     *ClaudeThinkingConfig `json:"thinking,omitempty"`
-	OutputConfig *ClaudeOutputConfig   `json:"output_config,omitempty"`
-	Tools        []ClaudeTool          `json:"tools,omitempty"`
-	ToolChoice   interface{}           `json:"tool_choice,omitempty"`
+	Model           string                `json:"model"`
+	Messages        []ClaudeMessage       `json:"messages"`
+	MaxTokens       int                   `json:"max_tokens"`
+	MaxOutputTokens int                   `json:"max_output_tokens,omitempty"`
+	ContextWindow   int                   `json:"context_window,omitempty"`
+	MaxInputTokens  int                   `json:"max_input_tokens,omitempty"`
+	Temperature     float64               `json:"temperature,omitempty"`
+	TopP            float64               `json:"top_p,omitempty"`
+	Stream          bool                  `json:"stream,omitempty"`
+	System          interface{}           `json:"system,omitempty"` // string or []SystemBlock
+	Thinking        *ClaudeThinkingConfig `json:"thinking,omitempty"`
+	OutputConfig    *ClaudeOutputConfig   `json:"output_config,omitempty"`
+	Tools           []ClaudeTool          `json:"tools,omitempty"`
+	ToolChoice      interface{}           `json:"tool_choice,omitempty"`
 
 	RequireToolUse   bool   `json:"-"`
 	RequiredToolName string `json:"-"`
@@ -412,7 +415,8 @@ func claudeThinkingPrompt(req *ClaudeRequest, enabled bool) string {
 	}
 	defaultBudget := cfg.DefaultBudgetTokens
 	budgetCap := cfg.BudgetCapTokens
-	if req.RequireToolUse {
+	explicitBudget := thinking != nil && strings.EqualFold(strings.TrimSpace(thinking.Type), "enabled") && thinking.BudgetTokens > 0
+	if req.RequireToolUse && !explicitBudget {
 		defaultBudget = minimumThinkingBudgetTokens
 		if budgetCap == 0 || budgetCap > minimumThinkingBudgetTokens {
 			budgetCap = minimumThinkingBudgetTokens
@@ -423,6 +427,7 @@ func claudeThinkingPrompt(req *ClaudeRequest, enabled bool) string {
 
 func buildThinkingPrompt(thinking *ClaudeThinkingConfig, outputConfig *ClaudeOutputConfig, maxTokens, defaultBudget, budgetCap int) string {
 	requestedBudget := 0
+	clientBudget := false
 	if thinking != nil {
 		switch strings.ToLower(strings.TrimSpace(thinking.Type)) {
 		case "disabled":
@@ -459,6 +464,7 @@ func buildThinkingPrompt(thinking *ClaudeThinkingConfig, outputConfig *ClaudeOut
 	}
 	if thinking != nil && strings.EqualFold(strings.TrimSpace(thinking.Type), "enabled") && thinking.BudgetTokens > 0 {
 		budget = thinking.BudgetTokens
+		clientBudget = true
 	}
 	if requestedBudget > 0 {
 		budget = requestedBudget
@@ -466,10 +472,10 @@ func buildThinkingPrompt(thinking *ClaudeThinkingConfig, outputConfig *ClaudeOut
 	if budgetCap < 0 {
 		budgetCap = defaultThinkingBudgetCap
 	}
-	if budgetCap > 0 && budget > budgetCap {
+	if !clientBudget && budgetCap > 0 && budget > budgetCap {
 		budget = budgetCap
 	}
-	if maxTokens > 0 {
+	if !clientBudget && maxTokens > 0 {
 		reserve := max(256, min(4096, maxTokens/4))
 		if maxTokens >= 2048 {
 			reserve = max(1024, reserve)
@@ -1213,14 +1219,18 @@ func KiroToClaudeResponse(content, thinkingContent string, includeEmptyThinkingB
 // ==================== OpenAI API 类型 ====================
 
 type OpenAIRequest struct {
-	Model       string          `json:"model"`
-	Messages    []OpenAIMessage `json:"messages"`
-	MaxTokens   int             `json:"max_tokens,omitempty"`
-	Temperature *float64        `json:"temperature,omitempty"`
-	TopP        *float64        `json:"top_p,omitempty"`
-	Stream      bool            `json:"stream,omitempty"`
-	Tools       []OpenAITool    `json:"tools,omitempty"`
-	ToolChoice  json.RawMessage `json:"tool_choice,omitempty"`
+	Model               string          `json:"model"`
+	Messages            []OpenAIMessage `json:"messages"`
+	MaxTokens           int             `json:"max_tokens,omitempty"`
+	MaxCompletionTokens int             `json:"max_completion_tokens,omitempty"`
+	MaxOutputTokens     int             `json:"max_output_tokens,omitempty"`
+	ContextWindow       int             `json:"context_window,omitempty"`
+	MaxInputTokens      int             `json:"max_input_tokens,omitempty"`
+	Temperature         *float64        `json:"temperature,omitempty"`
+	TopP                *float64        `json:"top_p,omitempty"`
+	Stream              bool            `json:"stream,omitempty"`
+	Tools               []OpenAITool    `json:"tools,omitempty"`
+	ToolChoice          json.RawMessage `json:"tool_choice,omitempty"`
 }
 
 type OpenAIMessage struct {

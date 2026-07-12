@@ -20,7 +20,7 @@ Kiro-Go Plus preserves Kiro-Go's API and deployment compatibility while adding p
 - Multi-account scheduling: weighted, priority, and balanced modes; per-account concurrency, sticky routing, and failover
 - Refresh coordination: deduplication, bounded queues, timeouts, jitter, and adaptive batches for tens or hundreds of accounts
 - Failure protection: first-output timeout, actionable-output and required-tool validation, buffered tool streams, stream truncation checks, endpoint circuits, cooldowns, and bounded retries
-- Thinking controls: bounded enabled/adaptive mapping, configurable default/capped budgets, and reserved output headroom for final answers and tool calls
+- Token controls: bounded enabled/adaptive thinking, configurable default thinking/output/context budgets, and client-value precedence
 - Streaming validation: AWS EventStream length and CRC validation, idle timeout, and truncated-response detection
 - Authentication: Builder ID, IAM Identity Center, Kiro hosted SSO, Microsoft 365 / Entra ID, SSO Token, API key, and JSON import
 - Prompt Cache accounting: configurable creation/read ranges, 5m/1h TTLs, sharded LRU, API-key isolation, and statistics
@@ -29,6 +29,8 @@ Kiro-Go Plus preserves Kiro-Go's API and deployment compatibility while adding p
 - Networking: global and per-account HTTP / SOCKS5 proxies
 
 Prompt Cache simulates and reports Anthropic cache usage. It does not cache model response bodies.
+
+Token-budget precedence is: explicit request values, per-model registry values, global Web defaults, then automatic model detection. Supported request overrides include `max_tokens`, `max_completion_tokens`, `max_output_tokens`, `context_window`, and `max_input_tokens` where applicable.
 
 ## Web Administration
 
@@ -40,7 +42,7 @@ Open `/admin` to manage:
 - Token/model refresh intervals, concurrency, and batch sizes
 - Prompt Cache creation/read ranges, TTL, capacity, and isolation
 - Web Search, token counting, Responses storage, diagnostics, and alerts
-- Claude Agent tool enforcement, thinking budgets, response formats, and buffered validation
+- Claude Agent tool enforcement, thinking/output/context token defaults, response formats, and buffered validation
 - API keys, quotas, admin password, listener settings, and client fingerprints
 
 Settings apply immediately unless the panel explicitly reports that a process restart is required.

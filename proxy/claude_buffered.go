@@ -108,7 +108,7 @@ func (h *Handler) handleClaudeBufferedStream(w http.ResponseWriter, payload *Kir
 				credits = c
 			},
 			OnContextUsage: func(pct float64) {
-				realInputTokens = int(pct * float64(getContextWindowSize(model)) / 100.0)
+				realInputTokens = int(pct * float64(getPayloadContextWindowSize(payload, model)) / 100.0)
 			},
 		}
 

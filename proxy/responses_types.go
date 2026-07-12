@@ -13,6 +13,8 @@ type ResponsesRequest struct {
 	Store              *bool             `json:"store,omitempty"`
 	Temperature        *float64          `json:"temperature,omitempty"`
 	MaxOutputTokens    *int              `json:"max_output_tokens,omitempty"`
+	ContextWindow      *int              `json:"context_window,omitempty"`
+	MaxInputTokens     *int              `json:"max_input_tokens,omitempty"`
 	Metadata           map[string]string `json:"metadata,omitempty"`
 }
 

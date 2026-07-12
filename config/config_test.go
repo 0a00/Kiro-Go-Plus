@@ -30,18 +30,18 @@ func TestThinkingConfigDefaultsAndPersistence(t *testing.T) {
 		t.Fatalf("init config: %v", err)
 	}
 	defaults := GetThinkingConfig()
-	if defaults.DefaultBudgetTokens != 4000 || defaults.BudgetCapTokens != 10000 || !defaults.BufferToolStreams || !defaults.EnforceAgentToolUse {
+	if defaults.DefaultBudgetTokens != 4000 || defaults.BudgetCapTokens != 10000 || defaults.DefaultMaxOutputTokens != 0 || defaults.DefaultContextWindowTokens != 0 || !defaults.BufferToolStreams || !defaults.EnforceAgentToolUse {
 		t.Fatalf("unexpected defaults: %+v", defaults)
 	}
 
-	if err := UpdateThinkingConfig("-reason", "reasoning_content", "thinking", 5000, 0, false, false); err != nil {
+	if err := UpdateThinkingConfig("-reason", "reasoning_content", "thinking", 5000, 0, 64000, 1000000, false, false); err != nil {
 		t.Fatalf("update thinking config: %v", err)
 	}
 	if err := Init(path); err != nil {
 		t.Fatalf("reload config: %v", err)
 	}
 	got := GetThinkingConfig()
-	if got.Suffix != "-reason" || got.DefaultBudgetTokens != 5000 || got.BudgetCapTokens != 0 || got.BufferToolStreams || got.EnforceAgentToolUse {
+	if got.Suffix != "-reason" || got.DefaultBudgetTokens != 5000 || got.BudgetCapTokens != 0 || got.DefaultMaxOutputTokens != 64000 || got.DefaultContextWindowTokens != 1000000 || got.BufferToolStreams || got.EnforceAgentToolUse {
 		t.Fatalf("unexpected persisted thinking config: %+v", got)
 	}
 }

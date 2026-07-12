@@ -1,5 +1,5 @@
 {
-  "version": "1.2.5",
-  "changelog": "Require real tool calls for detected Claude Code workspace actions, reject code-only or unfinished thinking responses, cap required-action thinking, recover polluted conversation history, and expose requested-tool plus transport-cause diagnostics.\n检测到 Claude Code 文件、代码或命令任务时强制真实工具调用，拒绝仅输出代码或未闭合 thinking 的伪成功响应，限制动作任务思考预算，自动清理被污染的会话历史，并补充请求工具与底层传输原因诊断。",
+  "version": "1.2.6",
+  "changelog": "Add Web-configurable default max-output and context-window token budgets across Claude, OpenAI Chat, and Responses APIs. Explicit client values take precedence, per-model limits override global defaults, and explicit Claude thinking budgets are preserved.\n新增可在 Web 配置的默认最大输出与上下文 Token 预算，统一支持 Claude、OpenAI Chat 和 Responses API。客户端显式参数优先，模型专属限制优先于全局默认，并保留客户端明确传入的 Claude 思考预算。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }

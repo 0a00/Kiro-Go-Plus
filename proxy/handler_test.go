@@ -9,6 +9,7 @@ import (
 	accountpool "kiro-go/pool"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -25,6 +26,40 @@ func TestThinkingSourceReasoningFirst(t *testing.T) {
 	}
 	if allowTagSource(&source) {
 		t.Fatalf("expected tag source to be rejected after reasoning source selected")
+	}
+}
+
+func TestThinkingConfigAPIUpdatesTokenDefaults(t *testing.T) {
+	tempDir := t.TempDir()
+	if err := config.Init(filepath.Join(tempDir, "config.json")); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	t.Cleanup(func() { _ = config.Init(filepath.Join(tempDir, "reset.json")) })
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/admin/api/thinking", strings.NewReader(`{
+		"suffix":"-thinking",
+		"openaiFormat":"reasoning_content",
+		"claudeFormat":"thinking",
+		"defaultBudgetTokens":4000,
+		"budgetCapTokens":10000,
+		"defaultMaxOutputTokens":64000,
+		"defaultContextWindowTokens":1000000,
+		"bufferToolStreams":true,
+		"enforceAgentToolUse":true
+	}`))
+	(&Handler{}).apiUpdateThinkingConfig(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	got := config.GetThinkingConfig()
+	if got.DefaultMaxOutputTokens != 64000 || got.DefaultContextWindowTokens != 1000000 {
+		t.Fatalf("unexpected persisted token defaults: %+v", got)
+	}
+
+	invalid := httptest.NewRecorder()
+	(&Handler{}).apiUpdateThinkingConfig(invalid, httptest.NewRequest(http.MethodPost, "/admin/api/thinking", strings.NewReader(`{"defaultContextWindowTokens":512}`)))
+	if invalid.Code != http.StatusBadRequest {
+		t.Fatalf("expected invalid context window to return 400, got %d", invalid.Code)
 	}
 }
 
@@ -856,6 +891,9 @@ func TestMergeUniqueModelsPreservesUnionAcrossAccounts(t *testing.T) {
 }
 
 func TestBuildAnthropicModelsResponseGeneratesThinkingVariants(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
 	models := buildAnthropicModelsResponse([]ModelInfo{{
 		ModelId:    "claude-sonnet-4.5",
 		InputTypes: []string{"text", "image"},

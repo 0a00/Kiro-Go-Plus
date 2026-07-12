@@ -559,6 +559,50 @@ func TestResponsesNonStreamRoundTrip(t *testing.T) {
 	}
 }
 
+func TestResponsesTokenBudgetDefaultsAndClientOverrides(t *testing.T) {
+	h, cleanup := setupResponsesTestHandler(t)
+	defer cleanup()
+	if err := config.UpdateThinkingConfig("-thinking", "reasoning_content", "thinking", 4000, 10000, 64000, 500000, true, true); err != nil {
+		t.Fatalf("UpdateThinkingConfig: %v", err)
+	}
+
+	captured := make(chan *KiroPayload, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		payload := &KiroPayload{}
+		_ = json.NewDecoder(r.Body).Decode(payload)
+		captured <- payload
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "ok"}))
+		_, _ = w.Write(awsEventStreamFrame(t, "contextUsageEvent", map[string]interface{}{"contextUsagePercentage": 10.0}))
+	}))
+	defer server.Close()
+	defer swapKiroEndpointsForTest(t, server)()
+
+	run := func(body string) (*ResponsesObject, *KiroPayload) {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		h.handleOpenAIResponses(rec, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body)))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+		}
+		var response ResponsesObject
+		if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		return &response, <-captured
+	}
+
+	defaulted, defaultPayload := run(`{"model":"claude-sonnet-4.5","input":"default","store":false}`)
+	if defaultPayload.InferenceConfig == nil || defaultPayload.InferenceConfig.MaxTokens != 64000 || defaulted.Usage.InputTokens != 50000 {
+		t.Fatalf("defaults were not applied: inference=%+v usage=%+v", defaultPayload.InferenceConfig, defaulted.Usage)
+	}
+
+	explicit, explicitPayload := run(`{"model":"claude-sonnet-4.5","input":"explicit","max_output_tokens":12000,"context_window":300000,"store":false}`)
+	if explicitPayload.InferenceConfig == nil || explicitPayload.InferenceConfig.MaxTokens != 12000 || explicit.Usage.InputTokens != 30000 {
+		t.Fatalf("client overrides did not win: inference=%+v usage=%+v", explicitPayload.InferenceConfig, explicit.Usage)
+	}
+}
+
 func TestResponsesStreamSSE(t *testing.T) {
 	h, cleanup := setupResponsesTestHandler(t)
 	defer cleanup()

@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-func TestBuildThinkingPromptUsesClientBudgetAndCap(t *testing.T) {
+func TestBuildThinkingPromptUsesExplicitClientBudget(t *testing.T) {
 	prompt := buildThinkingPrompt(
 		&ClaudeThinkingConfig{Type: "enabled", BudgetTokens: 12000},
 		nil,
@@ -14,7 +14,7 @@ func TestBuildThinkingPromptUsesClientBudgetAndCap(t *testing.T) {
 		10000,
 	)
 	if !strings.Contains(prompt, "<thinking_mode>enabled</thinking_mode>") ||
-		!strings.Contains(prompt, "<max_thinking_length>10000</max_thinking_length>") {
+		!strings.Contains(prompt, "<max_thinking_length>12000</max_thinking_length>") {
 		t.Fatalf("unexpected enabled prompt: %q", prompt)
 	}
 }
@@ -53,16 +53,28 @@ func TestBuildThinkingPromptUsesSafeDefault(t *testing.T) {
 	}
 }
 
-func TestBuildThinkingPromptKeepsFinalResponseHeadroom(t *testing.T) {
+func TestBuildThinkingPromptKeepsHeadroomForProxyDefault(t *testing.T) {
 	prompt := buildThinkingPrompt(
-		&ClaudeThinkingConfig{Type: "enabled", BudgetTokens: 10000},
+		nil,
 		nil,
 		8000,
-		4000,
+		10000,
 		0,
 	)
 	if !strings.Contains(prompt, "<max_thinking_length>6000</max_thinking_length>") {
 		t.Fatalf("expected 25%% output headroom, got %q", prompt)
+	}
+}
+
+func TestClaudeThinkingPromptPreservesExplicitBudgetWhenToolIsRequired(t *testing.T) {
+	req := &ClaudeRequest{
+		MaxTokens:      32000,
+		Thinking:       &ClaudeThinkingConfig{Type: "enabled", BudgetTokens: 12000},
+		RequireToolUse: true,
+	}
+	prompt := claudeThinkingPrompt(req, true)
+	if !strings.Contains(prompt, "<max_thinking_length>12000</max_thinking_length>") {
+		t.Fatalf("explicit client budget was overridden: %q", prompt)
 	}
 }
 
