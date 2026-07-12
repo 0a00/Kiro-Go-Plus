@@ -111,6 +111,65 @@ func TestCallKiroAPIRejectsHTTP200EmptyResponse(t *testing.T) {
 	}
 }
 
+func TestCallKiroAPIRetriesToolStreamWithOnlyThinkingAndStructuralTail(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	_ = config.UpdatePreferredEndpoint("auto")
+	_ = config.UpdateEndpointFallback(true)
+
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempt := requests.Add(1)
+		w.WriteHeader(http.StatusOK)
+		if attempt == 1 {
+			_, _ = w.Write(awsEventStreamFrame(t, "reasoningContentEvent", map[string]interface{}{"text": "hidden first attempt"}))
+			_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "}"}))
+			_, _ = w.Write(awsEventStreamFrame(t, "meteringEvent", map[string]interface{}{"usage": 1.0}))
+			return
+		}
+		_, _ = w.Write(awsEventStreamFrame(t, "reasoningContentEvent", map[string]interface{}{"text": "second attempt"}))
+		_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "done"}))
+		_, _ = w.Write(awsEventStreamFrame(t, "meteringEvent", map[string]interface{}{"usage": 1.0}))
+	}))
+	defer server.Close()
+
+	oldEndpoints := kiroEndpoints
+	kiroEndpoints = []kiroEndpoint{
+		{Key: "runtime", URL: server.URL, Name: "Kiro Runtime"},
+		{Key: "kiro", URL: server.URL, Name: "Kiro IDE"},
+	}
+	t.Cleanup(func() { kiroEndpoints = oldEndpoints })
+
+	payload := &KiroPayload{}
+	payload.requireActionableOutput = true
+	var tool KiroToolWrapper
+	tool.ToolSpecification.Name = "write"
+	payload.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext = &UserInputMessageContext{
+		Tools: []KiroToolWrapper{tool},
+	}
+	var visible strings.Builder
+	var thinking strings.Builder
+	err := CallKiroAPI(&config.Account{ID: "a", AccessToken: "token"}, payload, &KiroStreamCallback{
+		OnText: func(text string, isThinking bool) {
+			if isThinking {
+				thinking.WriteString(text)
+				return
+			}
+			visible.WriteString(text)
+		},
+	})
+	if err != nil {
+		t.Fatalf("expected fallback response, got %v", err)
+	}
+	if got := requests.Load(); got != 2 {
+		t.Fatalf("expected two endpoint attempts, got %d", got)
+	}
+	if visible.String() != "done" || thinking.String() != "second attempt" {
+		t.Fatalf("invalid first attempt leaked: visible=%q thinking=%q", visible.String(), thinking.String())
+	}
+}
+
 func TestCallKiroAPIStopsWhenClientRequestIsCanceled(t *testing.T) {
 	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatalf("init config: %v", err)

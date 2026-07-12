@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
 	"kiro-go/config"
 	accountpool "kiro-go/pool"
@@ -23,6 +24,25 @@ func TestRequestLogKeepsNewestFirstWithLimit(t *testing.T) {
 	}
 	if got[0].Protocol != "three" || got[1].Protocol != "two" {
 		t.Fatalf("expected newest retained entries first, got %+v", got)
+	}
+}
+
+func TestRequestLogAttributesAPIKeyFromPayloadContext(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	entry, err := config.AddApiKey(config.ApiKeyEntry{Name: "agent-test", Key: "sk-agent-test", Enabled: true})
+	if err != nil {
+		t.Fatalf("add api key: %v", err)
+	}
+
+	h := &Handler{requestLog: newRequestLog(defaultRequestLogLimit)}
+	payload := &KiroPayload{requestContext: context.WithValue(context.Background(), apiKeyContextKey{}, entry.ID)}
+	h.recordRequestLogForPayload(payload, requestLogEntry{Protocol: "claude.messages.stream", Status: "success", StatusCode: 200})
+
+	got := h.requestLog.list(1)
+	if len(got) != 1 || got[0].APIKeyID != entry.ID || got[0].APIKeyName != entry.Name {
+		t.Fatalf("unexpected API key attribution: %+v", got)
 	}
 }
 

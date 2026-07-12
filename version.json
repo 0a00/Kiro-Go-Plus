@@ -1,5 +1,5 @@
 {
-  "version": "1.2.3",
-  "changelog": "Prevent image Base64 payloads from inflating Count Tokens and prompt-cache accounting. Image tokens now use dimensions and cache fingerprints use content digests.\n修复图片 Base64 导致 Count Tokens 与提示缓存统计异常膨胀的问题；图片按尺寸估算，缓存指纹改用内容摘要。",
+  "version": "1.2.4",
+  "changelog": "Improve Claude agent reliability: honor enabled/adaptive thinking settings, cap fake-reasoning budgets with final-response headroom, buffer tool streams, retry reasoning-only or malformed responses, and add API-key/output diagnostics to request logs.\n提升 Claude Agent 稳定性：正确映射 enabled/adaptive 思考配置，限制思考预算并保留最终响应空间，缓冲工具流，对仅思考或残缺响应自动重试，并在请求日志中增加 API Key 与输出诊断。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }

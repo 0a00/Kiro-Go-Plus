@@ -1783,7 +1783,10 @@ func (h *Handler) handleClaudeMessagesInternal(w http.ResponseWriter, r *http.Re
 	apiKeyID := apiKeyIDFromContext(r.Context())
 	namespaceConversationID(kiroPayload, requestConversationNamespace(r, apiKeyID))
 	routeKey := kiroPayload.ConversationState.ConversationID
-	if req.Stream && bufferedStream {
+	bufferToolStream := thinkingCfg.BufferToolStreams && len(req.Tools) > 0
+	useBufferedStream := req.Stream && (bufferedStream || bufferToolStream)
+	kiroPayload.requireActionableOutput = len(req.Tools) > 0 && (!req.Stream || useBufferedStream)
+	if useBufferedStream {
 		h.handleClaudeBufferedStream(w, kiroPayload, req.Model, thinking, thinkingResponseOpts, estimatedInputTokens, cacheProfile, apiKeyID, routeKey)
 	} else if req.Stream {
 		h.handleClaudeStream(w, kiroPayload, req.Model, thinking, thinkingResponseOpts, estimatedInputTokens, cacheProfile, apiKeyID, routeKey)
@@ -2253,6 +2256,12 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 			thinkingOutput = ""
 		}
 		outputTokens = estimateClaudeOutputTokens(outputContent, thinkingOutput, toolUses)
+		stopReason := "end_turn"
+		if truncated {
+			stopReason = "max_tokens"
+		} else if len(toolUses) > 0 {
+			stopReason = "tool_use"
+		}
 
 		h.recordSuccessForApiKey(payload.requestContext, apiKeyID, inputTokens, outputTokens, credits)
 		h.pool.RecordSuccess(account.ID)
@@ -2273,15 +2282,12 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 			OutputTokens:             outputTokens,
 			CacheReadInputTokens:     cacheUsage.CacheReadInputTokens,
 			CacheCreationInputTokens: cacheUsage.CacheCreationInputTokens,
+			VisibleOutputChars:       outputCharCount(outputContent),
+			ThinkingOutputChars:      outputCharCount(thinkingOutput),
+			ToolUseCount:             len(toolUses),
+			StopReason:               stopReason,
 			Credits:                  credits,
 		})
-
-		stopReason := "end_turn"
-		if truncated {
-			stopReason = "max_tokens"
-		} else if len(toolUses) > 0 {
-			stopReason = "tool_use"
-		}
 
 		ensureMessageStart()
 		h.sendSSE(w, flusher, "message_delta", map[string]interface{}{
@@ -2574,6 +2580,12 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 		}
 		cacheUsage, inputTokens = resolvePromptCacheUsage(cacheUsage, upstreamUsage, inputTokens, cacheProfile)
 		outputTokens = estimateClaudeOutputTokens(finalContent, rawThinkingContent, toolUses)
+		stopReason := "end_turn"
+		if truncated {
+			stopReason = "max_tokens"
+		} else if len(toolUses) > 0 {
+			stopReason = "tool_use"
+		}
 
 		h.recordSuccessForApiKey(payload.requestContext, apiKeyID, inputTokens, outputTokens, credits)
 		h.pool.RecordSuccess(account.ID)
@@ -2594,6 +2606,10 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 			OutputTokens:             outputTokens,
 			CacheReadInputTokens:     cacheUsage.CacheReadInputTokens,
 			CacheCreationInputTokens: cacheUsage.CacheCreationInputTokens,
+			VisibleOutputChars:       outputCharCount(finalContent),
+			ThinkingOutputChars:      outputCharCount(rawThinkingContent),
+			ToolUseCount:             len(toolUses),
+			StopReason:               stopReason,
 			Credits:                  credits,
 		})
 
@@ -6043,18 +6059,24 @@ func (h *Handler) serveStaticFile(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) apiGetThinkingConfig(w http.ResponseWriter, r *http.Request) {
 	cfg := config.GetThinkingConfig()
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"suffix":       cfg.Suffix,
-		"openaiFormat": cfg.OpenAIFormat,
-		"claudeFormat": cfg.ClaudeFormat,
+		"suffix":              cfg.Suffix,
+		"openaiFormat":        cfg.OpenAIFormat,
+		"claudeFormat":        cfg.ClaudeFormat,
+		"defaultBudgetTokens": cfg.DefaultBudgetTokens,
+		"budgetCapTokens":     cfg.BudgetCapTokens,
+		"bufferToolStreams":   cfg.BufferToolStreams,
 	})
 }
 
 // apiUpdateThinkingConfig 更新 thinking 配置
 func (h *Handler) apiUpdateThinkingConfig(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Suffix       string `json:"suffix"`
-		OpenAIFormat string `json:"openaiFormat"`
-		ClaudeFormat string `json:"claudeFormat"`
+		Suffix              string `json:"suffix"`
+		OpenAIFormat        string `json:"openaiFormat"`
+		ClaudeFormat        string `json:"claudeFormat"`
+		DefaultBudgetTokens *int   `json:"defaultBudgetTokens"`
+		BudgetCapTokens     *int   `json:"budgetCapTokens"`
+		BufferToolStreams   *bool  `json:"bufferToolStreams"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(400)
@@ -6075,7 +6097,36 @@ func (h *Handler) apiUpdateThinkingConfig(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	if err := config.UpdateThinkingConfig(req.Suffix, req.OpenAIFormat, req.ClaudeFormat); err != nil {
+	current := config.GetThinkingConfig()
+	defaultBudgetTokens := current.DefaultBudgetTokens
+	if req.DefaultBudgetTokens != nil {
+		defaultBudgetTokens = *req.DefaultBudgetTokens
+	}
+	budgetCapTokens := current.BudgetCapTokens
+	if req.BudgetCapTokens != nil {
+		budgetCapTokens = *req.BudgetCapTokens
+	}
+	bufferToolStreams := current.BufferToolStreams
+	if req.BufferToolStreams != nil {
+		bufferToolStreams = *req.BufferToolStreams
+	}
+	if defaultBudgetTokens < 1024 || defaultBudgetTokens > 200000 {
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(map[string]string{"error": "defaultBudgetTokens must be between 1024 and 200000"})
+		return
+	}
+	if budgetCapTokens < 0 || budgetCapTokens > 200000 || (budgetCapTokens > 0 && budgetCapTokens < 1024) {
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(map[string]string{"error": "budgetCapTokens must be 0 or between 1024 and 200000"})
+		return
+	}
+	if budgetCapTokens > 0 && defaultBudgetTokens > budgetCapTokens {
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(map[string]string{"error": "defaultBudgetTokens cannot exceed budgetCapTokens"})
+		return
+	}
+
+	if err := config.UpdateThinkingConfig(req.Suffix, req.OpenAIFormat, req.ClaudeFormat, defaultBudgetTokens, budgetCapTokens, bufferToolStreams); err != nil {
 		w.WriteHeader(500)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return

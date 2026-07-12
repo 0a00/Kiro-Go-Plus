@@ -143,6 +143,7 @@ func (h *Handler) handleClaudeBufferedStream(w http.ResponseWriter, payload *Kir
 		}
 		cacheUsage, inputTokens = resolvePromptCacheUsage(cacheUsage, upstreamUsage, inputTokens, cacheProfile)
 		outputTokens = estimateClaudeOutputTokens(finalContent, rawThinkingContent, toolUses)
+		visibleContent := finalContent
 
 		responseThinkingContent := rawThinkingContent
 		includeEmptyThinkingBlock := thinking && thinkingOpts.OmitDisplay && rawThinkingContent != ""
@@ -193,6 +194,10 @@ func (h *Handler) handleClaudeBufferedStream(w http.ResponseWriter, payload *Kir
 			OutputTokens:             outputTokens,
 			CacheReadInputTokens:     cacheUsage.CacheReadInputTokens,
 			CacheCreationInputTokens: cacheUsage.CacheCreationInputTokens,
+			VisibleOutputChars:       outputCharCount(visibleContent),
+			ThinkingOutputChars:      outputCharCount(rawThinkingContent),
+			ToolUseCount:             len(toolUses),
+			StopReason:               resp.StopReason,
 			Credits:                  credits,
 		})
 

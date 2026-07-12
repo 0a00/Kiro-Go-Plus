@@ -693,7 +693,7 @@
     const body = $('requestsTableBody');
     if (!body) return;
     if (!items.length) {
-	  body.innerHTML = '<tr><td colspan="11" class="request-empty">' + escapeHtml(t('requests.empty')) + '</td></tr>';
+	  body.innerHTML = '<tr><td colspan="13" class="request-empty">' + escapeHtml(t('requests.empty')) + '</td></tr>';
       return;
     }
     body.innerHTML = items.map(item => {
@@ -703,16 +703,24 @@
       const account = item.accountEmail || item.accountId || '-';
       const err = item.error ? item.error : '';
 	  const requestId = item.requestId || '-';
+      const apiKey = item.apiKeyName || (item.apiKeyId ? item.apiKeyId.slice(0, 8) : '-');
+      const outcomeParts = [];
+      if (item.stopReason) outcomeParts.push(item.stopReason);
+      if (item.visibleOutputChars || item.thinkingOutputChars) outcomeParts.push((item.visibleOutputChars || 0) + ' / ' + (item.thinkingOutputChars || 0));
+      if (item.toolUseCount) outcomeParts.push('tools ' + item.toolUseCount);
+      const outcome = outcomeParts.join(' · ') || '-';
       return '<tr>' +
         '<td>' + escapeHtml(formatTime(item.timestamp)) + '</td>' +
         '<td>' + escapeHtml(item.protocol || '-') + '</td>' +
 		'<td class="font-mono" title="' + escapeAttr(requestId) + '">' + escapeHtml(requestId === '-' ? '-' : requestId.slice(0, 12)) + '</td>' +
+        '<td title="' + escapeAttr(item.apiKeyId || '') + '">' + escapeHtml(apiKey) + '</td>' +
         '<td>' + escapeHtml(item.model || '-') + '</td>' +
         '<td>' + escapeHtml(maskEmail(account)) + '</td>' +
 		'<td>' + escapeHtml(item.endpoint || '-') + '</td>' +
         '<td><span class="badge ' + statusClass + '">' + escapeHtml(String(item.statusCode || '')) + '</span></td>' +
         '<td>' + escapeHtml(tokens) + '</td>' +
         '<td>' + escapeHtml(cache) + '</td>' +
+        '<td title="' + escapeAttr(outcome) + '">' + escapeHtml(outcome) + '</td>' +
         '<td>' + escapeHtml((item.durationMs || 0) + 'ms') + '</td>' +
         '<td class="request-error" title="' + escapeAttr(err) + '">' + escapeHtml(err) + '</td>' +
         '</tr>';
@@ -1903,13 +1911,25 @@
     $('thinkingSuffix').value = d.suffix || '-thinking';
     $('openaiThinkingFormat').value = d.openaiFormat || 'reasoning_content';
     $('claudeThinkingFormat').value = d.claudeFormat || 'thinking';
+    $('thinkingDefaultBudget').value = d.defaultBudgetTokens || 4000;
+    $('thinkingBudgetCap').value = d.budgetCapTokens == null ? 10000 : d.budgetCapTokens;
+    $('bufferToolStreams').checked = d.bufferToolStreams !== false;
   }
   async function saveThinkingConfig() {
+    const defaultBudgetTokens = Math.round(Number($('thinkingDefaultBudget').value) || 0);
+    const budgetCapTokens = Math.round(Number($('thinkingBudgetCap').value) || 0);
+    if (defaultBudgetTokens < 1024 || defaultBudgetTokens > 200000 || budgetCapTokens < 0 || budgetCapTokens > 200000 || (budgetCapTokens > 0 && (budgetCapTokens < 1024 || defaultBudgetTokens > budgetCapTokens))) {
+      toast(t('settings.thinkingBudgetInvalid'), 'warning');
+      return;
+    }
     const res = await api('/thinking', {
       method: 'POST', body: JSON.stringify({
         suffix: $('thinkingSuffix').value || '-thinking',
         openaiFormat: $('openaiThinkingFormat').value,
-        claudeFormat: $('claudeThinkingFormat').value
+        claudeFormat: $('claudeThinkingFormat').value,
+        defaultBudgetTokens,
+        budgetCapTokens,
+        bufferToolStreams: $('bufferToolStreams').checked
       })
     });
     const d = await res.json();

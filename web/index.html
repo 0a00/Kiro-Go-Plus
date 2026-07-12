@@ -243,12 +243,14 @@
                   <th data-i18n="requests.time"></th>
                   <th data-i18n="requests.protocol"></th>
 				  <th data-i18n="requests.requestId"></th>
+                  <th data-i18n="requests.apiKey"></th>
                   <th data-i18n="requests.model"></th>
                   <th data-i18n="requests.account"></th>
 				  <th data-i18n="requests.endpoint"></th>
                   <th data-i18n="requests.status"></th>
                   <th data-i18n="requests.tokens"></th>
                   <th data-i18n="requests.cache"></th>
+                  <th data-i18n="requests.outcome"></th>
                   <th data-i18n="requests.duration"></th>
                   <th data-i18n="requests.error"></th>
                 </tr>
@@ -739,6 +741,25 @@
               <option value="thinking" data-i18n="settings.formatThinkingClaude"></option>
               <option value="think" data-i18n="settings.formatThinkOpenAI"></option>
             </select>
+          </div>
+          <div class="form-grid-2">
+            <div class="form-group">
+              <label data-i18n="settings.thinkingDefaultBudget"></label>
+              <input type="number" id="thinkingDefaultBudget" min="1024" max="200000" step="256" />
+              <small data-i18n="settings.thinkingDefaultBudgetHint"></small>
+            </div>
+            <div class="form-group">
+              <label data-i18n="settings.thinkingBudgetCap"></label>
+              <input type="number" id="thinkingBudgetCap" min="0" max="200000" step="256" />
+              <small data-i18n="settings.thinkingBudgetCapHint"></small>
+            </div>
+          </div>
+          <div class="form-group">
+            <label class="flex items-center gap-2">
+              <span class="switch"><input type="checkbox" id="bufferToolStreams" /><span class="slider"></span></span>
+              <span data-i18n="settings.bufferToolStreams"></span>
+            </label>
+            <small data-i18n="settings.bufferToolStreamsHint"></small>
           </div>
           <button class="btn btn-primary" id="saveThinkingBtn" data-i18n="settings.saveThinking"></button>
         </div>

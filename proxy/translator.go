@@ -39,9 +39,16 @@ var modelAliases = []modelMapping{
 // (claude-sonnet-4-20250514) are not accidentally rewritten.
 var claudeVersionPattern = regexp.MustCompile(`claude-(opus|sonnet|haiku)-(\d+)-(\d{1,2})\b`)
 
-// Thinking 模式提示
+const (
+	defaultThinkingBudgetTokens = 4000
+	defaultThinkingBudgetCap    = 10000
+	minimumThinkingBudgetTokens = 1024
+)
+
+// ThinkingModePrompt is the default suffix-triggered thinking prompt. Requests
+// with an explicit Claude thinking configuration use a request-specific prompt.
 const ThinkingModePrompt = `<thinking_mode>enabled</thinking_mode>
-<max_thinking_length>200000</max_thinking_length>`
+<max_thinking_length>4000</max_thinking_length>`
 
 const minimalFallbackUserContent = "."
 const toolResultsContinuationPrefix = "Tool results:"
@@ -127,22 +134,28 @@ func MapModel(model string) string {
 // ==================== Claude API 类型 ====================
 
 type ClaudeRequest struct {
-	Model       string                `json:"model"`
-	Messages    []ClaudeMessage       `json:"messages"`
-	MaxTokens   int                   `json:"max_tokens"`
-	Temperature float64               `json:"temperature,omitempty"`
-	TopP        float64               `json:"top_p,omitempty"`
-	Stream      bool                  `json:"stream,omitempty"`
-	System      interface{}           `json:"system,omitempty"` // string or []SystemBlock
-	Thinking    *ClaudeThinkingConfig `json:"thinking,omitempty"`
-	Tools       []ClaudeTool          `json:"tools,omitempty"`
-	ToolChoice  interface{}           `json:"tool_choice,omitempty"`
+	Model        string                `json:"model"`
+	Messages     []ClaudeMessage       `json:"messages"`
+	MaxTokens    int                   `json:"max_tokens"`
+	Temperature  float64               `json:"temperature,omitempty"`
+	TopP         float64               `json:"top_p,omitempty"`
+	Stream       bool                  `json:"stream,omitempty"`
+	System       interface{}           `json:"system,omitempty"` // string or []SystemBlock
+	Thinking     *ClaudeThinkingConfig `json:"thinking,omitempty"`
+	OutputConfig *ClaudeOutputConfig   `json:"output_config,omitempty"`
+	Tools        []ClaudeTool          `json:"tools,omitempty"`
+	ToolChoice   interface{}           `json:"tool_choice,omitempty"`
 }
 
 type ClaudeThinkingConfig struct {
 	Type         string `json:"type,omitempty"`
 	BudgetTokens int    `json:"budget_tokens,omitempty"`
 	Display      string `json:"display,omitempty"`
+	Effort       string `json:"effort,omitempty"`
+}
+
+type ClaudeOutputConfig struct {
+	Effort string `json:"effort,omitempty"`
 }
 
 type ClaudeMessage struct {
@@ -211,7 +224,7 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 	toolNames := newToolNameRegistry(sanitizeToolName)
 
 	// 提取系统提示
-	systemPrompt := buildClaudeSystemPrompt(req.System, thinking)
+	systemPrompt := buildClaudeSystemPrompt(req.System, claudeThinkingPrompt(req, thinking))
 
 	// 构建历史消息
 	history := make([]KiroHistoryMessage, 0)
@@ -363,16 +376,83 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 	return payload
 }
 
-func buildClaudeSystemPrompt(system interface{}, thinking bool) string {
+func buildClaudeSystemPrompt(system interface{}, thinkingPrompt string) string {
 	systemPrompt := extractSystemPrompt(system)
 	systemPrompt = applyPromptFilters(systemPrompt)
-	if !thinking {
+	if thinkingPrompt == "" || hasThinkingModeTags(systemPrompt) {
 		return systemPrompt
 	}
 	if systemPrompt == "" {
-		return ThinkingModePrompt
+		return thinkingPrompt
 	}
-	return ThinkingModePrompt + "\n\n" + systemPrompt
+	return thinkingPrompt + "\n\n" + systemPrompt
+}
+
+func claudeThinkingPrompt(req *ClaudeRequest, enabled bool) string {
+	if !enabled || req == nil {
+		return ""
+	}
+	cfg := config.GetThinkingConfig()
+	thinking := req.Thinking
+	if thinking != nil && strings.EqualFold(strings.TrimSpace(thinking.Type), "disabled") {
+		// A model suffix explicitly enables proxy-side thinking even when the
+		// request's native thinking block is disabled.
+		thinking = nil
+	}
+	return buildThinkingPrompt(thinking, req.OutputConfig, req.MaxTokens, cfg.DefaultBudgetTokens, cfg.BudgetCapTokens)
+}
+
+func buildThinkingPrompt(thinking *ClaudeThinkingConfig, outputConfig *ClaudeOutputConfig, maxTokens, defaultBudget, budgetCap int) string {
+	if thinking != nil {
+		switch strings.ToLower(strings.TrimSpace(thinking.Type)) {
+		case "disabled":
+			return ""
+		case "adaptive":
+			effort := strings.ToLower(strings.TrimSpace(thinking.Effort))
+			if effort == "" && outputConfig != nil {
+				effort = strings.ToLower(strings.TrimSpace(outputConfig.Effort))
+			}
+			if effort != "low" && effort != "medium" && effort != "high" {
+				effort = "high"
+			}
+			return fmt.Sprintf("<thinking_mode>adaptive</thinking_mode>\n<thinking_effort>%s</thinking_effort>", effort)
+		}
+	}
+	if maxTokens > 0 && maxTokens <= minimumThinkingBudgetTokens {
+		return ""
+	}
+
+	budget := defaultBudget
+	if budget <= 0 {
+		budget = defaultThinkingBudgetTokens
+	}
+	if thinking != nil && strings.EqualFold(strings.TrimSpace(thinking.Type), "enabled") && thinking.BudgetTokens > 0 {
+		budget = thinking.BudgetTokens
+	}
+	if budgetCap < 0 {
+		budgetCap = defaultThinkingBudgetCap
+	}
+	if budgetCap > 0 && budget > budgetCap {
+		budget = budgetCap
+	}
+	if maxTokens > 0 {
+		reserve := max(256, min(4096, maxTokens/4))
+		if maxTokens >= 2048 {
+			reserve = max(1024, reserve)
+		}
+		maxBudget := maxTokens - reserve
+		if maxBudget > 0 && budget > maxBudget {
+			budget = maxBudget
+		}
+	}
+	if budget < minimumThinkingBudgetTokens {
+		budget = minimumThinkingBudgetTokens
+	}
+	return fmt.Sprintf("<thinking_mode>enabled</thinking_mode>\n<max_thinking_length>%d</max_thinking_length>", budget)
+}
+
+func hasThinkingModeTags(text string) bool {
+	return strings.Contains(text, "<thinking_mode>") || strings.Contains(text, "<max_thinking_length>") || strings.Contains(text, "<thinking_effort>")
 }
 
 // applyPromptFilters applies all enabled prompt filter rules to the system prompt.
@@ -550,14 +630,16 @@ func cloneClaudeRequestForThinking(req *ClaudeRequest, thinking bool) *ClaudeReq
 	}
 
 	cloned := *req
-	if thinking {
-		cloned.System = prependThinkingSystem(req.System)
+	if thinkingPrompt := claudeThinkingPrompt(req, thinking); thinkingPrompt != "" {
+		cloned.System = prependThinkingSystem(req.System, thinkingPrompt)
 	}
 	return &cloned
 }
 
-func prependThinkingSystem(system interface{}) interface{} {
-	thinkingText := ThinkingModePrompt
+func prependThinkingSystem(system interface{}, thinkingText string) interface{} {
+	if thinkingText == "" || hasThinkingModeTags(extractSystemPrompt(system)) {
+		return system
+	}
 	if hasClaudeSystemContent(system) {
 		thinkingText += "\n"
 	}
@@ -1212,7 +1294,11 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 
 	// 如果启用 thinking 模式，注入 thinking 提示
 	if thinking {
-		systemPrompt = ThinkingModePrompt + "\n\n" + systemPrompt
+		thinkingCfg := config.GetThinkingConfig()
+		thinkingPrompt := buildThinkingPrompt(nil, nil, req.MaxTokens, thinkingCfg.DefaultBudgetTokens, thinkingCfg.BudgetCapTokens)
+		if !hasThinkingModeTags(systemPrompt) {
+			systemPrompt = thinkingPrompt + "\n\n" + systemPrompt
+		}
 	}
 
 	// 构建历史消息

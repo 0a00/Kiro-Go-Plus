@@ -569,6 +569,16 @@ select.custom-select-native {
 .form-group-lg {
   margin-bottom: 1.75rem;
 }
+.form-grid-2 {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 1rem;
+}
+@media (max-width: 640px) {
+  .form-grid-2 {
+    grid-template-columns: 1fr;
+  }
+}
 
 /* Remember row */
 .remember-row {

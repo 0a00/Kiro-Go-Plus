@@ -205,12 +205,13 @@ type KiroPayload struct {
 	// Not serialized to the Kiro API request body.
 	ToolNameMap map[string]string `json:"-"`
 
-	requestContext       context.Context
-	attemptBudget        *upstreamAttemptBudget
-	tokenRefreshMu       sync.Mutex
-	tokenRefreshAttempts map[string]int
-	runtimeMu            sync.RWMutex
-	selectedEndpoint     string
+	requestContext          context.Context
+	attemptBudget           *upstreamAttemptBudget
+	requireActionableOutput bool
+	tokenRefreshMu          sync.Mutex
+	tokenRefreshAttempts    map[string]int
+	runtimeMu               sync.RWMutex
+	selectedEndpoint        string
 }
 
 func (p *KiroPayload) setSuccessfulEndpoint(endpoint string) {
@@ -579,7 +580,7 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 			if firstTokenTimer != nil {
 				firstTokenTimer.Stop()
 			}
-		})
+		}, payload != nil && payload.requireActionableOutput)
 		if firstTokenTimeout > 0 {
 			firstTokenTimer = time.AfterFunc(firstTokenTimeout, func() {
 				firstTokenTimedOut.Store(true)
@@ -661,28 +662,31 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 			}
 			if streamIdleTimedOut.Load() {
 				err = classifyTransportError(ep.Name, context.DeadlineExceeded)
-			} else if firstTokenTimedOut.Load() && !meaningfulGate.hasMeaningfulOutput() {
+			} else if firstTokenTimedOut.Load() && !meaningfulGate.hasActivity() {
 				err = classifyTransportError(ep.Name, context.DeadlineExceeded)
 			} else if _, ok := asUpstreamError(err); !ok {
 				err = classifyTransportError(ep.Name, err)
 			}
 			lastErr = err
-			if meaningfulGate.hasMeaningfulOutput() || !circuitEligibleFailure(err) {
+			if meaningfulGate.hasActionableOutput() || !circuitEligibleFailure(err) {
 				sharedUpstreamHealth.endpointSuccess(endpointCircuitKey, time.Since(attemptStartedAt))
 			} else {
 				lastCircuitError = err
 				sharedUpstreamHealth.endpointFailure(endpointCircuitKey, err, time.Since(attemptStartedAt))
 			}
-			if meaningfulGate.hasMeaningfulOutput() || !shouldRetryAcrossEndpoints(err) {
+			if meaningfulGate.hasActionableOutput() || !shouldRetryAcrossEndpoints(err) {
 				return err
 			}
 			continue
 		}
-		if !meaningfulGate.hasMeaningfulOutput() {
+		if !meaningfulGate.hasActionableOutput() {
 			retry := payload != nil && payload.attemptBudget.recordEmpty()
 			lastErr = newEmptyResponseError(ep.Name, retry)
 			lastCircuitError = lastErr
 			sharedUpstreamHealth.endpointFailure(endpointCircuitKey, lastErr, time.Since(attemptStartedAt))
+			if retry {
+				continue
+			}
 			return lastErr
 		}
 		sharedUpstreamHealth.endpointSuccess(endpointCircuitKey, time.Since(attemptStartedAt))

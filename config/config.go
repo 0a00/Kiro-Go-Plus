@@ -317,9 +317,12 @@ type Config struct {
 	Accounts      []Account     `json:"accounts"` // Registered Kiro accounts
 
 	// Thinking mode configuration for extended reasoning output
-	ThinkingSuffix       string `json:"thinkingSuffix,omitempty"`       // Model suffix to trigger thinking mode (default: "-thinking")
-	OpenAIThinkingFormat string `json:"openaiThinkingFormat,omitempty"` // OpenAI output format: "reasoning_content", "thinking", or "think"
-	ClaudeThinkingFormat string `json:"claudeThinkingFormat,omitempty"` // Claude output format: "reasoning_content", "thinking", or "think"
+	ThinkingSuffix              string `json:"thinkingSuffix,omitempty"`              // Model suffix to trigger thinking mode (default: "-thinking")
+	OpenAIThinkingFormat        string `json:"openaiThinkingFormat,omitempty"`        // OpenAI output format: "reasoning_content", "thinking", or "think"
+	ClaudeThinkingFormat        string `json:"claudeThinkingFormat,omitempty"`        // Claude output format: "reasoning_content", "thinking", or "think"
+	ThinkingDefaultBudgetTokens int    `json:"thinkingDefaultBudgetTokens,omitempty"` // Default fake-reasoning budget when the client does not provide one
+	ThinkingBudgetCapTokens     *int   `json:"thinkingBudgetCapTokens,omitempty"`     // Maximum accepted fake-reasoning budget; 0 disables the cap
+	BufferToolStreams           *bool  `json:"bufferToolStreams,omitempty"`           // Buffer tool-enabled Claude streams until an actionable response is complete
 
 	// Endpoint configuration: "auto", "kiro", "codewhisperer", or "amazonq"
 	PreferredEndpoint string `json:"preferredEndpoint,omitempty"`
@@ -439,7 +442,7 @@ type AccountInfo struct {
 }
 
 // Version current version
-const Version = "1.2.3"
+const Version = "1.2.4"
 
 var (
 	cfg           *Config
@@ -2482,15 +2485,29 @@ func GetPromptFilterRules() []PromptFilterRule {
 // ThinkingConfig holds settings for AI thinking/reasoning mode.
 // When enabled, models output their reasoning process alongside the response.
 type ThinkingConfig struct {
-	Suffix       string `json:"suffix"`       // Model name suffix that triggers thinking mode
-	OpenAIFormat string `json:"openaiFormat"` // Output format for OpenAI-compatible responses
-	ClaudeFormat string `json:"claudeFormat"` // Output format for Claude-compatible responses
+	Suffix              string `json:"suffix"`              // Model name suffix that triggers thinking mode
+	OpenAIFormat        string `json:"openaiFormat"`        // Output format for OpenAI-compatible responses
+	ClaudeFormat        string `json:"claudeFormat"`        // Output format for Claude-compatible responses
+	DefaultBudgetTokens int    `json:"defaultBudgetTokens"` // Default fake-reasoning budget
+	BudgetCapTokens     int    `json:"budgetCapTokens"`     // Maximum fake-reasoning budget; 0 disables the cap
+	BufferToolStreams   bool   `json:"bufferToolStreams"`   // Buffer tool-enabled Claude streams for reliable retries
 }
 
 // GetThinkingConfig 获取 thinking 配置
 func GetThinkingConfig() ThinkingConfig {
 	cfgLock.RLock()
 	defer cfgLock.RUnlock()
+
+	if cfg == nil {
+		return ThinkingConfig{
+			Suffix:              "-thinking",
+			OpenAIFormat:        "reasoning_content",
+			ClaudeFormat:        "thinking",
+			DefaultBudgetTokens: 4000,
+			BudgetCapTokens:     10000,
+			BufferToolStreams:   true,
+		}
+	}
 
 	suffix := cfg.ThinkingSuffix
 	if suffix == "" {
@@ -2504,21 +2521,41 @@ func GetThinkingConfig() ThinkingConfig {
 	if claudeFormat == "" {
 		claudeFormat = "thinking"
 	}
+	defaultBudgetTokens := cfg.ThinkingDefaultBudgetTokens
+	if defaultBudgetTokens <= 0 {
+		defaultBudgetTokens = 4000
+	}
+	budgetCapTokens := 10000
+	if cfg.ThinkingBudgetCapTokens != nil {
+		budgetCapTokens = max(0, *cfg.ThinkingBudgetCapTokens)
+	}
+	bufferToolStreams := true
+	if cfg.BufferToolStreams != nil {
+		bufferToolStreams = *cfg.BufferToolStreams
+	}
 
 	return ThinkingConfig{
-		Suffix:       suffix,
-		OpenAIFormat: openaiFormat,
-		ClaudeFormat: claudeFormat,
+		Suffix:              suffix,
+		OpenAIFormat:        openaiFormat,
+		ClaudeFormat:        claudeFormat,
+		DefaultBudgetTokens: defaultBudgetTokens,
+		BudgetCapTokens:     budgetCapTokens,
+		BufferToolStreams:   bufferToolStreams,
 	}
 }
 
 // UpdateThinkingConfig 更新 thinking 配置
-func UpdateThinkingConfig(suffix, openaiFormat, claudeFormat string) error {
+func UpdateThinkingConfig(suffix, openaiFormat, claudeFormat string, defaultBudgetTokens, budgetCapTokens int, bufferToolStreams bool) error {
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
 	cfg.ThinkingSuffix = suffix
 	cfg.OpenAIThinkingFormat = openaiFormat
 	cfg.ClaudeThinkingFormat = claudeFormat
+	cfg.ThinkingDefaultBudgetTokens = defaultBudgetTokens
+	budgetCap := max(0, budgetCapTokens)
+	cfg.ThinkingBudgetCapTokens = &budgetCap
+	bufferEnabled := bufferToolStreams
+	cfg.BufferToolStreams = &bufferEnabled
 	return Save()
 }
 

@@ -24,6 +24,28 @@ func TestVersionMetadataMatchesBinaryVersion(t *testing.T) {
 	}
 }
 
+func TestThinkingConfigDefaultsAndPersistence(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := Init(path); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	defaults := GetThinkingConfig()
+	if defaults.DefaultBudgetTokens != 4000 || defaults.BudgetCapTokens != 10000 || !defaults.BufferToolStreams {
+		t.Fatalf("unexpected defaults: %+v", defaults)
+	}
+
+	if err := UpdateThinkingConfig("-reason", "reasoning_content", "thinking", 5000, 0, false); err != nil {
+		t.Fatalf("update thinking config: %v", err)
+	}
+	if err := Init(path); err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	got := GetThinkingConfig()
+	if got.Suffix != "-reason" || got.DefaultBudgetTokens != 5000 || got.BudgetCapTokens != 0 || got.BufferToolStreams {
+		t.Fatalf("unexpected persisted thinking config: %+v", got)
+	}
+}
+
 func TestAdminPasswordIsHashedAtRest(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	if err := Init(path); err != nil {

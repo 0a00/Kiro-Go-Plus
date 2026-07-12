@@ -1,9 +1,11 @@
 package proxy
 
 import (
+	"kiro-go/config"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 )
 
 const defaultRequestLogLimit = 1000
@@ -12,6 +14,8 @@ type requestLogEntry struct {
 	ID                       uint64  `json:"id"`
 	Timestamp                int64   `json:"timestamp"`
 	RequestID                string  `json:"requestId,omitempty"`
+	APIKeyID                 string  `json:"apiKeyId,omitempty"`
+	APIKeyName               string  `json:"apiKeyName,omitempty"`
 	Protocol                 string  `json:"protocol"`
 	Model                    string  `json:"model"`
 	AccountID                string  `json:"accountId,omitempty"`
@@ -24,6 +28,10 @@ type requestLogEntry struct {
 	OutputTokens             int     `json:"outputTokens,omitempty"`
 	CacheReadInputTokens     int     `json:"cacheReadInputTokens,omitempty"`
 	CacheCreationInputTokens int     `json:"cacheCreationInputTokens,omitempty"`
+	VisibleOutputChars       int     `json:"visibleOutputChars,omitempty"`
+	ThinkingOutputChars      int     `json:"thinkingOutputChars,omitempty"`
+	ToolUseCount             int     `json:"toolUseCount,omitempty"`
+	StopReason               string  `json:"stopReason,omitempty"`
 	Credits                  float64 `json:"credits,omitempty"`
 	Error                    string  `json:"error,omitempty"`
 }
@@ -90,10 +98,18 @@ func (h *Handler) recordRequestLogForPayload(payload *KiroPayload, entry request
 	if payload != nil {
 		entry.RequestID = requestIDFromContext(payload.requestContext)
 		entry.Endpoint = payload.successfulEndpoint()
+		entry.APIKeyID = apiKeyIDFromContext(payload.requestContext)
+		if apiKey := config.GetApiKeyEntry(entry.APIKeyID); apiKey != nil {
+			entry.APIKeyName = apiKey.Name
+		}
 	}
 	h.recordRequestLog(entry)
 }
 
 func requestDurationMs(start time.Time) int64 {
 	return time.Since(start).Milliseconds()
+}
+
+func outputCharCount(text string) int {
+	return utf8.RuneCountInString(text)
 }
