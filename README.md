@@ -1,0 +1,228 @@
+# Kiro-Go Plus
+
+[![Test](https://github.com/0a00/Kiro-Go-Plus/actions/workflows/test.yml/badge.svg)](https://github.com/0a00/Kiro-Go-Plus/actions/workflows/test.yml)
+[![Go Version](https://img.shields.io/badge/Go-1.21%2B-00ADD8?logo=go)](https://go.dev/)
+[![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker)](https://docs.docker.com/compose/)
+[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+
+A production-oriented, multi-account Kiro API gateway with OpenAI, Anthropic, and Responses API compatibility. Account pools, cache behavior, refresh scheduling, proxies, monitoring, and security controls are managed from the Web admin panel.
+
+English | [中文](README_CN.md)
+
+> This is an unofficial community project. It is not affiliated with, authorized by, or endorsed by Amazon, AWS, or Kiro. Ensure that your use complies with applicable terms and laws.
+
+## Purpose
+
+Kiro-Go Plus preserves Kiro-Go's API and deployment compatibility while adding production reliability and operations features:
+
+- API compatibility: Anthropic `/v1/messages`, OpenAI `/v1/chat/completions`, OpenAI `/v1/responses`, and `/v1/models`
+- Upstream routing: Kiro Runtime as the primary path with legacy Kiro / CodeWhisperer / Amazon Q fallback
+- Multi-account scheduling: weighted, priority, and balanced modes; per-account concurrency, sticky routing, and failover
+- Refresh coordination: deduplication, bounded queues, timeouts, jitter, and adaptive batches for tens or hundreds of accounts
+- Failure protection: first-output timeout, empty-response detection, stream truncation checks, endpoint circuits, cooldowns, and bounded retries
+- Streaming validation: AWS EventStream length and CRC validation, idle timeout, and truncated-response detection
+- Authentication: Builder ID, IAM Identity Center, Kiro hosted SSO, Microsoft 365 / Entra ID, SSO Token, API key, and JSON import
+- Prompt Cache accounting: configurable creation/read ranges, 5m/1h TTLs, sharded LRU, API-key isolation, and statistics
+- Extensions: dynamic model discovery, Web Search, external token counting, and Responses history
+- Operations: request logs, diagnostic events, webhook alerts, `/health`, `/ready`, and persisted runtime state
+- Networking: global and per-account HTTP / SOCKS5 proxies
+
+Prompt Cache simulates and reports Anthropic cache usage. It does not cache model response bodies.
+
+## Web Administration
+
+Open `/admin` to manage:
+
+- Account import, enable/disable state, weights, priority, per-account concurrency, and proxies
+- Runtime/legacy endpoint preference and automatic fallback
+- Load balancing, retries, timeouts, circuits, and upstream protection
+- Token/model refresh intervals, concurrency, and batch sizes
+- Prompt Cache creation/read ranges, TTL, capacity, and isolation
+- Web Search, token counting, Responses storage, diagnostics, and alerts
+- API keys, quotas, admin password, listener settings, and client fingerprints
+
+Settings apply immediately unless the panel explicitly reports that a process restart is required.
+
+## Quick Start
+
+### 1. Clone and configure
+
+```bash
+git clone https://github.com/0a00/Kiro-Go-Plus.git
+cd Kiro-Go-Plus
+mkdir -p data
+cp .env.example .env
+```
+
+Generate a master key:
+
+```bash
+openssl rand -base64 32
+```
+
+Edit `.env` and set at least:
+
+```dotenv
+ADMIN_PASSWORD=
+KIRO_MASTER_KEY=
+KIRO_PORT=8080
+PUID=1000
+PGID=1000
+```
+
+`KIRO_MASTER_KEY` encrypts account credentials and optional Responses history. Keep it stable and back it up securely; losing it makes existing encrypted data unrecoverable.
+
+### 2. Start
+
+```bash
+docker compose config
+docker compose up -d --build
+docker compose ps
+```
+
+Admin panel: `http://127.0.0.1:8080/admin`
+
+Health checks:
+
+```bash
+curl http://127.0.0.1:8080/health
+curl http://127.0.0.1:8080/ready
+```
+
+### 3. Configure API authentication
+
+Compose binds the process to `0.0.0.0:8080` inside the container. Compatible API routes fail closed by default on a public bind. Create and enable an API key in the Web panel, then place the service behind a TLS reverse proxy.
+
+## API Examples
+
+Load the API key created in the admin panel into the current shell, and replace the model name with one available to your accounts:
+
+```bash
+export KIRO_API_KEY='set-locally-do-not-commit'
+```
+
+```bash
+curl http://127.0.0.1:8080/v1/messages \
+  -H 'Content-Type: application/json' \
+  -H 'anthropic-version: 2023-06-01' \
+  -H "x-api-key: ${KIRO_API_KEY}" \
+  -d '{"model":"claude-sonnet-4.5","max_tokens":1024,"messages":[{"role":"user","content":"Hello"}]}'
+```
+
+```bash
+curl http://127.0.0.1:8080/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer ${KIRO_API_KEY}" \
+  -d '{"model":"claude-sonnet-4.5","messages":[{"role":"user","content":"Hello"}]}'
+```
+
+## Microsoft 365 / Entra ID SSO
+
+Kiro hosted SSO uses the fixed callback `http://localhost:3128`. Compose publishes this port on the host loopback interface only.
+
+When the admin panel runs on a remote server, create a tunnel from your workstation first:
+
+```bash
+ssh -L 3128:127.0.0.1:3128 user@server
+```
+
+Then open the admin panel in the local browser and start sign-in. One instance can run only one hosted SSO login at a time. Kiro profiles are discovered after login; multiple profiles can be selected and switched from the Web panel.
+
+Configure additional discovery regions with:
+
+```dotenv
+KIRO_PROFILE_REGIONS=us-east-1,eu-central-1
+```
+
+## Updating an Existing Compose Deployment
+
+Run from the extracted new project directory:
+
+```bash
+./scripts/update-docker-compose.sh --target /path/to/old/project --yes
+```
+
+The updater:
+
+- Preserves `data/`, `data/config.json`, runtime state, and `.env*`
+- Creates a rollback copy under `.update-backups/`
+- Validates Compose, rebuilds, starts, and health-checks the service
+- Restores the previous version automatically if build or health checks fail
+
+Use `--keep-compose` for a customized Compose file or `--readiness-path /ready` to include account-pool readiness.
+
+## Running from Source
+
+```bash
+go test ./...
+go build -o kiro-go .
+./kiro-go
+```
+
+The display name is Kiro-Go Plus. The Go module, binary, Compose service, and data format retain the `kiro-go` identifiers for compatibility with existing deployments and update scripts.
+
+## Data and Security
+
+Never commit or publish:
+
+- `.env` or `.env.*`
+- `data/` or `data/config.json`
+- `kiro-accounts-*.json`, account exports, or credential exports
+- Private keys, databases, logs, or backup files
+
+These paths are excluded through `.gitignore` and `.dockerignore`. Before publishing, still review:
+
+```bash
+git status --ignored
+git diff --check
+```
+
+Production recommendations:
+
+- Use a random `ADMIN_PASSWORD` and a stable `KIRO_MASTER_KEY`
+- Enable API-key authentication; do not expose `ALLOW_UNAUTHENTICATED_API=true` publicly
+- Put the service behind HTTPS and restrict access to `/admin`
+- Use stable outbound networking per account; control whether a failed account proxy may fall back to direct access
+- Back up `data/` regularly and store the master key separately
+
+## Health Checks
+
+- `GET /health`: returns 200 while the process is alive; use for container liveness
+- `GET /ready`: returns 503 when available account count/ratio is below its configured threshold; use for load-balancer readiness
+
+Compose uses `/health`, so account exhaustion does not cause a restart loop. Reverse proxies and load balancers should use `/ready` when deciding whether to route new requests.
+
+## Environment Variables
+
+| Variable | Description | Default |
+|---|---|---|
+| `CONFIG_PATH` | Configuration file path | `data/config.json` |
+| `ADMIN_PASSWORD` | Web admin password; overrides the config file | - |
+| `LOG_LEVEL` | `debug`, `info`, `warn`, or `error` | `info` |
+| `KIRO_PORT` | Host port published by Compose | `8080` |
+| `KIRO_LISTEN_HOST` / `KIRO_LISTEN_PORT` | Process listener; Compose fixes the container side to `0.0.0.0:8080` | config value |
+| `PUID` / `PGID` | Non-root container UID/GID; match the owner of host `data/` | `1000` |
+| `KIRO_MASTER_KEY` | 32-byte Base64 or hex master key | - |
+| `KIRO_MASTER_KEY_FILE` | Read the master key from a secret file; overrides the environment value | - |
+| `ALLOW_INSECURE_PUBLIC_BIND` | Allow the default admin password on a public bind; emergency use only | `false` |
+| `ALLOW_UNAUTHENTICATED_API` | Explicitly allow anonymous compatible API calls on a public bind | `false` |
+| `KIRO_SSO_CALLBACK_BIND` | Hosted SSO callback listener | loopback only |
+| `KIRO_PROFILE_REGIONS` | Comma-separated Entra ID profile discovery regions | `us-east-1,eu-central-1` |
+
+## Upstream and Credits
+
+Kiro-Go Plus is based on [Quorinex/Kiro-Go](https://github.com/Quorinex/Kiro-Go) and adapts implementation ideas from:
+
+- [zsecducna/Kiro-Go](https://github.com/zsecducna/Kiro-Go)
+- [zsecducna/kiro-login-helper](https://github.com/zsecducna/kiro-login-helper)
+- [Zhang161215/kiro.rs](https://github.com/Zhang161215/kiro.rs)
+
+Thanks to the original authors and contributors. The upstream license and copyright notice remain in [LICENSE](LICENSE).
+
+## Disclaimer
+
+This project is intended for learning, research, and authorized integration. Do not use it to bypass access controls, quotas, billing, service restrictions, or other security mechanisms. Operators are responsible for account safety, data protection, compliance, and service availability.
+
+## License
+
+[MIT](LICENSE)

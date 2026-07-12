@@ -1,0 +1,122 @@
+name: Issue Template Validator
+
+on:
+  issues:
+    types: [opened, edited, reopened]
+
+permissions:
+  issues: write
+
+concurrency:
+  group: issue-validator-${{ github.event.issue.number }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    if: github.event.issue.pull_request == null
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate issue body
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issue = context.payload.issue;
+            const body = issue.body || '';
+            const title = issue.title || '';
+            const { owner, repo } = context.repo;
+            const issue_number = issue.number;
+            const marker = '<!-- issue-template-validator -->';
+
+            // Skip maintainers and collaborators.
+            const trusted = ['OWNER', 'MEMBER', 'COLLABORATOR'];
+            if (trusted.includes(issue.author_association)) {
+              core.info(`Skipping: author_association=${issue.author_association}`);
+              return;
+            }
+
+            // Detect template by title prefix.
+            const isBug = /^\s*\[Bug\]:/i.test(title);
+            const isFeature = /^\s*\[Feature\]:/i.test(title);
+            if (!isBug && !isFeature) {
+              core.info('Title prefix does not match a known template; skipping.');
+              return;
+            }
+
+            // Parse "### Heading\n\nbody" sections produced by Issue Forms.
+            const sections = {};
+            for (const part of body.split(/^###\s+/m).slice(1)) {
+              const nl = part.indexOf('\n');
+              if (nl === -1) continue;
+              sections[part.slice(0, nl).trim()] = part.slice(nl + 1).trim();
+            }
+            const findSection = (keys) => {
+              for (const [h, c] of Object.entries(sections)) {
+                if (keys.some(k => h.toLowerCase().includes(k.toLowerCase()))) {
+                  return { heading: h, content: c };
+                }
+              }
+              return null;
+            };
+            const isEmpty = (content) => {
+              if (!content) return true;
+              const stripped = content.replace(/```[\s\S]*?```/g, '').trim();
+              if (!stripped) return true;
+              if (/^_no response_$/i.test(stripped)) return true;
+              return false;
+            };
+
+            // Optional but commonly-needed fields. The form already enforces
+            // truly-required fields; this only nudges on the rest.
+            const watched = isBug
+              ? [
+                  { name: 'Steps to reproduce / 复现步骤',  keys: ['steps to reproduce', '复现步骤'] },
+                  { name: 'Relevant log output / 相关日志', keys: ['relevant log output', '相关日志'] },
+                  { name: 'Environment / 环境信息',         keys: ['environment', '环境信息'] },
+                ]
+              : [
+                  { name: "Describe alternatives you've considered / 已考虑的替代方案", keys: ['alternatives', '替代方案'] },
+                ];
+
+            const reasons = [];
+            for (const r of watched) {
+              const sec = findSection(r.keys);
+              if (!sec || isEmpty(sec.content)) {
+                reasons.push(`Empty field: ${r.name}. / 字段为空：${r.name}。`);
+              }
+            }
+
+            // Look up our previous validator comment, if any.
+            const { data: comments } = await github.rest.issues.listComments({ owner, repo, issue_number, per_page: 100 });
+            const priorComment = comments.find(c => (c.body || '').includes(marker));
+
+            if (reasons.length === 0) {
+              await github.rest.issues.removeLabel({ owner, repo, issue_number, name: 'incomplete' }).catch(() => {});
+              if (priorComment) {
+                const ok = [
+                  marker,
+                  'The required information has been provided. Thank you for the update.',
+                  '',
+                  '相关信息已补充完整，感谢您的更新。',
+                ].join('\n');
+                await github.rest.issues.updateComment({ owner, repo, comment_id: priorComment.id, body: ok });
+              }
+              return;
+            }
+
+            // Some optional fields are blank. Nudge but never close.
+            const list = reasons.map(r => `- ${r}`).join('\n');
+            const commentBody = [
+              marker,
+              'The following fields are optional, but completing them significantly improves the likelihood that this issue can be triaged and addressed. Issues lacking this information may remain unresolved.',
+              '',
+              '以下字段虽为可选项，但完整填写有助于维护者评估与处理。缺少相关信息的 issue 可能无法得到及时跟进。',
+              '',
+              list,
+            ].join('\n');
+
+            await github.rest.issues.addLabels({ owner, repo, issue_number, labels: ['incomplete'] }).catch(() => {});
+            if (priorComment) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: priorComment.id, body: commentBody });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body: commentBody });
+            }

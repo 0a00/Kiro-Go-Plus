@@ -1,0 +1,17 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Self-diagnosis / 自行排查
+    url: https://github.com/0a00/Kiro-Go-Plus#readme
+    about: |
+      Review the README, configuration, and logs first; if anything remains unclear, an AI coding assistant (Claude Code, Codex, etc.) can help analyze them.
+      请先查阅 README、确认配置并核对日志；如仍不明确，可借助 AI 编程助手（Claude Code、Codex 等）协助分析。
+  - name: Search existing issues / 检索已有 issue
+    url: https://github.com/0a00/Kiro-Go-Plus/issues?q=is%3Aissue
+    about: |
+      Search both open and closed issues to confirm this has not been reported.
+      检索全部 open 与 closed 的 issue，确认问题尚未被提交过。
+  - name: Community discussions / 社区与论坛
+    url: https://linux.do
+    about: |
+      Similar questions and workarounds may already have been discussed in the community.
+      类似问题与解决方案可能已在社区中有过讨论，建议先行检索。

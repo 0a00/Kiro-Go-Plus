@@ -1,0 +1,111 @@
+name: Bug Report / Bug 反馈
+description: File a report for an unexpected problem or behavior. / 反馈异常行为或 Bug。
+title: "[Bug]: "
+labels: ["bug"]
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for taking the time to file this report. If the cause is unclear, reviewing the logs and configuration with an AI coding assistant (Claude Code, Codex, etc.) is often an effective first step.
+
+        感谢您花时间提交本反馈。若问题原因不明，建议先借助 AI 编程助手（Claude Code、Codex 等）协助分析日志与配置，通常可快速定位问题。
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: Describe the bug / 问题描述
+      description: |
+        A clear and concise description of what the bug is.
+        请简明描述遇到的问题。
+      placeholder: |
+        Please also mention any information which could help others understand the problem:
+          - What deployment method are you using?
+          - What have you tried to diagnose or work around this issue?
+          - Is this a regression? If so, have you been able to bisect it to a specific commit?
+
+        请一并提供有助于他人理解问题的信息：
+          - 你使用的部署方式是？
+          - 已经做过哪些排查或临时绕过尝试？
+          - 是否为回归问题？若是，是否定位到具体 commit？
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: regression
+    attributes:
+      label: Regression / 回归问题
+      description: |
+        Check this box if this is a regression. If you bisected it to a specific commit, include the SHA in the description above.
+        若为回归问题请勾选。如已定位到具体 commit，请在上方描述中附 SHA。
+      options:
+        - label: This is a regression. / 这是一个回归问题。
+          required: false
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce / 复现步骤
+      description: |
+        Steps to reproduce the behavior.
+        复现该问题的步骤。
+      placeholder: |
+        1. Start the service with `docker-compose up -d` using the configuration below.
+        2. Add an account through the admin panel.
+        3. Send: curl -X POST ...
+        4. Got 500, expected 200.
+
+        1. 使用下方配置执行 `docker-compose up -d` 启动服务。
+        2. 通过管理后台添加账号。
+        3. 发送：curl -X POST ...
+        4. 返回 500，预期为 200。
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log output / 相关日志
+      description: |
+        Paste any relevant log output. It will be formatted as code automatically. Redact tokens, cookies, and personal information first.
+        粘贴相关日志，将自动格式化为代码块。提交前请去除 token、cookie 及个人信息。
+      render: shell
+
+  - type: dropdown
+    id: impact
+    attributes:
+      label: Impact / 影响程度
+      description: Impact of this bug. / 该 Bug 的影响程度。
+      multiple: false
+      options:
+        - Showstopper – Service unusable or data at risk. / 阻断 – 服务不可用或存在数据风险。
+        - Major – Severely degrades functionality; workaround difficult or unavailable. / 严重 – 功能严重受损，绕过困难或不可行。
+        - Functional Limitation – Some features broken, system still usable. / 功能受限 – 部分功能异常，系统仍可使用。
+        - Annoyance – Minor issue, no significant impact. / 轻微 – 轻度问题，无明显影响。
+        - Intermittent – Occurs occasionally, hard to reproduce. / 间歇 – 偶发，难以稳定复现。
+        - Not sure / 不确定
+      default: 3
+    validations:
+      required: true
+
+  - type: textarea
+    id: env
+    attributes:
+      label: Environment / 环境信息
+      description: Please complete the following information. / 请补全下列信息。
+      placeholder: |
+        - Version: v1.2.0 / ghcr.io/0a00/kiro-go-plus:latest / commit abc1234
+        - Deployment: Docker Compose / docker run / built from source
+        - OS: Ubuntu 22.04 / Windows 11 / macOS 14
+
+        - 版本：v1.2.0 / ghcr.io/0a00/kiro-go-plus:latest / commit abc1234
+        - 部署方式：Docker Compose / docker run / 源码编译
+        - 操作系统：Ubuntu 22.04 / Windows 11 / macOS 14
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional Context / 补充信息
+      description: |
+        Other context that could be relevant — screenshots, network or proxy config, related issues, recent changes, AI diagnosis notes, etc.
+        其他可能相关的信息——截图、网络或代理配置、相关 issue、近期变更、AI 排查记录等。

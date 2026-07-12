@@ -1,0 +1,42 @@
+# Build artifacts
+/kiro-go
+/kiro-go.exe
+*.exe
+*.test
+*.out
+
+# Runtime data
+/data/
+*.log
+.env
+.env.*
+!.env.example
+
+# Credentials and local exports
+/config.json
+/runtime_state.json
+kiro-accounts-*.json
+*account-export*.json
+*credentials-export*.json
+*.pem
+*.key
+*.p12
+*.pfx
+*.db
+*.sqlite
+*.sqlite3
+*.bak
+
+# Editor / OS
+.idea/
+.vscode/
+.claude/
+.DS_Store
+Thumbs.db
+
+# Zeabur local CLI context (contains personal project/service IDs)
+.zeabur/
+
+# Local backups / scratch
+backup*/
+PR-*.md

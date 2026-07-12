@@ -1,0 +1,5 @@
+{
+  "version": "1.2.0",
+  "changelog": "Kiro Runtime routing, bounded failover and refresh coordination, persistent cooldown state, dynamic models, prompt-cache ranges, readiness/webhook monitoring, batch refresh, per-account concurrency, and Docker update tooling.\n新增 Runtime 通道、有界故障切换与刷新协调、运行状态持久化、动态模型、缓存比例区间、就绪与告警、批量刷新、账号并发和 Docker 更新工具。",
+  "download": "https://github.com/0a00/Kiro-Go-Plus"
+}
