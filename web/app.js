@@ -707,8 +707,9 @@
       const outcomeParts = [];
       if (item.stopReason) outcomeParts.push(item.stopReason);
       if (item.visibleOutputChars || item.thinkingOutputChars) outcomeParts.push((item.visibleOutputChars || 0) + ' / ' + (item.thinkingOutputChars || 0));
-      if (item.toolUseCount) outcomeParts.push('tools ' + item.toolUseCount);
+      if (item.requestToolCount) outcomeParts.push('tools ' + (item.toolUseCount || 0) + ' / ' + item.requestToolCount + (item.toolUseRequired ? ' required' : ''));
       const outcome = outcomeParts.join(' · ') || '-';
+      const outcomeTitle = outcome + (Array.isArray(item.requestToolNames) && item.requestToolNames.length ? ' · ' + item.requestToolNames.join(', ') : '');
       return '<tr>' +
         '<td>' + escapeHtml(formatTime(item.timestamp)) + '</td>' +
         '<td>' + escapeHtml(item.protocol || '-') + '</td>' +
@@ -720,7 +721,7 @@
         '<td><span class="badge ' + statusClass + '">' + escapeHtml(String(item.statusCode || '')) + '</span></td>' +
         '<td>' + escapeHtml(tokens) + '</td>' +
         '<td>' + escapeHtml(cache) + '</td>' +
-        '<td title="' + escapeAttr(outcome) + '">' + escapeHtml(outcome) + '</td>' +
+        '<td title="' + escapeAttr(outcomeTitle) + '">' + escapeHtml(outcome) + '</td>' +
         '<td>' + escapeHtml((item.durationMs || 0) + 'ms') + '</td>' +
         '<td class="request-error" title="' + escapeAttr(err) + '">' + escapeHtml(err) + '</td>' +
         '</tr>';
@@ -1914,6 +1915,7 @@
     $('thinkingDefaultBudget').value = d.defaultBudgetTokens || 4000;
     $('thinkingBudgetCap').value = d.budgetCapTokens == null ? 10000 : d.budgetCapTokens;
     $('bufferToolStreams').checked = d.bufferToolStreams !== false;
+    $('enforceAgentToolUse').checked = d.enforceAgentToolUse !== false;
   }
   async function saveThinkingConfig() {
     const defaultBudgetTokens = Math.round(Number($('thinkingDefaultBudget').value) || 0);
@@ -1929,7 +1931,8 @@
         claudeFormat: $('claudeThinkingFormat').value,
         defaultBudgetTokens,
         budgetCapTokens,
-        bufferToolStreams: $('bufferToolStreams').checked
+        bufferToolStreams: $('bufferToolStreams').checked,
+        enforceAgentToolUse: $('enforceAgentToolUse').checked
       })
     });
     const d = await res.json();

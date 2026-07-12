@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"errors"
 	"kiro-go/config"
 	"regexp"
 	"strconv"
@@ -105,15 +106,11 @@ func (h *Handler) recordDiagnosticFailure(entry diagnosticLogEntry) {
 }
 
 func (h *Handler) recordDiagnosticFailureForPayload(protocol, model string, account *config.Account, statusCode int, err error, payload *KiroPayload) {
-	message := ""
-	if err != nil {
-		message = err.Error()
-	}
 	entry := diagnosticLogEntry{
 		Protocol:       protocol,
 		Model:          model,
 		StatusCode:     statusCode,
-		Error:          message,
+		Error:          diagnosticErrorMessage(err),
 		RequestSummary: summarizeKiroPayload(payload),
 	}
 	if payload != nil {
@@ -124,6 +121,22 @@ func (h *Handler) recordDiagnosticFailureForPayload(protocol, model string, acco
 		entry.AccountEmail = account.Email
 	}
 	h.recordDiagnosticFailure(entry)
+}
+
+func diagnosticErrorMessage(err error) string {
+	if err == nil {
+		return ""
+	}
+	message := err.Error()
+	cause := errors.Unwrap(err)
+	if cause == nil {
+		return message
+	}
+	causeMessage := strings.TrimSpace(cause.Error())
+	if causeMessage == "" || strings.Contains(message, causeMessage) {
+		return message
+	}
+	return message + ": " + causeMessage
 }
 
 func summarizeKiroPayload(payload *KiroPayload) string {

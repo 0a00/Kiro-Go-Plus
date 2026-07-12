@@ -7,6 +7,8 @@ import (
 	"unicode"
 )
 
+const maxActionableProbeBytes = 1 << 20
+
 type pendingStreamEventKind uint8
 
 const (
@@ -38,11 +40,12 @@ type pendingStreamEvent struct {
 // text or a complete tool call. This keeps hidden reasoning and malformed tails
 // such as a lone "}" from turning an unusable response into HTTP 200 success.
 type meaningfulStreamCallback struct {
-	target     *KiroStreamCallback
-	onActivity func()
-	strict     bool
-	activity   atomic.Bool
-	actionable atomic.Bool
+	target         *KiroStreamCallback
+	onActivity     func()
+	strict         bool
+	requireToolUse bool
+	activity       atomic.Bool
+	actionable     atomic.Bool
 
 	mu           sync.Mutex
 	committed    bool
@@ -50,11 +53,11 @@ type meaningfulStreamCallback struct {
 	pending      []pendingStreamEvent
 }
 
-func wrapMeaningfulStreamCallback(target *KiroStreamCallback, onActivity func(), strict bool) (*KiroStreamCallback, *meaningfulStreamCallback) {
+func wrapMeaningfulStreamCallback(target *KiroStreamCallback, onActivity func(), strict, requireToolUse bool) (*KiroStreamCallback, *meaningfulStreamCallback) {
 	if target == nil {
 		target = &KiroStreamCallback{}
 	}
-	gate := &meaningfulStreamCallback{target: target, onActivity: onActivity, strict: strict}
+	gate := &meaningfulStreamCallback{target: target, onActivity: onActivity, strict: strict, requireToolUse: requireToolUse}
 	wrapper := &KiroStreamCallback{
 		OnText: func(text string, isThinking bool) {
 			if strings.TrimSpace(text) == "" {
@@ -122,16 +125,17 @@ func (g *meaningfulStreamCallback) handleEvent(event pendingStreamEvent) {
 	g.appendPendingLocked(event)
 
 	commit := event.kind == pendingToolUse
-	if event.kind == pendingText && !event.isThinking {
-		if g.visibleProbe.Len() < 4096 {
-			remaining := 4096 - g.visibleProbe.Len()
+	if event.kind == pendingText && !event.isThinking && !g.requireToolUse {
+		if g.visibleProbe.Len() < maxActionableProbeBytes {
+			remaining := maxActionableProbeBytes - g.visibleProbe.Len()
 			if len(event.text) > remaining {
 				g.visibleProbe.WriteString(event.text[:remaining])
 			} else {
 				g.visibleProbe.WriteString(event.text)
 			}
 		}
-		commit = hasSubstantiveAgentText(g.visibleProbe.String())
+		visible, incompleteThinking := visibleTextOutsideThinking(g.visibleProbe.String())
+		commit = !incompleteThinking && hasSubstantiveAgentText(visible)
 	}
 	if !commit {
 		g.mu.Unlock()
@@ -236,4 +240,56 @@ func isActionableToolUse(toolUse KiroToolUse) bool {
 	}
 	_, malformed := toolUse.Input["_raw_arguments"]
 	return !malformed
+}
+
+func visibleTextOutsideThinking(text string) (string, bool) {
+	var visible strings.Builder
+	cursor := 0
+	for cursor < len(text) {
+		start, openTag, closeTag := nextThinkingTag(text, cursor)
+		if start < 0 {
+			remainder := text[cursor:]
+			partial := trailingThinkingTagPrefix(remainder)
+			if partial > 0 {
+				visible.WriteString(remainder[:len(remainder)-partial])
+				return visible.String(), true
+			}
+			visible.WriteString(remainder)
+			return visible.String(), false
+		}
+		visible.WriteString(text[cursor:start])
+		contentStart := start + len(openTag)
+		endOffset := strings.Index(text[contentStart:], closeTag)
+		if endOffset < 0 {
+			return visible.String(), true
+		}
+		cursor = contentStart + endOffset + len(closeTag)
+	}
+	return visible.String(), false
+}
+
+func nextThinkingTag(text string, offset int) (int, string, string) {
+	thinking := strings.Index(text[offset:], "<thinking>")
+	think := strings.Index(text[offset:], "<think>")
+	switch {
+	case thinking < 0 && think < 0:
+		return -1, "", ""
+	case thinking >= 0 && (think < 0 || thinking <= think):
+		return offset + thinking, "<thinking>", "</thinking>"
+	default:
+		return offset + think, "<think>", "</think>"
+	}
+}
+
+func trailingThinkingTagPrefix(text string) int {
+	maxLen := 0
+	for _, tag := range []string{"<thinking>", "<think>"} {
+		limit := min(len(text), len(tag)-1)
+		for size := 1; size <= limit; size++ {
+			if strings.HasSuffix(text, tag[:size]) && size > maxLen {
+				maxLen = size
+			}
+		}
+	}
+	return maxLen
 }

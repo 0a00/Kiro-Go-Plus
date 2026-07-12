@@ -286,6 +286,8 @@
   "settings.thinkingBudgetCapHint": "Caps client-requested thinking. Recommended: 10000; use 0 for unlimited.",
   "settings.bufferToolStreams": "Buffer Claude tool streams",
   "settings.bufferToolStreamsHint": "Commit responses only after actionable text or a complete tool call, avoiding false success from hidden reasoning or malformed JSON.",
+  "settings.enforceAgentToolUse": "Require tools for workspace actions",
+  "settings.enforceAgentToolUseHint": "For detected file creation, code edits, or command execution, require a real tool call instead of code-only output or a description of the next step.",
   "settings.thinkingBudgetInvalid": "Invalid thinking budget; the default cannot exceed a non-zero cap",
   "settings.noTag": "Direct output (no tag)",
   "settings.saveThinking": "Save Thinking Settings",

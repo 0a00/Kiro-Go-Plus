@@ -1758,6 +1758,10 @@ func (h *Handler) handleClaudeMessagesInternal(w http.ResponseWriter, r *http.Re
 
 	// 解析模型和 thinking 模式
 	thinkingCfg := config.GetThinkingConfig()
+	if err := prepareClaudeToolPolicy(&req, thinkingCfg.EnforceAgentToolUse); err != nil {
+		h.sendClaudeError(w, 400, "invalid_request_error", err.Error())
+		return
+	}
 	actualModel, thinking := resolveClaudeThinkingMode(req.Model, req.Thinking, thinkingCfg.Suffix)
 	req.Model = actualModel
 	effectiveReq := cloneClaudeRequestForThinking(&req, thinking)
@@ -1783,9 +1787,10 @@ func (h *Handler) handleClaudeMessagesInternal(w http.ResponseWriter, r *http.Re
 	apiKeyID := apiKeyIDFromContext(r.Context())
 	namespaceConversationID(kiroPayload, requestConversationNamespace(r, apiKeyID))
 	routeKey := kiroPayload.ConversationState.ConversationID
-	bufferToolStream := thinkingCfg.BufferToolStreams && len(req.Tools) > 0
+	bufferToolStream := len(req.Tools) > 0 && (thinkingCfg.BufferToolStreams || req.RequireToolUse)
 	useBufferedStream := req.Stream && (bufferedStream || bufferToolStream)
-	kiroPayload.requireActionableOutput = len(req.Tools) > 0 && (!req.Stream || useBufferedStream)
+	kiroPayload.requireActionableOutput = (len(req.Tools) > 0 || thinking) && (!req.Stream || useBufferedStream)
+	kiroPayload.requireToolUse = req.RequireToolUse
 	if useBufferedStream {
 		h.handleClaudeBufferedStream(w, kiroPayload, req.Model, thinking, thinkingResponseOpts, estimatedInputTokens, cacheProfile, apiKeyID, routeKey)
 	} else if req.Stream {
@@ -6065,6 +6070,7 @@ func (h *Handler) apiGetThinkingConfig(w http.ResponseWriter, r *http.Request) {
 		"defaultBudgetTokens": cfg.DefaultBudgetTokens,
 		"budgetCapTokens":     cfg.BudgetCapTokens,
 		"bufferToolStreams":   cfg.BufferToolStreams,
+		"enforceAgentToolUse": cfg.EnforceAgentToolUse,
 	})
 }
 
@@ -6077,6 +6083,7 @@ func (h *Handler) apiUpdateThinkingConfig(w http.ResponseWriter, r *http.Request
 		DefaultBudgetTokens *int   `json:"defaultBudgetTokens"`
 		BudgetCapTokens     *int   `json:"budgetCapTokens"`
 		BufferToolStreams   *bool  `json:"bufferToolStreams"`
+		EnforceAgentToolUse *bool  `json:"enforceAgentToolUse"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(400)
@@ -6110,6 +6117,10 @@ func (h *Handler) apiUpdateThinkingConfig(w http.ResponseWriter, r *http.Request
 	if req.BufferToolStreams != nil {
 		bufferToolStreams = *req.BufferToolStreams
 	}
+	enforceAgentToolUse := current.EnforceAgentToolUse
+	if req.EnforceAgentToolUse != nil {
+		enforceAgentToolUse = *req.EnforceAgentToolUse
+	}
 	if defaultBudgetTokens < 1024 || defaultBudgetTokens > 200000 {
 		w.WriteHeader(400)
 		json.NewEncoder(w).Encode(map[string]string{"error": "defaultBudgetTokens must be between 1024 and 200000"})
@@ -6126,7 +6137,7 @@ func (h *Handler) apiUpdateThinkingConfig(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	if err := config.UpdateThinkingConfig(req.Suffix, req.OpenAIFormat, req.ClaudeFormat, defaultBudgetTokens, budgetCapTokens, bufferToolStreams); err != nil {
+	if err := config.UpdateThinkingConfig(req.Suffix, req.OpenAIFormat, req.ClaudeFormat, defaultBudgetTokens, budgetCapTokens, bufferToolStreams, enforceAgentToolUse); err != nil {
 		w.WriteHeader(500)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return

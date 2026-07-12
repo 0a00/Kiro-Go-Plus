@@ -323,6 +323,7 @@ type Config struct {
 	ThinkingDefaultBudgetTokens int    `json:"thinkingDefaultBudgetTokens,omitempty"` // Default fake-reasoning budget when the client does not provide one
 	ThinkingBudgetCapTokens     *int   `json:"thinkingBudgetCapTokens,omitempty"`     // Maximum accepted fake-reasoning budget; 0 disables the cap
 	BufferToolStreams           *bool  `json:"bufferToolStreams,omitempty"`           // Buffer tool-enabled Claude streams until an actionable response is complete
+	EnforceAgentToolUse         *bool  `json:"enforceAgentToolUse,omitempty"`         // Require tools for detected workspace mutation/execution requests
 
 	// Endpoint configuration: "auto", "kiro", "codewhisperer", or "amazonq"
 	PreferredEndpoint string `json:"preferredEndpoint,omitempty"`
@@ -442,7 +443,7 @@ type AccountInfo struct {
 }
 
 // Version current version
-const Version = "1.2.4"
+const Version = "1.2.5"
 
 var (
 	cfg           *Config
@@ -2491,6 +2492,7 @@ type ThinkingConfig struct {
 	DefaultBudgetTokens int    `json:"defaultBudgetTokens"` // Default fake-reasoning budget
 	BudgetCapTokens     int    `json:"budgetCapTokens"`     // Maximum fake-reasoning budget; 0 disables the cap
 	BufferToolStreams   bool   `json:"bufferToolStreams"`   // Buffer tool-enabled Claude streams for reliable retries
+	EnforceAgentToolUse bool   `json:"enforceAgentToolUse"` // Require tools for workspace actions
 }
 
 // GetThinkingConfig 获取 thinking 配置
@@ -2506,6 +2508,7 @@ func GetThinkingConfig() ThinkingConfig {
 			DefaultBudgetTokens: 4000,
 			BudgetCapTokens:     10000,
 			BufferToolStreams:   true,
+			EnforceAgentToolUse: true,
 		}
 	}
 
@@ -2533,6 +2536,10 @@ func GetThinkingConfig() ThinkingConfig {
 	if cfg.BufferToolStreams != nil {
 		bufferToolStreams = *cfg.BufferToolStreams
 	}
+	enforceAgentToolUse := true
+	if cfg.EnforceAgentToolUse != nil {
+		enforceAgentToolUse = *cfg.EnforceAgentToolUse
+	}
 
 	return ThinkingConfig{
 		Suffix:              suffix,
@@ -2541,11 +2548,12 @@ func GetThinkingConfig() ThinkingConfig {
 		DefaultBudgetTokens: defaultBudgetTokens,
 		BudgetCapTokens:     budgetCapTokens,
 		BufferToolStreams:   bufferToolStreams,
+		EnforceAgentToolUse: enforceAgentToolUse,
 	}
 }
 
 // UpdateThinkingConfig 更新 thinking 配置
-func UpdateThinkingConfig(suffix, openaiFormat, claudeFormat string, defaultBudgetTokens, budgetCapTokens int, bufferToolStreams bool) error {
+func UpdateThinkingConfig(suffix, openaiFormat, claudeFormat string, defaultBudgetTokens, budgetCapTokens int, bufferToolStreams, enforceAgentToolUse bool) error {
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
 	cfg.ThinkingSuffix = suffix
@@ -2556,6 +2564,8 @@ func UpdateThinkingConfig(suffix, openaiFormat, claudeFormat string, defaultBudg
 	cfg.ThinkingBudgetCapTokens = &budgetCap
 	bufferEnabled := bufferToolStreams
 	cfg.BufferToolStreams = &bufferEnabled
+	enforceTools := enforceAgentToolUse
+	cfg.EnforceAgentToolUse = &enforceTools
 	return Save()
 }
 

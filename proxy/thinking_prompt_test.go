@@ -19,7 +19,7 @@ func TestBuildThinkingPromptUsesClientBudgetAndCap(t *testing.T) {
 	}
 }
 
-func TestBuildThinkingPromptPreservesAdaptiveMode(t *testing.T) {
+func TestBuildThinkingPromptBoundsAdaptiveMode(t *testing.T) {
 	prompt := buildThinkingPrompt(
 		&ClaudeThinkingConfig{Type: "adaptive"},
 		&ClaudeOutputConfig{Effort: "medium"},
@@ -27,9 +27,22 @@ func TestBuildThinkingPromptPreservesAdaptiveMode(t *testing.T) {
 		4000,
 		10000,
 	)
-	want := "<thinking_mode>adaptive</thinking_mode>\n<thinking_effort>medium</thinking_effort>"
+	want := "<thinking_mode>enabled</thinking_mode>\n<max_thinking_length>4000</max_thinking_length>"
 	if prompt != want {
-		t.Fatalf("unexpected adaptive prompt: got %q want %q", prompt, want)
+		t.Fatalf("unexpected bounded adaptive prompt: got %q want %q", prompt, want)
+	}
+}
+
+func TestBuildThinkingPromptDefaultsAdaptiveToMediumBudget(t *testing.T) {
+	prompt := buildThinkingPrompt(
+		&ClaudeThinkingConfig{Type: "adaptive"},
+		nil,
+		32000,
+		4000,
+		10000,
+	)
+	if !strings.Contains(prompt, "<max_thinking_length>4000</max_thinking_length>") {
+		t.Fatalf("unexpected adaptive default: %q", prompt)
 	}
 }
 
@@ -56,5 +69,17 @@ func TestBuildThinkingPromptKeepsFinalResponseHeadroom(t *testing.T) {
 func TestBuildThinkingPromptDisabled(t *testing.T) {
 	if prompt := buildThinkingPrompt(&ClaudeThinkingConfig{Type: "disabled"}, nil, 32000, 4000, 10000); prompt != "" {
 		t.Fatalf("disabled thinking produced a prompt: %q", prompt)
+	}
+}
+
+func TestClaudeThinkingPromptUsesMinimalBudgetWhenToolIsRequired(t *testing.T) {
+	req := &ClaudeRequest{
+		MaxTokens:      32000,
+		Thinking:       &ClaudeThinkingConfig{Type: "adaptive", Effort: "high"},
+		RequireToolUse: true,
+	}
+	prompt := claudeThinkingPrompt(req, true)
+	if !strings.Contains(prompt, "<max_thinking_length>1024</max_thinking_length>") {
+		t.Fatalf("unexpected required-tool thinking prompt: %q", prompt)
 	}
 }

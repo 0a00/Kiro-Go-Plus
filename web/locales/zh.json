@@ -286,6 +286,8 @@
   "settings.thinkingBudgetCapHint": "限制客户端请求的思考预算，推荐 10000；填 0 表示不限制。",
   "settings.bufferToolStreams": "缓冲带工具的 Claude 流",
   "settings.bufferToolStreamsHint": "完成有效正文或工具调用后再提交响应，避免隐藏思考或残缺 JSON 被误判成功。",
+  "settings.enforceAgentToolUse": "工作区操作强制调用工具",
+  "settings.enforceAgentToolUseHint": "检测到创建文件、修改代码、运行命令等任务时，必须真正调用工具，不接受只输出代码或只描述下一步。",
   "settings.thinkingBudgetInvalid": "思考预算范围无效，默认预算不得超过非零上限",
   "settings.noTag": "直接输出 (无标签)",
   "settings.saveThinking": "保存 Thinking 设置",

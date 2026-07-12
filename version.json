@@ -1,5 +1,5 @@
 {
-  "version": "1.2.4",
-  "changelog": "Improve Claude agent reliability: honor enabled/adaptive thinking settings, cap fake-reasoning budgets with final-response headroom, buffer tool streams, retry reasoning-only or malformed responses, and add API-key/output diagnostics to request logs.\n提升 Claude Agent 稳定性：正确映射 enabled/adaptive 思考配置，限制思考预算并保留最终响应空间，缓冲工具流，对仅思考或残缺响应自动重试，并在请求日志中增加 API Key 与输出诊断。",
+  "version": "1.2.5",
+  "changelog": "Require real tool calls for detected Claude Code workspace actions, reject code-only or unfinished thinking responses, cap required-action thinking, recover polluted conversation history, and expose requested-tool plus transport-cause diagnostics.\n检测到 Claude Code 文件、代码或命令任务时强制真实工具调用，拒绝仅输出代码或未闭合 thinking 的伪成功响应，限制动作任务思考预算，自动清理被污染的会话历史，并补充请求工具与底层传输原因诊断。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }

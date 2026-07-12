@@ -11,29 +11,32 @@ import (
 const defaultRequestLogLimit = 1000
 
 type requestLogEntry struct {
-	ID                       uint64  `json:"id"`
-	Timestamp                int64   `json:"timestamp"`
-	RequestID                string  `json:"requestId,omitempty"`
-	APIKeyID                 string  `json:"apiKeyId,omitempty"`
-	APIKeyName               string  `json:"apiKeyName,omitempty"`
-	Protocol                 string  `json:"protocol"`
-	Model                    string  `json:"model"`
-	AccountID                string  `json:"accountId,omitempty"`
-	AccountEmail             string  `json:"accountEmail,omitempty"`
-	Endpoint                 string  `json:"endpoint,omitempty"`
-	Status                   string  `json:"status"`
-	StatusCode               int     `json:"statusCode"`
-	DurationMs               int64   `json:"durationMs"`
-	InputTokens              int     `json:"inputTokens,omitempty"`
-	OutputTokens             int     `json:"outputTokens,omitempty"`
-	CacheReadInputTokens     int     `json:"cacheReadInputTokens,omitempty"`
-	CacheCreationInputTokens int     `json:"cacheCreationInputTokens,omitempty"`
-	VisibleOutputChars       int     `json:"visibleOutputChars,omitempty"`
-	ThinkingOutputChars      int     `json:"thinkingOutputChars,omitempty"`
-	ToolUseCount             int     `json:"toolUseCount,omitempty"`
-	StopReason               string  `json:"stopReason,omitempty"`
-	Credits                  float64 `json:"credits,omitempty"`
-	Error                    string  `json:"error,omitempty"`
+	ID                       uint64   `json:"id"`
+	Timestamp                int64    `json:"timestamp"`
+	RequestID                string   `json:"requestId,omitempty"`
+	APIKeyID                 string   `json:"apiKeyId,omitempty"`
+	APIKeyName               string   `json:"apiKeyName,omitempty"`
+	Protocol                 string   `json:"protocol"`
+	Model                    string   `json:"model"`
+	AccountID                string   `json:"accountId,omitempty"`
+	AccountEmail             string   `json:"accountEmail,omitempty"`
+	Endpoint                 string   `json:"endpoint,omitempty"`
+	Status                   string   `json:"status"`
+	StatusCode               int      `json:"statusCode"`
+	DurationMs               int64    `json:"durationMs"`
+	InputTokens              int      `json:"inputTokens,omitempty"`
+	OutputTokens             int      `json:"outputTokens,omitempty"`
+	CacheReadInputTokens     int      `json:"cacheReadInputTokens,omitempty"`
+	CacheCreationInputTokens int      `json:"cacheCreationInputTokens,omitempty"`
+	VisibleOutputChars       int      `json:"visibleOutputChars,omitempty"`
+	ThinkingOutputChars      int      `json:"thinkingOutputChars,omitempty"`
+	RequestToolCount         int      `json:"requestToolCount,omitempty"`
+	RequestToolNames         []string `json:"requestToolNames,omitempty"`
+	ToolUseRequired          bool     `json:"toolUseRequired,omitempty"`
+	ToolUseCount             int      `json:"toolUseCount,omitempty"`
+	StopReason               string   `json:"stopReason,omitempty"`
+	Credits                  float64  `json:"credits,omitempty"`
+	Error                    string   `json:"error,omitempty"`
 }
 
 type requestLog struct {
@@ -102,6 +105,19 @@ func (h *Handler) recordRequestLogForPayload(payload *KiroPayload, entry request
 		if apiKey := config.GetApiKeyEntry(entry.APIKeyID); apiKey != nil {
 			entry.APIKeyName = apiKey.Name
 		}
+		context := payload.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext
+		if context != nil && len(context.Tools) > 0 {
+			entry.RequestToolCount = len(context.Tools)
+			entry.RequestToolNames = make([]string, 0, len(context.Tools))
+			for _, tool := range context.Tools {
+				name := tool.ToolSpecification.Name
+				if original, ok := payload.ToolNameMap[name]; ok {
+					name = original
+				}
+				entry.RequestToolNames = append(entry.RequestToolNames, name)
+			}
+		}
+		entry.ToolUseRequired = payload.requireToolUse
 	}
 	h.recordRequestLog(entry)
 }

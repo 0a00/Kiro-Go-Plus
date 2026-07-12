@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 )
@@ -145,6 +146,9 @@ type ClaudeRequest struct {
 	OutputConfig *ClaudeOutputConfig   `json:"output_config,omitempty"`
 	Tools        []ClaudeTool          `json:"tools,omitempty"`
 	ToolChoice   interface{}           `json:"tool_choice,omitempty"`
+
+	RequireToolUse   bool   `json:"-"`
+	RequiredToolName string `json:"-"`
 }
 
 type ClaudeThinkingConfig struct {
@@ -225,6 +229,12 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 
 	// 提取系统提示
 	systemPrompt := buildClaudeSystemPrompt(req.System, claudeThinkingPrompt(req, thinking))
+	if len(req.Tools) > 0 && !strings.Contains(systemPrompt, agentToolPolicyMarker) {
+		if systemPrompt != "" {
+			systemPrompt += "\n\n"
+		}
+		systemPrompt += buildClaudeAgentToolPolicy(req)
+	}
 
 	// 构建历史消息
 	history := make([]KiroHistoryMessage, 0)
@@ -320,6 +330,7 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 	} else {
 		finalContent = minimalFallbackUserContent
 	}
+	finalContent = appendClaudeRequiredToolAction(finalContent, req)
 
 	// 转换工具
 	kiroTools := convertClaudeToolsWithRegistry(req.Tools, toolNames)
@@ -399,10 +410,19 @@ func claudeThinkingPrompt(req *ClaudeRequest, enabled bool) string {
 		// request's native thinking block is disabled.
 		thinking = nil
 	}
-	return buildThinkingPrompt(thinking, req.OutputConfig, req.MaxTokens, cfg.DefaultBudgetTokens, cfg.BudgetCapTokens)
+	defaultBudget := cfg.DefaultBudgetTokens
+	budgetCap := cfg.BudgetCapTokens
+	if req.RequireToolUse {
+		defaultBudget = minimumThinkingBudgetTokens
+		if budgetCap == 0 || budgetCap > minimumThinkingBudgetTokens {
+			budgetCap = minimumThinkingBudgetTokens
+		}
+	}
+	return buildThinkingPrompt(thinking, req.OutputConfig, req.MaxTokens, defaultBudget, budgetCap)
 }
 
 func buildThinkingPrompt(thinking *ClaudeThinkingConfig, outputConfig *ClaudeOutputConfig, maxTokens, defaultBudget, budgetCap int) string {
+	requestedBudget := 0
 	if thinking != nil {
 		switch strings.ToLower(strings.TrimSpace(thinking.Type)) {
 		case "disabled":
@@ -413,9 +433,20 @@ func buildThinkingPrompt(thinking *ClaudeThinkingConfig, outputConfig *ClaudeOut
 				effort = strings.ToLower(strings.TrimSpace(outputConfig.Effort))
 			}
 			if effort != "low" && effort != "medium" && effort != "high" {
-				effort = "high"
+				effort = "medium"
 			}
-			return fmt.Sprintf("<thinking_mode>adaptive</thinking_mode>\n<thinking_effort>%s</thinking_effort>", effort)
+			base := defaultBudget
+			if base <= 0 {
+				base = defaultThinkingBudgetTokens
+			}
+			switch effort {
+			case "low":
+				requestedBudget = max(minimumThinkingBudgetTokens, base/2)
+			case "medium":
+				requestedBudget = base
+			default:
+				requestedBudget = max(base, 8000)
+			}
 		}
 	}
 	if maxTokens > 0 && maxTokens <= minimumThinkingBudgetTokens {
@@ -428,6 +459,9 @@ func buildThinkingPrompt(thinking *ClaudeThinkingConfig, outputConfig *ClaudeOut
 	}
 	if thinking != nil && strings.EqualFold(strings.TrimSpace(thinking.Type), "enabled") && thinking.BudgetTokens > 0 {
 		budget = thinking.BudgetTokens
+	}
+	if requestedBudget > 0 {
+		budget = requestedBudget
 	}
 	if budgetCap < 0 {
 		budgetCap = defaultThinkingBudgetCap
@@ -889,21 +923,33 @@ func convertClaudeToolsWithRegistry(tools []ClaudeTool, registry *toolNameRegist
 
 	result := make([]KiroToolWrapper, 0, len(tools))
 	for _, tool := range tools {
-		desc := tool.Description
-		if len(desc) > maxToolDescLen {
-			desc = desc[:maxToolDescLen] + "..."
-		}
+		desc := enhanceClaudeToolDescription(tool.Name, tool.Description)
+		desc = truncateToolDescription(desc, maxToolDescLen)
 		sanitized := registry.upstreamName(tool.Name)
 		if sanitized == "" {
 			continue
 		}
 		w := KiroToolWrapper{}
 		w.ToolSpecification.Name = sanitized
-		w.ToolSpecification.Description = normalizeToolDesc(desc, sanitized)
+		w.ToolSpecification.Description = desc
 		w.ToolSpecification.InputSchema = InputSchema{JSON: ensureObjectSchema(tool.InputSchema)}
 		result = append(result, w)
 	}
 	return result
+}
+
+func truncateToolDescription(description string, maxBytes int) string {
+	if maxBytes <= 0 {
+		return ""
+	}
+	if len(description) <= maxBytes {
+		return description
+	}
+	cut := maxBytes
+	for cut > 0 && !utf8.ValidString(description[:cut]) {
+		cut--
+	}
+	return description[:cut] + "..."
 }
 
 // ensureObjectSchema 确保工具 schema 顶层是 object，并清理 Kiro 不接受的字段。
@@ -1731,7 +1777,8 @@ func sanitizeKiroHistory(history []KiroHistoryMessage, currentToolResultIDs map[
 			// replaying as assistant text, so we neither reinforce the pattern
 			// nor leave it for the model to imitate.
 			if msg.AssistantResponseMessage.Content != "" {
-				msg.AssistantResponseMessage.Content = stripPollutedToolCallText(msg.AssistantResponseMessage.Content)
+				content := stripPollutedToolCallText(msg.AssistantResponseMessage.Content)
+				msg.AssistantResponseMessage.Content = stripTextualThinkingBlocks(content)
 			}
 		}
 
@@ -1811,6 +1858,18 @@ func sanitizeKiroHistory(history []KiroHistoryMessage, currentToolResultIDs map[
 	// Dropping hollow assistant turns can leave history starting with an
 	// assistant message; re-trim so it begins with a user turn.
 	return trimLeadingAssistantHistory(cleaned)
+}
+
+// stripTextualThinkingBlocks removes proxy-style reasoning tags replayed as
+// ordinary assistant text. In particular, an interrupted response can leave an
+// unclosed <thinking> tail in client history; forwarding that tail upstream can
+// poison every later turn in the same conversation.
+func stripTextualThinkingBlocks(content string) string {
+	if !strings.Contains(content, "<think") {
+		return content
+	}
+	visible, _ := visibleTextOutsideThinking(content)
+	return strings.TrimSpace(visible)
 }
 
 // truncatePayloadToLimit drops the oldest conversation history turns until the

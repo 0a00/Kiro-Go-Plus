@@ -123,8 +123,7 @@ func TestCallKiroAPIRetriesToolStreamWithOnlyThinkingAndStructuralTail(t *testin
 		attempt := requests.Add(1)
 		w.WriteHeader(http.StatusOK)
 		if attempt == 1 {
-			_, _ = w.Write(awsEventStreamFrame(t, "reasoningContentEvent", map[string]interface{}{"text": "hidden first attempt"}))
-			_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "}"}))
+			_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "<thinking>hidden first attempt\n<html>unfinished"}))
 			_, _ = w.Write(awsEventStreamFrame(t, "meteringEvent", map[string]interface{}{"usage": 1.0}))
 			return
 		}
@@ -167,6 +166,59 @@ func TestCallKiroAPIRetriesToolStreamWithOnlyThinkingAndStructuralTail(t *testin
 	}
 	if visible.String() != "done" || thinking.String() != "second attempt" {
 		t.Fatalf("invalid first attempt leaked: visible=%q thinking=%q", visible.String(), thinking.String())
+	}
+}
+
+func TestCallKiroAPIRetriesCodeOnlyResponseWhenToolIsRequired(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	_ = config.UpdatePreferredEndpoint("auto")
+	_ = config.UpdateEndpointFallback(true)
+
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempt := requests.Add(1)
+		w.WriteHeader(http.StatusOK)
+		if attempt == 1 {
+			_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "```html\n<html>code only</html>\n```"}))
+			_, _ = w.Write(awsEventStreamFrame(t, "meteringEvent", map[string]interface{}{"usage": 1.0}))
+			return
+		}
+		_, _ = w.Write(awsEventStreamFrame(t, "toolUseEvent", map[string]interface{}{
+			"toolUseId": "toolu_write", "name": "Write", "input": `{"file_path":"index.html","content":"<html></html>"}`, "stop": true,
+		}))
+		_, _ = w.Write(awsEventStreamFrame(t, "meteringEvent", map[string]interface{}{"usage": 1.0}))
+	}))
+	defer server.Close()
+
+	oldEndpoints := kiroEndpoints
+	kiroEndpoints = []kiroEndpoint{
+		{Key: "runtime", URL: server.URL, Name: "Kiro Runtime"},
+		{Key: "kiro", URL: server.URL, Name: "Kiro IDE"},
+	}
+	t.Cleanup(func() { kiroEndpoints = oldEndpoints })
+
+	payload := &KiroPayload{requireActionableOutput: true, requireToolUse: true}
+	var tool KiroToolWrapper
+	tool.ToolSpecification.Name = "Write"
+	payload.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext = &UserInputMessageContext{
+		Tools: []KiroToolWrapper{tool},
+	}
+	var visible strings.Builder
+	var toolUses []KiroToolUse
+	err := CallKiroAPI(&config.Account{ID: "a", AccessToken: "token"}, payload, &KiroStreamCallback{
+		OnText:    func(text string, _ bool) { visible.WriteString(text) },
+		OnToolUse: func(toolUse KiroToolUse) { toolUses = append(toolUses, toolUse) },
+	})
+	if err != nil {
+		t.Fatalf("expected tool fallback response, got %v", err)
+	}
+	if got := requests.Load(); got != 2 {
+		t.Fatalf("expected two endpoint attempts, got %d", got)
+	}
+	if visible.Len() != 0 || len(toolUses) != 1 || toolUses[0].Name != "Write" {
+		t.Fatalf("unexpected required-tool result: visible=%q tools=%+v", visible.String(), toolUses)
 	}
 }
 

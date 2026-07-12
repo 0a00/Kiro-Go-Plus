@@ -208,6 +208,7 @@ type KiroPayload struct {
 	requestContext          context.Context
 	attemptBudget           *upstreamAttemptBudget
 	requireActionableOutput bool
+	requireToolUse          bool
 	tokenRefreshMu          sync.Mutex
 	tokenRefreshAttempts    map[string]int
 	runtimeMu               sync.RWMutex
@@ -580,7 +581,7 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 			if firstTokenTimer != nil {
 				firstTokenTimer.Stop()
 			}
-		}, payload != nil && payload.requireActionableOutput)
+		}, payload != nil && payload.requireActionableOutput, payload != nil && payload.requireToolUse)
 		if firstTokenTimeout > 0 {
 			firstTokenTimer = time.AfterFunc(firstTokenTimeout, func() {
 				firstTokenTimedOut.Store(true)

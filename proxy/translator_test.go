@@ -288,6 +288,46 @@ func TestClaudeToKiroDropsLeadingAssistantHistory(t *testing.T) {
 	}
 }
 
+func TestClaudeToKiroDropsUnclosedThinkingFromAssistantHistory(t *testing.T) {
+	req := &ClaudeRequest{
+		Model: "claude-sonnet-4.6",
+		Messages: []ClaudeMessage{
+			{Role: "user", Content: "create the page"},
+			{Role: "assistant", Content: "<thinking>planning\n<html>unfinished"},
+			{Role: "user", Content: "explain why it did not finish"},
+		},
+	}
+
+	payload := ClaudeToKiro(req, false)
+	history := payload.ConversationState.History
+	if len(history) != 1 || history[0].UserInputMessage == nil {
+		t.Fatalf("expected poisoned assistant turn to be removed, got %+v", history)
+	}
+	if strings.Contains(summarizeKiroPayload(payload), "planning") || strings.Contains(summarizeKiroPayload(payload), "unfinished") {
+		t.Fatalf("unclosed thinking leaked into payload history: %+v", history)
+	}
+}
+
+func TestClaudeToKiroKeepsVisibleTextOutsideThinkingHistory(t *testing.T) {
+	req := &ClaudeRequest{
+		Model: "claude-sonnet-4.6",
+		Messages: []ClaudeMessage{
+			{Role: "user", Content: "question"},
+			{Role: "assistant", Content: "<think>private plan</think>visible answer"},
+			{Role: "user", Content: "follow up"},
+		},
+	}
+
+	payload := ClaudeToKiro(req, false)
+	history := payload.ConversationState.History
+	if len(history) != 2 || history[1].AssistantResponseMessage == nil {
+		t.Fatalf("expected assistant history, got %+v", history)
+	}
+	if got := history[1].AssistantResponseMessage.Content; got != "visible answer" {
+		t.Fatalf("unexpected sanitized assistant content: %q", got)
+	}
+}
+
 func TestKiroToClaudeResponseCanEmitEmptyThinkingBlock(t *testing.T) {
 	resp := KiroToClaudeResponse("final answer", "", true, nil, 10, 20, "claude-sonnet-4.6")
 

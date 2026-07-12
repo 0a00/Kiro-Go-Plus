@@ -46,6 +46,28 @@ func TestRequestLogAttributesAPIKeyFromPayloadContext(t *testing.T) {
 	}
 }
 
+func TestRequestLogCapturesRequestedToolPolicy(t *testing.T) {
+	h := &Handler{requestLog: newRequestLog(defaultRequestLogLimit)}
+	payload := &KiroPayload{
+		requireToolUse: true,
+		ToolNameMap:    map[string]string{"writeH123": "mcp__workspace__Write"},
+	}
+	var tool KiroToolWrapper
+	tool.ToolSpecification.Name = "writeH123"
+	payload.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext = &UserInputMessageContext{
+		Tools: []KiroToolWrapper{tool},
+	}
+
+	h.recordRequestLogForPayload(payload, requestLogEntry{Protocol: "claude.messages", Status: "success", StatusCode: 200})
+	got := h.requestLog.list(1)
+	if len(got) != 1 || got[0].RequestToolCount != 1 || !got[0].ToolUseRequired {
+		t.Fatalf("unexpected tool request metadata: %+v", got)
+	}
+	if len(got[0].RequestToolNames) != 1 || got[0].RequestToolNames[0] != "mcp__workspace__Write" {
+		t.Fatalf("expected restored tool name, got %+v", got[0].RequestToolNames)
+	}
+}
+
 func TestAdminRequestsEndpointReturnsRequestLog(t *testing.T) {
 	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatalf("config.Init: %v", err)
