@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"reflect"
 	"testing"
 )
@@ -77,6 +78,30 @@ func TestStrictMeaningfulStreamCommitsCompleteToolUse(t *testing.T) {
 	}
 	if !gate.hasActionableOutput() {
 		t.Fatal("expected complete tool use to commit the stream")
+	}
+}
+
+func TestStrictMeaningfulStreamCommitsRecoveredToolUseWithoutStop(t *testing.T) {
+	var received []KiroToolUse
+	wrapper, gate := wrapMeaningfulStreamCallback(&KiroStreamCallback{
+		OnToolUse: func(tool KiroToolUse) {
+			received = append(received, tool)
+		},
+	}, nil, true, true)
+	stream := bytes.NewReader(awsEventStreamFrame(t, "toolUseEvent", map[string]interface{}{
+		"toolUseId": "toolu_write",
+		"name":      "Write",
+		"input":     `{"file_path":"index.html","content":"complete"}`,
+	}))
+
+	if err := parseEventStream(stream, wrapper); err != nil {
+		t.Fatalf("expected recovered tool use to succeed, got %v", err)
+	}
+	if !gate.hasActionableOutput() || len(received) != 1 {
+		t.Fatalf("recovered tool use was not committed: actionable=%v received=%#v", gate.hasActionableOutput(), received)
+	}
+	if received[0].Name != "Write" || received[0].Input["content"] != "complete" {
+		t.Fatalf("unexpected recovered tool use: %#v", received[0])
 	}
 }
 

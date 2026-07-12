@@ -725,6 +725,7 @@ func parseEventStream(body io.Reader, callback *KiroStreamCallback) error {
 	var lastReasoningContent string
 	var sawOutput bool
 	var sawCompletionSignal bool
+	var recoveredToolUse bool
 
 	for {
 		frame, err := readEventStreamFrame(body)
@@ -732,6 +733,11 @@ func parseEventStream(body io.Reader, callback *KiroStreamCallback) error {
 			break
 		}
 		if err != nil {
+			if recoverCompleteToolUseWithoutStop(currentToolUse, callback, err) {
+				currentToolUse = nil
+				recoveredToolUse = true
+				break
+			}
 			return err
 		}
 
@@ -822,13 +828,17 @@ func parseEventStream(body io.Reader, callback *KiroStreamCallback) error {
 	}
 
 	if currentToolUse != nil {
-		return &EventStreamError{
-			Kind:    EventStreamIncompleteToolUse,
-			Message: fmt.Sprintf("tool %q ended without a stop marker", currentToolUse.Name),
+		if !recoverCompleteToolUseWithoutStop(currentToolUse, callback, io.EOF) {
+			return &EventStreamError{
+				Kind:    EventStreamIncompleteToolUse,
+				Message: fmt.Sprintf("tool %q ended without a stop marker", currentToolUse.Name),
+			}
 		}
+		currentToolUse = nil
+		recoveredToolUse = true
 	}
 
-	if sawOutput && !sawCompletionSignal && callback.OnTruncated != nil {
+	if sawOutput && !sawCompletionSignal && !recoveredToolUse && callback.OnTruncated != nil {
 		callback.OnTruncated("stream ended without metering or context completion event")
 	}
 
@@ -1186,6 +1196,29 @@ func finishToolUse(state *toolUseState, callback *KiroStreamCallback) error {
 		})
 	}
 	return nil
+}
+
+func recoverCompleteToolUseWithoutStop(state *toolUseState, callback *KiroStreamCallback, streamErr error) bool {
+	if state == nil || strings.TrimSpace(state.Name) == "" {
+		return false
+	}
+	rawArguments := strings.TrimSpace(state.InputBuffer.String())
+	if rawArguments == "" {
+		return false
+	}
+	var input map[string]interface{}
+	if err := json.Unmarshal([]byte(rawArguments), &input); err != nil || input == nil {
+		return false
+	}
+	if err := finishToolUse(state, callback); err != nil {
+		return false
+	}
+	reason := "clean EOF"
+	if streamErr != nil && streamErr != io.EOF {
+		reason = streamErr.Error()
+	}
+	logger.Warnf("[KiroAPI] Recovered complete tool use %q without stop marker (%d argument bytes, %s)", state.Name, len(rawArguments), reason)
+	return true
 }
 
 func firstStringField(m map[string]interface{}, keys ...string) string {

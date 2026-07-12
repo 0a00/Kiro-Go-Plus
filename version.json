@@ -1,5 +1,5 @@
 {
-  "version": "1.2.7",
-  "changelog": "Allow max account attempts to be set to 0 for continuous, context-aware account polling. Unlimited mode resets exclusions between rounds, applies bounded backoff, honors shutdown and client cancellation, and removes the total upstream-attempt cap.\n账号最大尝试数现在可设为 0，以持续轮询可用账号。无限模式会按轮重置排除列表、执行有上限的退避等待、响应客户端取消与服务关闭，并取消上游总尝试次数限制。",
+  "version": "1.2.8",
+  "changelog": "Recover complete tool calls when an upstream AWS EventStream ends after valid JSON arguments but omits the final stop marker. Incomplete, empty, or malformed tool arguments remain rejected and retryable.\n当上游 AWS EventStream 已传完合法工具 JSON、但遗漏最终 stop 标记时，安全恢复该工具调用；不完整、空白或格式错误的参数仍会拒绝并进入重试。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }

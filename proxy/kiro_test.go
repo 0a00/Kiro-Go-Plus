@@ -47,11 +47,40 @@ func TestNormalizeChunkOverlapDelta(t *testing.T) {
 	}
 }
 
-func TestParseEventStreamRejectsPendingToolUseOnEOF(t *testing.T) {
+func TestParseEventStreamRecoversCompletePendingToolUseOnEOF(t *testing.T) {
 	stream := bytes.NewReader(awsEventStreamFrame(t, "toolUseEvent", map[string]interface{}{
 		"toolUseId": "toolu_1",
 		"name":      "mcpIdaProMcpStatus",
 		"input":     `{"server":"ida-pro-mcp"}`,
+	}))
+
+	var toolUses []KiroToolUse
+	truncated := false
+	err := parseEventStream(stream, &KiroStreamCallback{
+		OnToolUse: func(toolUse KiroToolUse) {
+			toolUses = append(toolUses, toolUse)
+		},
+		OnTruncated: func(string) { truncated = true },
+	})
+	if err != nil {
+		t.Fatalf("expected complete tool use to be recovered, got %v", err)
+	}
+	if len(toolUses) != 1 || toolUses[0].ToolUseID != "toolu_1" || toolUses[0].Name != "mcpIdaProMcpStatus" {
+		t.Fatalf("unexpected recovered tool uses: %#v", toolUses)
+	}
+	if got := toolUses[0].Input["server"]; got != "ida-pro-mcp" {
+		t.Fatalf("unexpected recovered tool input: %#v", toolUses[0].Input)
+	}
+	if truncated {
+		t.Fatal("a complete recovered tool call must not be marked as truncated")
+	}
+}
+
+func TestParseEventStreamRejectsIncompletePendingToolUseOnEOF(t *testing.T) {
+	stream := bytes.NewReader(awsEventStreamFrame(t, "toolUseEvent", map[string]interface{}{
+		"toolUseId": "toolu_1",
+		"name":      "write",
+		"input":     `{"file_path":"index.html","content":`,
 	}))
 
 	var toolUses []KiroToolUse
@@ -66,6 +95,56 @@ func TestParseEventStreamRejectsPendingToolUseOnEOF(t *testing.T) {
 	}
 	if len(toolUses) != 0 {
 		t.Fatalf("incomplete tool use must not be emitted, got %d", len(toolUses))
+	}
+}
+
+func TestParseEventStreamRejectsPendingToolUseWithoutArgumentsOnEOF(t *testing.T) {
+	stream := bytes.NewReader(awsEventStreamFrame(t, "toolUseEvent", map[string]interface{}{
+		"toolUseId": "toolu_1",
+		"name":      "Write",
+	}))
+
+	err := parseEventStream(stream, &KiroStreamCallback{})
+	var streamErr *EventStreamError
+	if !errors.As(err, &streamErr) || streamErr.Kind != EventStreamIncompleteToolUse {
+		t.Fatalf("expected missing arguments to remain incomplete, got %#v", err)
+	}
+}
+
+func TestParseEventStreamRecoversCompleteToolUseBeforeTruncatedFrame(t *testing.T) {
+	completeTool := awsEventStreamFrame(t, "toolUseEvent", map[string]interface{}{
+		"toolUseId": "toolu_1",
+		"name":      "write",
+		"input":     `{"file_path":"index.html","content":"complete"}`,
+	})
+	stream := bytes.NewReader(append(completeTool, []byte{0, 0, 0, 20}...))
+
+	var toolUses []KiroToolUse
+	err := parseEventStream(stream, &KiroStreamCallback{
+		OnToolUse: func(toolUse KiroToolUse) {
+			toolUses = append(toolUses, toolUse)
+		},
+	})
+	if err != nil {
+		t.Fatalf("expected complete tool use to survive truncated tail, got %v", err)
+	}
+	if len(toolUses) != 1 || toolUses[0].Input["content"] != "complete" {
+		t.Fatalf("unexpected recovered tool use: %#v", toolUses)
+	}
+}
+
+func TestParseEventStreamPreservesTruncatedFrameErrorForIncompleteToolUse(t *testing.T) {
+	incompleteTool := awsEventStreamFrame(t, "toolUseEvent", map[string]interface{}{
+		"toolUseId": "toolu_1",
+		"name":      "write",
+		"input":     `{"file_path":"index.html","content":`,
+	})
+	stream := bytes.NewReader(append(incompleteTool, []byte{0, 0, 0, 20}...))
+
+	err := parseEventStream(stream, &KiroStreamCallback{})
+	var streamErr *EventStreamError
+	if !errors.As(err, &streamErr) || streamErr.Kind != EventStreamTruncated {
+		t.Fatalf("expected truncated frame error, got %#v", err)
 	}
 }
 
