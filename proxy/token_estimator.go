@@ -1,8 +1,20 @@
 package proxy
 
 import (
+	"bytes"
 	"encoding/json"
+	"image"
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
 	"math"
+	"strings"
+)
+
+const (
+	defaultImageInputTokens = 100
+	maxImageInputTokens     = 1600
+	imageTokenPixelDivisor  = 750.0
 )
 
 func estimateApproxTokens(text string) int {
@@ -91,8 +103,11 @@ func estimateClaudeValueTokens(v interface{}) int {
 		}
 		return total
 	case map[string]interface{}:
+		if isImageContentBlock(value) {
+			return estimateImageContentTokens(value)
+		}
 		typeName, _ := value["type"].(string)
-		switch typeName {
+		switch strings.ToLower(strings.TrimSpace(typeName)) {
 		case "text":
 			if text, ok := value["text"].(string); ok {
 				return estimateApproxTokens(text)
@@ -182,13 +197,94 @@ func estimateOpenAIContentTokens(content interface{}) int {
 		return 0
 	case string:
 		return estimateApproxTokens(value)
-	default:
-		text := extractOpenAIMessageText(value)
-		if text != "" {
-			return estimateApproxTokens(text)
+	case []interface{}:
+		total := 0
+		for _, part := range value {
+			total += estimateOpenAIContentTokens(part)
+		}
+		return total
+	case map[string]interface{}:
+		if isImageContentBlock(value) {
+			return estimateImageContentTokens(value)
+		}
+		typeName, _ := value["type"].(string)
+		switch strings.ToLower(strings.TrimSpace(typeName)) {
+		case "text", "input_text", "output_text":
+			if text, ok := value["text"].(string); ok {
+				return estimateApproxTokens(text)
+			}
+		case "tool_result":
+			if nested, ok := value["content"]; ok {
+				return estimateOpenAIContentTokens(nested)
+			}
+		}
+
+		total := 0
+		if text, ok := value["text"].(string); ok {
+			total += estimateApproxTokens(text)
+		}
+		if nested, ok := value["content"]; ok {
+			total += estimateOpenAIContentTokens(nested)
+		}
+		if total > 0 {
+			return total
 		}
 		return estimateJSONTokens(value)
+	default:
+		return estimateJSONTokens(value)
 	}
+}
+
+func isImageContentBlock(value map[string]interface{}) bool {
+	if value == nil {
+		return false
+	}
+	typeName, _ := value["type"].(string)
+	switch strings.ToLower(strings.TrimSpace(typeName)) {
+	case "image", "image_url", "input_image":
+		return true
+	case "file", "input_file":
+		return extractImageFromClaudeBlock(value) != nil
+	}
+	for _, key := range []string{"image_url", "image_base64", "b64_json"} {
+		if _, ok := value[key]; ok {
+			return true
+		}
+	}
+	if rawURL, ok := value["url"].(string); ok && strings.HasPrefix(strings.ToLower(strings.TrimSpace(rawURL)), "data:image/") {
+		return true
+	}
+	if source, ok := value["source"].(map[string]interface{}); ok {
+		for _, key := range []string{"media_type", "mediaType", "mime_type", "mime"} {
+			if mediaType, ok := source[key].(string); ok && strings.HasPrefix(strings.ToLower(strings.TrimSpace(mediaType)), "image/") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func estimateImageContentTokens(block map[string]interface{}) int {
+	kiroImage := extractImageFromClaudeBlock(block)
+	if kiroImage == nil || strings.TrimSpace(kiroImage.Source.Bytes) == "" {
+		return defaultImageInputTokens
+	}
+	decoded, err := decodeBase64Payload(kiroImage.Source.Bytes)
+	if err != nil {
+		return defaultImageInputTokens
+	}
+	config, _, err := image.DecodeConfig(bytes.NewReader(decoded))
+	if err != nil || config.Width <= 0 || config.Height <= 0 {
+		return defaultImageInputTokens
+	}
+	tokens := int(math.Ceil(float64(config.Width) * float64(config.Height) / imageTokenPixelDivisor))
+	if tokens < defaultImageInputTokens {
+		return defaultImageInputTokens
+	}
+	if tokens > maxImageInputTokens {
+		return maxImageInputTokens
+	}
+	return tokens
 }
 
 func estimateOpenAIOutputTokens(content, reasoningContent string, toolUses []KiroToolUse) int {

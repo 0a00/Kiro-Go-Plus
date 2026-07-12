@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"kiro-go/config"
 	"math"
@@ -214,7 +215,7 @@ func (t *promptCacheTracker) BuildClaudeProfile(req *ClaudeRequest, totalInputTo
 	var activeTTL time.Duration
 
 	for _, block := range blocks {
-		canonical := canonicalizeCacheValue(block.Value)
+		canonical := canonicalizeCacheValue(normalizeCacheFingerprintValue(block.Value))
 		writeHashChunk(hasher, canonical)
 		cumulativeTokens += block.Tokens
 
@@ -639,7 +640,7 @@ func flattenClaudeCacheBlocks(req *ClaudeRequest) []cacheablePromptBlock {
 		fingerprintValue := stripCachePositionKeys(toolValue)
 		blocks = append(blocks, cacheablePromptBlock{
 			Value:  fingerprintValue,
-			Tokens: estimateApproxTokens(canonicalizeCacheValue(fingerprintValue)),
+			Tokens: estimateCacheValueTokens(fingerprintValue),
 			TTL:    normalizePromptCacheTTL(extractPromptCacheTTL(tool)),
 		})
 	}
@@ -661,7 +662,7 @@ func buildCachePreludeBlock(req *ClaudeRequest) cacheablePromptBlock {
 	}
 	return cacheablePromptBlock{
 		Value:  prelude,
-		Tokens: estimateApproxTokens(canonicalizeCacheValue(prelude)),
+		Tokens: estimateCacheValueTokens(prelude),
 	}
 }
 
@@ -748,13 +749,84 @@ func appendPromptBlock(blocks *[]cacheablePromptBlock, wrapper map[string]interf
 	}
 
 	fingerprintValue := stripCachePositionKeys(wrapper)
-	canonical := canonicalizeCacheValue(fingerprintValue)
 	*blocks = append(*blocks, cacheablePromptBlock{
 		Value:        fingerprintValue,
-		Tokens:       estimateApproxTokens(canonical),
+		Tokens:       estimateCacheValueTokens(fingerprintValue),
 		TTL:          ttl,
 		IsMessageEnd: isMessageEnd,
 	})
+}
+
+func estimateCacheValueTokens(value interface{}) int {
+	switch v := value.(type) {
+	case nil:
+		return 0
+	case string:
+		return estimateApproxTokens(v)
+	case []interface{}:
+		total := 0
+		for _, item := range v {
+			total += estimateCacheValueTokens(item)
+		}
+		return total
+	case map[string]interface{}:
+		if isImageContentBlock(v) {
+			return estimateImageContentTokens(v)
+		}
+		total := 0
+		for key, item := range v {
+			if key == "cache_control" || isCachePositionKey(key) {
+				continue
+			}
+			total += estimateApproxTokens(key)
+			total += estimateCacheValueTokens(item)
+		}
+		return total
+	default:
+		return estimateJSONTokens(v)
+	}
+}
+
+func normalizeCacheFingerprintValue(value interface{}) interface{} {
+	switch v := value.(type) {
+	case []interface{}:
+		out := make([]interface{}, len(v))
+		for i, item := range v {
+			out[i] = normalizeCacheFingerprintValue(item)
+		}
+		return out
+	case map[string]interface{}:
+		if isImageContentBlock(v) {
+			return cacheImageFingerprint(v)
+		}
+		out := make(map[string]interface{}, len(v))
+		for key, item := range v {
+			out[key] = normalizeCacheFingerprintValue(item)
+		}
+		return out
+	default:
+		return value
+	}
+}
+
+func cacheImageFingerprint(block map[string]interface{}) map[string]interface{} {
+	descriptor := map[string]interface{}{"type": "image"}
+	kiroImage := extractImageFromClaudeBlock(block)
+	if kiroImage != nil {
+		descriptor["format"] = kiroImage.Format
+		data := []byte(kiroImage.Source.Bytes)
+		if decoded, err := decodeBase64Payload(kiroImage.Source.Bytes); err == nil {
+			data = decoded
+		}
+		digest := sha256.Sum256(data)
+		descriptor["sha256"] = hex.EncodeToString(digest[:])
+		return descriptor
+	}
+
+	raw, _ := json.Marshal(block)
+	digest := sha256.Sum256(raw)
+	descriptor["sha256"] = hex.EncodeToString(digest[:])
+	return descriptor
 }
 
 func stripCachePositionKeys(value map[string]interface{}) map[string]interface{} {

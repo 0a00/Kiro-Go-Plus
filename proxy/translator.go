@@ -2103,14 +2103,8 @@ func parseBase64Image(data, format string) *KiroImage {
 	}
 
 	// 验证 base64
-	if _, err := base64.StdEncoding.DecodeString(data); err != nil {
-		if _, errRaw := base64.RawStdEncoding.DecodeString(data); errRaw != nil {
-			if _, errURL := base64.URLEncoding.DecodeString(data); errURL != nil {
-				if _, errRawURL := base64.RawURLEncoding.DecodeString(data); errRawURL != nil {
-					return nil
-				}
-			}
-		}
+	if _, err := decodeBase64Payload(data); err != nil {
+		return nil
 	}
 
 	if format == "" {
@@ -2123,6 +2117,23 @@ func parseBase64Image(data, format string) *KiroImage {
 			Bytes string `json:"bytes"`
 		}{Bytes: data},
 	}
+}
+
+func decodeBase64Payload(data string) ([]byte, error) {
+	var lastErr error
+	for _, encoding := range []*base64.Encoding{
+		base64.StdEncoding,
+		base64.RawStdEncoding,
+		base64.URLEncoding,
+		base64.RawURLEncoding,
+	} {
+		decoded, err := encoding.DecodeString(data)
+		if err == nil {
+			return decoded, nil
+		}
+		lastErr = err
+	}
+	return nil, lastErr
 }
 
 func convertOpenAITools(tools []OpenAITool) []KiroToolWrapper {
