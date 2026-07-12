@@ -63,6 +63,60 @@ func TestThinkingConfigAPIUpdatesTokenDefaults(t *testing.T) {
 	}
 }
 
+func TestRetryConfigAPIAcceptsUnlimitedAccountPolling(t *testing.T) {
+	tempDir := t.TempDir()
+	if err := config.Init(filepath.Join(tempDir, "config.json")); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	t.Cleanup(func() { _ = config.Init(filepath.Join(tempDir, "reset.json")) })
+
+	retry := config.GetRetryConfig()
+	retry.MaxAccountAttempts = 0
+	body, err := json.Marshal(retry)
+	if err != nil {
+		t.Fatalf("marshal retry config: %v", err)
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/admin/api/retry", bytes.NewReader(body))
+	(&Handler{}).apiUpdateRetryConfig(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if got := config.GetRetryConfig().MaxAccountAttempts; got != 0 {
+		t.Fatalf("max account attempts = %d, want 0", got)
+	}
+}
+
+func TestRetryConfigAPIRejectsMissingAccountAttempts(t *testing.T) {
+	tempDir := t.TempDir()
+	if err := config.Init(filepath.Join(tempDir, "config.json")); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	t.Cleanup(func() { _ = config.Init(filepath.Join(tempDir, "reset.json")) })
+
+	retry := config.GetRetryConfig()
+	body, err := json.Marshal(retry)
+	if err != nil {
+		t.Fatalf("marshal retry config: %v", err)
+	}
+	var document map[string]interface{}
+	if err := json.Unmarshal(body, &document); err != nil {
+		t.Fatalf("parse retry config: %v", err)
+	}
+	delete(document, "maxAccountAttempts")
+	body, err = json.Marshal(document)
+	if err != nil {
+		t.Fatalf("marshal partial retry config: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/admin/api/retry", bytes.NewReader(body))
+	(&Handler{}).apiUpdateRetryConfig(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestServeHTTPRejectsOversizedRequestBody(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader("{}"))
 	req.ContentLength = maxRequestBodyBytes + 1

@@ -392,8 +392,12 @@ type upstreamAttemptBudget struct {
 
 func newUpstreamAttemptBudget() *upstreamAttemptBudget {
 	retry := config.GetRetryConfig()
+	maxAttempts := retry.MaxUpstreamAttempts
+	if retry.MaxAccountAttempts == 0 {
+		maxAttempts = 0
+	}
 	return &upstreamAttemptBudget{
-		maxAttempts: retry.MaxUpstreamAttempts,
+		maxAttempts: maxAttempts,
 		maxEmpty:    retry.EmptyResponseRetries,
 	}
 }

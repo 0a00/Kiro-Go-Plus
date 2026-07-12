@@ -216,13 +216,14 @@ func (h *Handler) handleClaudeWebSearch(ctx context.Context, w http.ResponseWrit
 }
 
 func (h *Handler) callWebSearchMCP(ctx context.Context, model, query string) (*webSearchResults, error) {
-	excluded := make(map[string]bool)
+	attempts := h.newAccountAttemptController(ctx)
+	excluded := attempts.excluded
 	var lastErr error
-	for attempt := 0; attempt < accountRetryLimit(); attempt++ {
+	for {
 		if err := ctx.Err(); err != nil {
 			return nil, classifyRequestCancellation("Kiro MCP WebSearch", err)
 		}
-		account, guard, busy := h.acquireAccountForModel(model, "", excluded)
+		account, guard, busy := h.acquireNextAccountForRequest(attempts, model, "")
 		if busy != nil {
 			lastErr = busy
 			break
@@ -268,6 +269,9 @@ func (h *Handler) callWebSearchMCP(ctx context.Context, model, query string) (*w
 		if !shouldRetryAcrossAccounts(err) {
 			break
 		}
+	}
+	if err := attempts.stopErr(); err != nil {
+		return nil, classifyRequestCancellation("Kiro MCP WebSearch", err)
 	}
 	if lastErr != nil {
 		return nil, lastErr

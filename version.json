@@ -1,5 +1,5 @@
 {
-  "version": "1.2.6",
-  "changelog": "Add Web-configurable default max-output and context-window token budgets across Claude, OpenAI Chat, and Responses APIs. Explicit client values take precedence, per-model limits override global defaults, and explicit Claude thinking budgets are preserved.\n新增可在 Web 配置的默认最大输出与上下文 Token 预算，统一支持 Claude、OpenAI Chat 和 Responses API。客户端显式参数优先，模型专属限制优先于全局默认，并保留客户端明确传入的 Claude 思考预算。",
+  "version": "1.2.7",
+  "changelog": "Allow max account attempts to be set to 0 for continuous, context-aware account polling. Unlimited mode resets exclusions between rounds, applies bounded backoff, honors shutdown and client cancellation, and removes the total upstream-attempt cap.\n账号最大尝试数现在可设为 0，以持续轮询可用账号。无限模式会按轮重置排除列表、执行有上限的退避等待、响应客户端取消与服务关闭，并取消上游总尝试次数限制。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }

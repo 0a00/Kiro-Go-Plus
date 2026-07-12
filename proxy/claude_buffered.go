@@ -45,12 +45,13 @@ func (h *Handler) handleClaudeBufferedStream(w http.ResponseWriter, payload *Kir
 	}()
 	defer close(done)
 
-	excluded := make(map[string]bool)
+	attempts := h.newAccountAttemptController(payload.requestContext)
+	excluded := attempts.excluded
 	var lastErr error
 	var busyErr error
 
-	for attempt := 0; attempt < accountRetryLimit(); attempt++ {
-		account, guard, busy := h.acquireAccountForModel(model, routeKey, excluded)
+	for {
+		account, guard, busy := h.acquireNextAccountForRequest(attempts, model, routeKey)
 		if busy != nil {
 			busyErr = busy
 			break
@@ -205,6 +206,9 @@ func (h *Handler) handleClaudeBufferedStream(w http.ResponseWriter, payload *Kir
 		return
 	}
 
+	if attempts.stopErr() != nil {
+		return
+	}
 	if lastErr == nil {
 		if busyErr != nil {
 			h.recordFailure()

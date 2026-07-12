@@ -166,12 +166,13 @@ func (h *Handler) handleResponsesNonStream(
 	req *ResponsesRequest, storedInput json.RawMessage, storeResponse bool,
 ) {
 	startedAt := time.Now()
-	excluded := make(map[string]bool)
+	attempts := h.newAccountAttemptController(payload.requestContext)
+	excluded := attempts.excluded
 	var lastErr error
 	var busyErr error
 
-	for attempt := 0; attempt < accountRetryLimit(); attempt++ {
-		account, guard, busy := h.acquireAccountForModel(model, routeKey, excluded)
+	for {
+		account, guard, busy := h.acquireNextAccountForRequest(attempts, model, routeKey)
 		if busy != nil {
 			busyErr = busy
 			break
@@ -281,6 +282,9 @@ func (h *Handler) handleResponsesNonStream(
 		return
 	}
 
+	if attempts.stopErr() != nil {
+		return
+	}
 	if lastErr == nil {
 		if busyErr != nil {
 			h.recordFailure()
@@ -440,13 +444,14 @@ func (h *Handler) handleResponsesStream(
 		"response": initial,
 	})
 
-	excluded := make(map[string]bool)
+	attempts := h.newAccountAttemptController(payload.requestContext)
+	excluded := attempts.excluded
 	var lastErr error
 	var busyErr error
 	responseStarted := false
 
-	for attempt := 0; attempt < accountRetryLimit(); attempt++ {
-		account, guard, busy := h.acquireAccountForModel(model, routeKey, excluded)
+	for {
+		account, guard, busy := h.acquireNextAccountForRequest(attempts, model, routeKey)
 		if busy != nil {
 			busyErr = busy
 			break
@@ -817,6 +822,9 @@ func (h *Handler) handleResponsesStream(
 		return
 	}
 
+	if attempts.stopErr() != nil {
+		return
+	}
 	if lastErr == nil {
 		if busyErr != nil {
 			h.recordFailure()

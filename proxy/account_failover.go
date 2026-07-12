@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"kiro-go/config"
 	"kiro-go/logger"
 	accountpool "kiro-go/pool"
@@ -8,12 +9,141 @@ import (
 	"time"
 )
 
-func accountRetryLimit() int {
-	limit := config.GetRetryConfig().MaxAccountAttempts
-	if limit < 1 {
-		return 1
+const (
+	accountRetryInitialDelay = 500 * time.Millisecond
+	accountRetryMinimumDelay = 250 * time.Millisecond
+	accountRetryMaximumDelay = 5 * time.Second
+)
+
+// accountAttemptController keeps finite retry behavior unchanged while making
+// maxAccountAttempts=0 a context-aware, paced polling mode.
+type accountAttemptController struct {
+	requestCtx  context.Context
+	shutdownCtx context.Context
+	maxAttempts int
+	attempts    int
+	rounds      int
+	excluded    map[string]bool
+	wait        func(time.Duration) bool
+}
+
+func newAccountAttemptController(requestCtx, shutdownCtx context.Context, maxAttempts int) *accountAttemptController {
+	if requestCtx == nil {
+		requestCtx = context.Background()
 	}
-	return limit
+	controller := &accountAttemptController{
+		requestCtx:  requestCtx,
+		shutdownCtx: shutdownCtx,
+		maxAttempts: maxAttempts,
+		excluded:    make(map[string]bool),
+	}
+	controller.wait = controller.waitForDelay
+	return controller
+}
+
+func (h *Handler) newAccountAttemptController(requestCtx context.Context) *accountAttemptController {
+	var shutdownCtx context.Context
+	if h != nil {
+		shutdownCtx = h.backgroundCtx
+	}
+	return newAccountAttemptController(requestCtx, shutdownCtx, config.GetRetryConfig().MaxAccountAttempts)
+}
+
+func (c *accountAttemptController) next() bool {
+	if c == nil || c.stopErr() != nil {
+		return false
+	}
+	if c.maxAttempts > 0 && c.attempts >= c.maxAttempts {
+		return false
+	}
+	c.attempts++
+	return true
+}
+
+func (c *accountAttemptController) nextRound(retryAfter time.Duration) bool {
+	if c == nil || c.maxAttempts != 0 || c.stopErr() != nil {
+		return false
+	}
+	delay := c.roundDelay(retryAfter)
+	if c.wait == nil || !c.wait(delay) {
+		return false
+	}
+	clear(c.excluded)
+	c.rounds++
+	return true
+}
+
+func (c *accountAttemptController) roundDelay(retryAfter time.Duration) time.Duration {
+	if retryAfter > 0 {
+		if retryAfter < accountRetryMinimumDelay {
+			return accountRetryMinimumDelay
+		}
+		if retryAfter > accountRetryMaximumDelay {
+			return accountRetryMaximumDelay
+		}
+		return retryAfter
+	}
+
+	delay := accountRetryInitialDelay
+	for i := 0; i < c.rounds && delay < accountRetryMaximumDelay; i++ {
+		delay *= 2
+		if delay >= accountRetryMaximumDelay {
+			return accountRetryMaximumDelay
+		}
+	}
+	return delay
+}
+
+func (c *accountAttemptController) waitForDelay(delay time.Duration) bool {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+
+	var shutdownDone <-chan struct{}
+	if c.shutdownCtx != nil {
+		shutdownDone = c.shutdownCtx.Done()
+	}
+	select {
+	case <-timer.C:
+		return true
+	case <-c.requestCtx.Done():
+		return false
+	case <-shutdownDone:
+		return false
+	}
+}
+
+func (c *accountAttemptController) stopErr() error {
+	if c == nil {
+		return nil
+	}
+	if err := c.requestCtx.Err(); err != nil {
+		return err
+	}
+	if c.shutdownCtx != nil {
+		if err := c.shutdownCtx.Err(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (h *Handler) acquireNextAccountForRequest(controller *accountAttemptController, model, routeKey string) (*config.Account, *accountpool.UpstreamRequestGuard, *accountpool.UpstreamBusyError) {
+	for controller.next() {
+		account, guard, busy := h.acquireAccountForModel(model, routeKey, controller.excluded)
+		if account != nil {
+			return account, guard, nil
+		}
+		if busy != nil {
+			if controller.nextRound(busy.RetryAfter) {
+				continue
+			}
+			return nil, nil, busy
+		}
+		if !controller.nextRound(0) {
+			return nil, nil, nil
+		}
+	}
+	return nil, nil, nil
 }
 
 func isQuotaErrorMessage(msg string) bool {

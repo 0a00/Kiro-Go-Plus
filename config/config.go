@@ -445,7 +445,7 @@ type AccountInfo struct {
 }
 
 // Version current version
-const Version = "1.2.6"
+const Version = "1.2.7"
 
 var (
 	cfg           *Config
@@ -573,6 +573,8 @@ func loadLocked() error {
 	}
 	if !rawConfigHasKey(data, "retry") {
 		c.Retry = defaultRetryConfig()
+	} else if !rawConfigHasNestedKey(data, "retry", "maxAccountAttempts") {
+		c.Retry.MaxAccountAttempts = defaultRetryConfig().MaxAccountAttempts
 	}
 	if !rawConfigHasKey(data, "responsesStorage") {
 		c.ResponsesStorage = defaultResponsesStorageConfig()
@@ -981,7 +983,7 @@ func defaultRetryConfig() RetryConfig {
 
 func normalizeRetryLocked() {
 	defaults := defaultRetryConfig()
-	if cfg.Retry.MaxAccountAttempts <= 0 {
+	if cfg.Retry.MaxAccountAttempts < 0 {
 		cfg.Retry.MaxAccountAttempts = defaults.MaxAccountAttempts
 	}
 	if cfg.Retry.MaxAccountAttempts > 100 {
@@ -1574,7 +1576,7 @@ func GetRetryConfig() RetryConfig {
 	}
 	out := cfg.Retry
 	defaults := defaultRetryConfig()
-	if out.MaxAccountAttempts <= 0 {
+	if out.MaxAccountAttempts < 0 {
 		out.MaxAccountAttempts = defaults.MaxAccountAttempts
 	}
 	if out.MaxUpstreamAttempts <= 0 {

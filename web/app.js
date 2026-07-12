@@ -1711,7 +1711,7 @@
   async function loadRetryConfig() {
     const res = await api('/retry');
     const d = await res.json();
-    $('retryMaxAccountAttempts').value = d.maxAccountAttempts || 8;
+    $('retryMaxAccountAttempts').value = d.maxAccountAttempts ?? 8;
     $('retryMaxUpstreamAttempts').value = d.maxUpstreamAttempts || 12;
     $('retryFirstTokenTimeoutSeconds').value = d.firstTokenTimeoutSeconds || 45;
     $('retryStreamIdleTimeoutSeconds').value = d.streamIdleTimeoutSeconds || 120;
@@ -1733,7 +1733,7 @@
 	  proxyFailureThreshold: Math.round(Number($('retryProxyFailureThreshold').value) || 0),
 	  proxyCircuitCooldownSeconds: Math.round(Number($('retryProxyCircuitCooldownSeconds').value) || 0)
     };
-	if (body.maxAccountAttempts < 1 || body.maxAccountAttempts > 100 || body.maxUpstreamAttempts < 1 || body.maxUpstreamAttempts > 200 || body.firstTokenTimeoutSeconds < 5 || body.firstTokenTimeoutSeconds > 600 || body.streamIdleTimeoutSeconds < 15 || body.streamIdleTimeoutSeconds > 3600 || body.emptyResponseRetries < 0 || body.emptyResponseRetries > 20 || body.endpointFailureThreshold < 1 || body.endpointFailureThreshold > 20 || body.endpointCircuitCooldownSeconds < 5 || body.endpointCircuitCooldownSeconds > 900 || body.proxyFailureThreshold < 1 || body.proxyFailureThreshold > 20 || body.proxyCircuitCooldownSeconds < 5 || body.proxyCircuitCooldownSeconds > 900) {
+	if (body.maxAccountAttempts < 0 || body.maxAccountAttempts > 100 || body.maxUpstreamAttempts < 1 || body.maxUpstreamAttempts > 200 || body.firstTokenTimeoutSeconds < 5 || body.firstTokenTimeoutSeconds > 600 || body.streamIdleTimeoutSeconds < 15 || body.streamIdleTimeoutSeconds > 3600 || body.emptyResponseRetries < 0 || body.emptyResponseRetries > 20 || body.endpointFailureThreshold < 1 || body.endpointFailureThreshold > 20 || body.endpointCircuitCooldownSeconds < 5 || body.endpointCircuitCooldownSeconds > 900 || body.proxyFailureThreshold < 1 || body.proxyFailureThreshold > 20 || body.proxyCircuitCooldownSeconds < 5 || body.proxyCircuitCooldownSeconds > 900) {
       toast(t('settings.retryInvalid'), 'warning');
       return;
     }

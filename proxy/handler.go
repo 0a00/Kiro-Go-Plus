@@ -1833,7 +1833,8 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 
 	msgID := "msg_" + uuid.New().String()
 	startInputTokens := estimatedInputTokens
-	excluded := make(map[string]bool)
+	attempts := h.newAccountAttemptController(payload.requestContext)
+	excluded := attempts.excluded
 	var lastErr error
 	var busyErr error
 	messageStarted := false
@@ -1859,8 +1860,8 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 		messageStarted = true
 	}
 
-	for attempt := 0; attempt < accountRetryLimit(); attempt++ {
-		account, guard, busy := h.acquireAccountForModel(model, routeKey, excluded)
+	for {
+		account, guard, busy := h.acquireNextAccountForRequest(attempts, model, routeKey)
 		if busy != nil {
 			busyErr = busy
 			break
@@ -2324,6 +2325,9 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 		return
 	}
 
+	if attempts.stopErr() != nil {
+		return
+	}
 	if lastErr == nil {
 		if busyErr != nil {
 			h.recordFailure()
@@ -2501,12 +2505,13 @@ func (h *Handler) recordFailure() {
 // handleClaudeNonStream Claude 非流式响应
 func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, thinkingOpts claudeThinkingResponseOptions, estimatedInputTokens int, cacheProfile *promptCacheProfile, apiKeyID, routeKey string) {
 	startedAt := time.Now()
-	excluded := make(map[string]bool)
+	attempts := h.newAccountAttemptController(payload.requestContext)
+	excluded := attempts.excluded
 	var lastErr error
 	var busyErr error
 
-	for attempt := 0; attempt < accountRetryLimit(); attempt++ {
-		account, guard, busy := h.acquireAccountForModel(model, routeKey, excluded)
+	for {
+		account, guard, busy := h.acquireNextAccountForRequest(attempts, model, routeKey)
 		if busy != nil {
 			busyErr = busy
 			break
@@ -2669,6 +2674,9 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 		return
 	}
 
+	if attempts.stopErr() != nil {
+		return
+	}
 	if lastErr == nil {
 		if busyErr != nil {
 			h.recordFailure()
@@ -2799,12 +2807,13 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 	thinkingFormat := config.GetThinkingConfig().OpenAIFormat
 
 	chatID := "chatcmpl-" + uuid.New().String()
-	excluded := make(map[string]bool)
+	attempts := h.newAccountAttemptController(payload.requestContext)
+	excluded := attempts.excluded
 	var lastErr error
 	var busyErr error
 
-	for attempt := 0; attempt < accountRetryLimit(); attempt++ {
-		account, guard, busy := h.acquireAccountForModel(model, payload.ConversationState.ConversationID, excluded)
+	for {
+		account, guard, busy := h.acquireNextAccountForRequest(attempts, model, payload.ConversationState.ConversationID)
 		if busy != nil {
 			busyErr = busy
 			break
@@ -3221,6 +3230,9 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 		return
 	}
 
+	if attempts.stopErr() != nil {
+		return
+	}
 	if lastErr == nil {
 		if busyErr != nil {
 			h.recordFailure()
@@ -3261,12 +3273,13 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 // handleOpenAINonStream OpenAI 非流式响应
 func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int, apiKeyID string) {
 	startedAt := time.Now()
-	excluded := make(map[string]bool)
+	attempts := h.newAccountAttemptController(payload.requestContext)
+	excluded := attempts.excluded
 	var lastErr error
 	var busyErr error
 
-	for attempt := 0; attempt < accountRetryLimit(); attempt++ {
-		account, guard, busy := h.acquireAccountForModel(model, payload.ConversationState.ConversationID, excluded)
+	for {
+		account, guard, busy := h.acquireNextAccountForRequest(attempts, model, payload.ConversationState.ConversationID)
 		if busy != nil {
 			busyErr = busy
 			break
@@ -3370,6 +3383,9 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 		return
 	}
 
+	if attempts.stopErr() != nil {
+		return
+	}
 	if lastErr == nil {
 		if busyErr != nil {
 			h.recordFailure()
@@ -5234,16 +5250,26 @@ func (h *Handler) apiGetRetryConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) apiUpdateRetryConfig(w http.ResponseWriter, r *http.Request) {
-	var req config.RetryConfig
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	var update struct {
+		config.RetryConfig
+		MaxAccountAttempts *int `json:"maxAccountAttempts"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&update); err != nil {
 		w.WriteHeader(400)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON"})
 		return
 	}
+	if update.MaxAccountAttempts == nil {
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(map[string]string{"error": "invalid retry configuration"})
+		return
+	}
+	req := update.RetryConfig
+	req.MaxAccountAttempts = *update.MaxAccountAttempts
 	if req.StreamIdleTimeoutSeconds <= 0 {
 		req.StreamIdleTimeoutSeconds = config.GetRetryConfig().StreamIdleTimeoutSeconds
 	}
-	if req.MaxAccountAttempts < 1 || req.MaxAccountAttempts > 100 ||
+	if req.MaxAccountAttempts < 0 || req.MaxAccountAttempts > 100 ||
 		req.MaxUpstreamAttempts < 1 || req.MaxUpstreamAttempts > 200 ||
 		req.FirstTokenTimeoutSeconds < 5 || req.FirstTokenTimeoutSeconds > 600 ||
 		req.StreamIdleTimeoutSeconds < 15 || req.StreamIdleTimeoutSeconds > 3600 ||

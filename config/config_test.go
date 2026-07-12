@@ -415,6 +415,57 @@ func TestOperationalConfigDefaults(t *testing.T) {
 	}
 }
 
+func TestRetryConfigPersistsUnlimitedAccountAttempts(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := Init(path); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	retry := GetRetryConfig()
+	retry.MaxAccountAttempts = 0
+	if err := UpdateRetryConfig(retry); err != nil {
+		t.Fatalf("update retry config: %v", err)
+	}
+	if err := Init(path); err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	if got := GetRetryConfig().MaxAccountAttempts; got != 0 {
+		t.Fatalf("max account attempts = %d, want unlimited value 0", got)
+	}
+}
+
+func TestRetryConfigMissingAccountAttemptFieldUsesDefault(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := Init(path); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	var document map[string]interface{}
+	if err := json.Unmarshal(raw, &document); err != nil {
+		t.Fatalf("parse config: %v", err)
+	}
+	retry, ok := document["retry"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("retry config has unexpected type %T", document["retry"])
+	}
+	delete(retry, "maxAccountAttempts")
+	raw, err = json.Marshal(document)
+	if err != nil {
+		t.Fatalf("marshal config: %v", err)
+	}
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	if err := Init(path); err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	if got := GetRetryConfig().MaxAccountAttempts; got != 8 {
+		t.Fatalf("missing max account attempts migrated to %d, want 8", got)
+	}
+}
+
 func TestConfiguredModelResolutionUsesExactThenLongestKeyword(t *testing.T) {
 	if err := Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatalf("init config: %v", err)
