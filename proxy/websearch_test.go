@@ -81,6 +81,36 @@ func TestWebSearchSummaryIncludesResults(t *testing.T) {
 	}
 }
 
+func TestWebSearchRegionCandidatesPreferProfileArnRegion(t *testing.T) {
+	account := &config.Account{
+		Region:     "us-east-1",
+		ProfileArn: "arn:aws:codewhisperer:eu-central-1:123456789012:profile/test",
+	}
+
+	got := webSearchRegionCandidates(account)
+	want := []string{"eu-central-1", "us-east-1"}
+	if len(got) != len(want) {
+		t.Fatalf("expected regions %v, got %v", want, got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("expected regions %v, got %v", want, got)
+		}
+	}
+}
+
+func TestWebSearchRegionCandidatesDeduplicateDefaultRegion(t *testing.T) {
+	account := &config.Account{
+		Region:     "eu-central-1",
+		ProfileArn: "arn:aws:codewhisperer:us-east-1:123456789012:profile/test",
+	}
+
+	got := webSearchRegionCandidates(account)
+	if len(got) != 1 || got[0] != "us-east-1" {
+		t.Fatalf("expected only the profile region, got %v", got)
+	}
+}
+
 func TestMCPWebSearchClassifiesRateLimit(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusTooManyRequests)

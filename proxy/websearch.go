@@ -279,6 +279,26 @@ func callMCPWebSearch(account *config.Account, query string) (*webSearchResults,
 	return callMCPWebSearchContext(context.Background(), account, query)
 }
 
+func webSearchRegionCandidates(account *config.Account) []string {
+	regions := make([]string, 0, 2)
+	seen := make(map[string]bool, 2)
+	add := func(region string) {
+		region = strings.TrimSpace(region)
+		key := strings.ToLower(region)
+		if region == "" || seen[key] {
+			return
+		}
+		seen[key] = true
+		regions = append(regions, region)
+	}
+
+	// The profile ARN identifies the Kiro data-plane region. account.Region is
+	// the OIDC region and can legitimately differ for external IdP accounts.
+	add(kiroRegion(account))
+	add("us-east-1")
+	return regions
+}
+
 func callMCPWebSearchContext(ctx context.Context, account *config.Account, query string) (*webSearchResults, error) {
 	body, err := json.Marshal(mcpRequest{
 		ID:      "web_search_tooluse_" + uuid.New().String(),
@@ -292,12 +312,8 @@ func callMCPWebSearchContext(ctx context.Context, account *config.Account, query
 	if err != nil {
 		return nil, err
 	}
-	regions := []string{"us-east-1"}
-	if region := strings.TrimSpace(account.Region); region != "" && !strings.EqualFold(region, "us-east-1") {
-		regions = append([]string{region}, regions...)
-	}
 	var lastErr error
-	for _, region := range regions {
+	for _, region := range webSearchRegionCandidates(account) {
 		results, err := callMCPWebSearchURL(ctx, account, "https://q."+region+".amazonaws.com/mcp", body, query)
 		if err == nil {
 			return results, nil
