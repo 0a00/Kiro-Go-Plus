@@ -1,5 +1,5 @@
 {
-  "version": "1.2.1",
-  "changelog": "Fix MCP WebSearch routing for accounts whose OIDC region differs from their Kiro profile region.\n修复 OIDC 登录区域与 Kiro Profile 区域不同时 MCP WebSearch 路由错误的问题。",
+  "version": "1.2.2",
+  "changelog": "Fix binary version reporting after the MCP WebSearch regional routing update. Includes the WebSearch fix from v1.2.1.\n修复 MCP WebSearch 区域路由更新后的程序版本显示，并包含 v1.2.1 的 WebSearch 修复。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }

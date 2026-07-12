@@ -8,6 +8,22 @@ import (
 	"testing"
 )
 
+func TestVersionMetadataMatchesBinaryVersion(t *testing.T) {
+	raw, err := os.ReadFile("../version.json")
+	if err != nil {
+		t.Fatalf("read version metadata: %v", err)
+	}
+	var metadata struct {
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal(raw, &metadata); err != nil {
+		t.Fatalf("parse version metadata: %v", err)
+	}
+	if metadata.Version != Version {
+		t.Fatalf("version metadata %q does not match binary version %q", metadata.Version, Version)
+	}
+}
+
 func TestAdminPasswordIsHashedAtRest(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	if err := Init(path); err != nil {
