@@ -175,8 +175,30 @@ pre,
 
 .clipboard-proxy {
   position: fixed;
+  left: -9999px;
+  top: 0;
+  width: 1px;
+  height: 1px;
   opacity: 0;
   pointer-events: none;
+}
+
+.clipboard-fallback-content {
+  width: min(44rem, calc(100vw - 2rem));
+}
+
+.clipboard-fallback-value {
+  width: 100%;
+  min-height: 16rem;
+  max-height: 55vh;
+  padding: 0.75rem;
+  resize: vertical;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--secondary);
+  color: var(--foreground);
+  font-size: 0.75rem;
+  line-height: 1.45;
 }
 
 .muted-text {

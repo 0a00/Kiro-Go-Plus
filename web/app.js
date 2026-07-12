@@ -48,35 +48,90 @@
   function escapeAttr(s) {
     return escapeHtml(s).replace(/"/g, '&quot;');
   }
+
+  function legacyCopyText(str) {
+    const ta = document.createElement('textarea');
+    const active = document.activeElement;
+    ta.value = str;
+    ta.readOnly = true;
+    ta.className = 'clipboard-proxy';
+    ta.setAttribute('aria-hidden', 'true');
+    document.body.appendChild(ta);
+    let copied = false;
+    try {
+      try { ta.focus({ preventScroll: true }); } catch (e) { ta.focus(); }
+      ta.select();
+      ta.setSelectionRange(0, str.length);
+      copied = typeof document.execCommand === 'function' && document.execCommand('copy') === true;
+    } catch (e) {
+      copied = false;
+    } finally {
+      document.body.removeChild(ta);
+      if (active && active.isConnected && typeof active.focus === 'function') {
+        try { active.focus({ preventScroll: true }); } catch (e) {
+          try { active.focus(); } catch (ignored) { }
+        }
+      }
+    }
+    return copied;
+  }
+
+  function showClipboardFallback(str) {
+    const value = $('clipboardFallbackValue');
+    if (!value) return;
+    value.value = str;
+    openDialog('clipboardFallbackModal');
+    setTimeout(() => {
+      try { value.focus({ preventScroll: true }); value.select(); } catch (e) { }
+    }, 0);
+  }
+
+  function closeClipboardFallback() {
+    closeDialog('clipboardFallbackModal');
+    const value = $('clipboardFallbackValue');
+    if (value) value.value = '';
+  }
+
+  async function copyClipboardFallbackValue() {
+    const value = $('clipboardFallbackValue');
+    const str = value ? value.value : '';
+    if (!str) return;
+    let copied = legacyCopyText(str);
+    if (!copied && navigator.clipboard && navigator.clipboard.writeText) {
+      try {
+        await navigator.clipboard.writeText(str);
+        copied = true;
+      } catch (e) { }
+    }
+    if (!copied) {
+      try { value.focus({ preventScroll: true }); value.select(); } catch (e) { }
+      toastWarning(t('clipboard.manualCopy'));
+      return;
+    }
+    closeClipboardFallback();
+    toastPrimary(t('common.copied'));
+  }
+
   async function copyText(input) {
     const isPromise = input && typeof input.then === 'function';
     if (isPromise && typeof ClipboardItem !== 'undefined' && navigator.clipboard && navigator.clipboard.write) {
-      const blobPromise = Promise.resolve(input).then(t => new Blob([String(t == null ? '' : t)], { type: 'text/plain' }));
-      await navigator.clipboard.write([new ClipboardItem({ 'text/plain': blobPromise })]);
-      return;
+      try {
+        const blobPromise = Promise.resolve(input).then(t => new Blob([String(t == null ? '' : t)], { type: 'text/plain' }));
+        await navigator.clipboard.write([new ClipboardItem({ 'text/plain': blobPromise })]);
+        return true;
+      } catch (e) { }
     }
     const text = isPromise ? await input : input;
     const str = String(text == null ? '' : text);
     if (navigator.clipboard && navigator.clipboard.writeText) {
       try {
         await navigator.clipboard.writeText(str);
-        return;
+        return true;
       } catch (e) { }
     }
-    const ta = document.createElement('textarea');
-    ta.value = str;
-    ta.readOnly = true;
-    ta.className = 'clipboard-proxy';
-    document.body.appendChild(ta);
-    const range = document.createRange();
-    range.selectNodeContents(ta);
-    const sel = window.getSelection();
-    sel.removeAllRanges();
-    sel.addRange(range);
-    ta.setSelectionRange(0, str.length);
-    document.execCommand('copy');
-    sel.removeAllRanges();
-    document.body.removeChild(ta);
+    if (legacyCopyText(str)) return true;
+    showClipboardFallback(str);
+    return false;
   }
   function renderEndpointCode(id, value) {
     const el = $(id);
@@ -1037,22 +1092,26 @@
     }
   }
   async function copyAccountJSON(id, btn) {
-	const password = window.prompt(t('security.reauthPassword'));
-	if (!password) return;
+    const password = window.prompt(t('security.reauthPassword'));
+    if (!password) return;
     try {
-	  const jsonPromise = api('/accounts/' + id + '/credentials', {
-		method: 'POST', body: JSON.stringify({ password })
-	  }).then(async res => {
-        if (!res.ok) throw new Error('Failed');
+      const jsonPromise = api('/accounts/' + id + '/credentials', {
+        method: 'POST', body: JSON.stringify({ password })
+      }).then(async res => {
+        if (!res.ok) {
+          const failure = await res.json().catch(() => ({}));
+          throw new Error(failure.error || t('common.failed'));
+        }
         const a = await res.json();
-	        const { clientId, clientSecret, accessToken, refreshToken, kiroApiKey, authMethod, provider, region, profileArn, tokenEndpoint, issuerUrl, scopes } = a;
-	        return JSON.stringify({ clientId, clientSecret, accessToken, refreshToken, kiroApiKey, authMethod, provider, region, profileArn, tokenEndpoint, issuerUrl, scopes }, null, 2);
+        const { clientId, clientSecret, accessToken, refreshToken, kiroApiKey, authMethod, provider, region, profileArn, tokenEndpoint, issuerUrl, scopes } = a;
+        return JSON.stringify({ clientId, clientSecret, accessToken, refreshToken, kiroApiKey, authMethod, provider, region, profileArn, tokenEndpoint, issuerUrl, scopes }, null, 2);
       });
-      await copyText(jsonPromise);
-      flashCopySuccess(btn);
-      toastPrimary(t('accounts.copyJSONSuccess'));
+      if (await copyText(jsonPromise)) {
+        flashCopySuccess(btn);
+        toastPrimary(t('accounts.copyJSONSuccess'));
+      }
     } catch (e) {
-      toastError(t('common.failed'));
+      toastError((e && e.message) || t('common.failed'));
     }
   }
   function flashCopySuccess(btn) {
@@ -2529,8 +2588,7 @@
     const val = $('apiKeyShowValue').value;
     if (!val) return;
     try {
-      await copyText(val);
-      toast(t('apiKeys.copySuccess'), 'success');
+      if (await copyText(val)) toast(t('apiKeys.copySuccess'), 'success');
     } catch (e) {
       toast(t('common.failed'), 'error');
     }
@@ -3096,8 +3154,7 @@
       $('kiroSsoStep2').classList.remove('hidden');
       $('kiroSsoOpenBtn').addEventListener('click', () => window.open(data.signInUrl, '_blank'));
       $('kiroSsoCopyBtn').addEventListener('click', async () => {
-        await copyText(data.signInUrl);
-        toast(t('common.copied'), 'primary');
+        if (await copyText(data.signInUrl)) toast(t('common.copied'), 'primary');
       });
       $('kiroSsoCancelBtn').addEventListener('click', () => cancelKiroSsoLogin(true));
       if (popup) popup.location.href = data.signInUrl;
@@ -3190,8 +3247,7 @@
       $('builderIdStep2').classList.remove('hidden');
       $('builderIdOpenBtn').addEventListener('click', () => window.open($('builderIdVerifyUrl').textContent, '_blank'));
       $('builderIdCopyBtn').addEventListener('click', async () => {
-        await copyText($('builderIdVerifyUrl').textContent);
-        toast(t('common.copied'), 'primary');
+        if (await copyText($('builderIdVerifyUrl').textContent)) toast(t('common.copied'), 'primary');
       });
       $('builderIdCancelBtn').addEventListener('click', cancelBuilderIdLogin);
       pollBuilderIdAuth(d.interval || 5);
@@ -3246,8 +3302,7 @@
         $('iamBtn').textContent = t('iam.complete');
         $('iamOpenBtn').addEventListener('click', () => window.open($('iamAuthUrl').textContent, '_blank'));
         $('iamCopyBtn').addEventListener('click', async () => {
-          await copyText($('iamAuthUrl').textContent);
-          toast(t('common.copied'), 'primary');
+          if (await copyText($('iamAuthUrl').textContent)) toast(t('common.copied'), 'primary');
         });
       } else toastError(t('common.failed') + ': ' + (d.error || ''));
     }
@@ -3342,8 +3397,7 @@
       return JSON.stringify(filtered, null, 2);
     });
     try {
-      await copyText(jsonPromise);
-      toast(t('export.copied'), 'primary');
+      if (await copyText(jsonPromise)) toast(t('export.copied'), 'primary');
     } catch (e) {
       if (e && e.message !== 'no-data') toastError(t('common.failed'));
     }
@@ -3539,8 +3593,7 @@
       const target = $(id);
       if (!target) return;
       try {
-        await copyText(target.dataset.rawValue || target.textContent);
-        toast(t('common.copied'), 'primary');
+        if (await copyText(target.dataset.rawValue || target.textContent)) toast(t('common.copied'), 'primary');
       } catch (e) {
         toast(t('common.failed'), 'error');
       }
@@ -3650,6 +3703,9 @@
     $('exportModalClose').addEventListener('click', closeExportModal);
     $('testModalClose').addEventListener('click', closeTestModal);
     $('updateModalClose').addEventListener('click', closeUpdateModal);
+    $('clipboardFallbackClose').addEventListener('click', closeClipboardFallback);
+    $('clipboardFallbackCancel').addEventListener('click', closeClipboardFallback);
+    $('clipboardFallbackCopy').addEventListener('click', copyClipboardFallbackValue);
     [
       ['addModal', closeModal],
       ['detailModal', closeDetailModal],
@@ -3657,6 +3713,7 @@
       ['testModal', closeTestModal],
       ['updateModal', closeUpdateModal],
       ['confirmModal', () => closeConfirm(false)],
+      ['clipboardFallbackModal', closeClipboardFallback],
     ].forEach(([id, fn]) => bindDialogBackdropClose(id, fn));
 
     $('modalBody').addEventListener('click', e => {

@@ -1,5 +1,5 @@
 {
-  "version": "1.2.8",
-  "changelog": "Recover complete tool calls when an upstream AWS EventStream ends after valid JSON arguments but omits the final stop marker. Incomplete, empty, or malformed tool arguments remain rejected and retryable.\n当上游 AWS EventStream 已传完合法工具 JSON、但遗漏最终 stop 标记时，安全恢复该工具调用；不完整、空白或格式错误的参数仍会拒绝并进入重试。",
+  "version": "1.2.9",
+  "changelog": "Fix credential JSON copying on public HTTP deployments. Clipboard operations now verify success and fall back to a secure, user-initiated copy dialog when browser clipboard APIs are unavailable or blocked.\n修复公网 HTTP 部署下账号凭据 JSON 无法复制的问题。复制操作现在会校验真实结果，并在浏览器剪贴板 API 不可用或被拦截时，降级为需要用户再次确认的安全复制弹窗。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }

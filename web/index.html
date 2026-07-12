@@ -1077,6 +1077,27 @@
     </div>
   </div>
 
+  <div id="clipboardFallbackModal" class="modal">
+    <div class="modal-content clipboard-fallback-content">
+      <div class="modal-header">
+        <span class="modal-title" data-i18n="clipboard.title"></span>
+        <button class="modal-close" id="clipboardFallbackClose" type="button" aria-label=""
+          data-i18n-aria-label="common.close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p class="confirm-message" data-i18n="clipboard.httpHint"></p>
+        <textarea id="clipboardFallbackValue" class="clipboard-fallback-value font-mono" readonly
+          spellcheck="false"></textarea>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" id="clipboardFallbackCancel" type="button"
+            data-i18n="common.close"></button>
+          <button class="btn btn-primary" id="clipboardFallbackCopy" type="button"
+            data-i18n="clipboard.copy"></button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <div id="apiKeyModal" class="modal">
     <div class="modal-content">
       <div class="modal-header">
