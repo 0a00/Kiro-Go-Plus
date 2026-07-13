@@ -51,6 +51,42 @@ func TestRequestLogConfigDefaultsAndPersistence(t *testing.T) {
 	}
 }
 
+func TestResetStatisticsClearsGlobalAndAccountCounters(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := Init(path); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	if err := AddAccount(Account{
+		ID:           "stats-reset",
+		RequestCount: 12,
+		ErrorCount:   4,
+		TotalTokens:  345,
+		TotalCredits: 6.5,
+		LastUsed:     123,
+	}); err != nil {
+		t.Fatalf("add account: %v", err)
+	}
+	if err := UpdateStats(16, 12, 4, 345, 6.5); err != nil {
+		t.Fatalf("seed global stats: %v", err)
+	}
+
+	if err := ResetStatistics(); err != nil {
+		t.Fatalf("reset statistics: %v", err)
+	}
+	total, success, failed, tokens, credits := GetStats()
+	if total != 0 || success != 0 || failed != 0 || tokens != 0 || credits != 0 {
+		t.Fatalf("global stats were not reset: %d %d %d %d %f", total, success, failed, tokens, credits)
+	}
+	accounts := GetAccounts()
+	if len(accounts) != 1 {
+		t.Fatalf("account count = %d, want 1", len(accounts))
+	}
+	account := accounts[0]
+	if account.RequestCount != 0 || account.ErrorCount != 0 || account.TotalTokens != 0 || account.TotalCredits != 0 || account.LastUsed != 0 {
+		t.Fatalf("account stats were not reset: %+v", account)
+	}
+}
+
 func TestThinkingConfigDefaultsAndPersistence(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	if err := Init(path); err != nil {

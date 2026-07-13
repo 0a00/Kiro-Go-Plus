@@ -1858,7 +1858,7 @@ img.brand-icon {
 }
 .account-stats {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   justify-items: center;
   gap: 0.5rem;
   padding-top: 0.75rem;
@@ -1866,7 +1866,7 @@ img.brand-icon {
 }
 @media (max-width: 640px) {
   .account-stats {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
 @media (max-width: 720px) {
@@ -1912,6 +1912,12 @@ img.brand-icon {
   font-weight: 600;
   font-feature-settings: "tnum";
   color: var(--foreground);
+}
+.account-stat-value--success {
+  color: var(--success);
+}
+.account-stat-value--danger {
+  color: var(--destructive);
 }
 .account-stat-label {
   font-size: 0.6875rem;

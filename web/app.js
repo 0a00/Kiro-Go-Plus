@@ -947,6 +947,8 @@
       const idAttr = escapeAttr(a.id);
       const displayEmail = getDisplayEmail(a.email, a.id);
       const selectLabel = t('accounts.selectAccount', displayEmail);
+      const successCount = Number(a.successCount ?? a.requestCount) || 0;
+      const failureCount = Number(a.failureCount ?? a.errorCount) || 0;
 
       const refreshSvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>';
       const userSvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>';
@@ -997,7 +999,8 @@
           '<div class="usage-text"><span>' + (a.trialUsageCurrent != null ? a.trialUsageCurrent.toFixed(1) : 0) + ' / ' + (a.trialUsageLimit != null ? a.trialUsageLimit.toFixed(0) : 0) + '</span><span>' + trialPct.toFixed(1) + '%</span></div>' +
           '</div>' : '') +
         '<div class="account-stats">' +
-        '<div class="account-stat"><div class="account-stat-value">' + (a.requestCount || 0) + '</div><div class="account-stat-label">' + escapeHtml(t('accounts.requests')) + '</div></div>' +
+        '<div class="account-stat"><div class="account-stat-value account-stat-value--success">' + formatNum(successCount) + '</div><div class="account-stat-label">' + escapeHtml(t('accounts.successCount')) + '</div></div>' +
+        '<div class="account-stat"><div class="account-stat-value account-stat-value--danger">' + formatNum(failureCount) + '</div><div class="account-stat-label">' + escapeHtml(t('accounts.failureCount')) + '</div></div>' +
         '<div class="account-stat"><div class="account-stat-value">' + formatNum(a.totalTokens || 0) + '</div><div class="account-stat-label">' + escapeHtml(t('accounts.tokens')) + '</div></div>' +
         '<div class="account-stat"><div class="account-stat-value">' + (a.totalCredits || 0).toFixed(1) + '</div><div class="account-stat-label">' + escapeHtml(t('accounts.credits')) + '</div></div>' +
         '<div class="account-stat"><div class="account-stat-value">' + escapeHtml(formatTokenExpiry(a.expiresAt)) + '</div><div class="account-stat-label">' + escapeHtml(t('accounts.expiry')) + '</div></div>' +
@@ -1309,8 +1312,8 @@
       '</div></div>' +
 
       '<div class="detail-section"><h4>' + escapeHtml(t('detail.statistics')) + '</h4><div class="detail-grid">' +
-      detailItem(t('detail.requestCount'), a.requestCount || 0) +
-      detailItem(t('detail.errorCount'), a.errorCount || 0) +
+      detailItem(t('detail.successCount'), Number(a.successCount ?? a.requestCount) || 0) +
+      detailItem(t('detail.failureCount'), Number(a.failureCount ?? a.errorCount) || 0) +
       detailItem(t('detail.totalTokens'), formatNum(a.totalTokens || 0)) +
       detailItem(t('detail.totalCredits'), (a.totalCredits || 0).toFixed(2)) +
       '</div></div>' +
@@ -2368,6 +2371,7 @@
       const res = await api('/stats/reset', { method: 'POST' });
       if (!res.ok) throw new Error(t('common.failed'));
       loadStats();
+      loadAccounts();
       toastPrimary(t('settings.statsReset'));
     } catch (e) {
       toastError((e && e.message) || t('common.failed'));

@@ -146,6 +146,32 @@ func TestAccountStatsAreCoalescedAndPersisted(t *testing.T) {
 	}
 }
 
+func TestResetStatsClearsAllInMemoryAccountCopies(t *testing.T) {
+	account := config.Account{
+		ID:           "stats-reset",
+		RequestCount: 8,
+		ErrorCount:   3,
+		TotalTokens:  99,
+		TotalCredits: 1.5,
+		LastUsed:     123,
+	}
+	p := &AccountPool{
+		accounts:   []config.Account{account, account},
+		dirtyStats: map[string]struct{}{account.ID: {}},
+	}
+
+	p.ResetStats()
+
+	for _, got := range p.GetAllAccounts() {
+		if got.RequestCount != 0 || got.ErrorCount != 0 || got.TotalTokens != 0 || got.TotalCredits != 0 || got.LastUsed != 0 {
+			t.Fatalf("account stats were not reset: %+v", got)
+		}
+	}
+	if len(p.dirtyStats) != 0 {
+		t.Fatalf("dirty stats were not cleared: %+v", p.dirtyStats)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // IsAuthFailure
 // ---------------------------------------------------------------------------

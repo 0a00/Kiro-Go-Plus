@@ -3756,6 +3756,8 @@ func (h *Handler) apiGetAccounts(w http.ResponseWriter, r *http.Request) {
 			"trialExpiresAt":    a.TrialExpiresAt,
 			"requestCount":      stats.RequestCount,
 			"errorCount":        stats.ErrorCount,
+			"successCount":      stats.RequestCount,
+			"failureCount":      stats.ErrorCount,
 			"totalTokens":       stats.TotalTokens,
 			"totalCredits":      stats.TotalCredits,
 			"lastUsed":          stats.LastUsed,
@@ -5633,7 +5635,10 @@ func (h *Handler) apiResetStats(w http.ResponseWriter, r *http.Request) {
 	h.creditsMu.Lock()
 	h.totalCredits = 0
 	h.creditsMu.Unlock()
-	if err := config.UpdateStats(0, 0, 0, 0, 0); err != nil {
+	if h.pool != nil {
+		h.pool.ResetStats()
+	}
+	if err := config.ResetStatistics(); err != nil {
 		w.WriteHeader(500)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
@@ -6045,6 +6050,8 @@ func (h *Handler) apiGetAccountFull(w http.ResponseWriter, r *http.Request, id s
 		"trialExpiresAt":    account.TrialExpiresAt,
 		"requestCount":      stats.RequestCount,
 		"errorCount":        stats.ErrorCount,
+		"successCount":      stats.RequestCount,
+		"failureCount":      stats.ErrorCount,
 		"totalTokens":       stats.TotalTokens,
 		"totalCredits":      stats.TotalCredits,
 		"lastUsed":          stats.LastUsed,

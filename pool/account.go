@@ -944,6 +944,30 @@ func (p *AccountPool) FlushStats() {
 	p.flushAccountStats()
 }
 
+// ResetStats clears the in-memory per-account cumulative counters. Persistent
+// config is reset by the caller so disabled accounts are included as well.
+func (p *AccountPool) ResetStats() {
+	if p == nil {
+		return
+	}
+	p.statsSaveMu.Lock()
+	if p.statsSaveTimer != nil {
+		p.statsSaveTimer.Stop()
+		p.statsSaveTimer = nil
+	}
+	p.mu.Lock()
+	for i := range p.accounts {
+		p.accounts[i].RequestCount = 0
+		p.accounts[i].ErrorCount = 0
+		p.accounts[i].TotalTokens = 0
+		p.accounts[i].TotalCredits = 0
+		p.accounts[i].LastUsed = 0
+	}
+	p.dirtyStats = make(map[string]struct{})
+	p.mu.Unlock()
+	p.statsSaveMu.Unlock()
+}
+
 // GetAllAccounts 获取所有账号副本
 func (p *AccountPool) GetAllAccounts() []config.Account {
 	p.mu.RLock()

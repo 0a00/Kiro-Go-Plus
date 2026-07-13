@@ -124,9 +124,10 @@ type Account struct {
 	TrialStatus       string  `json:"trialStatus,omitempty"`       // Trial status: ACTIVE, EXPIRED, NONE
 	TrialExpiresAt    int64   `json:"trialExpiresAt,omitempty"`    // Trial expiration timestamp (Unix seconds)
 
-	// Runtime statistics (updated during operation)
-	RequestCount int     `json:"requestCount,omitempty"` // Total requests processed
-	ErrorCount   int     `json:"errorCount,omitempty"`   // Total errors encountered
+	// Runtime statistics (updated during operation). RequestCount and ErrorCount
+	// are retained as JSON field names for backward compatibility.
+	RequestCount int     `json:"requestCount,omitempty"` // Successful requests completed by this account
+	ErrorCount   int     `json:"errorCount,omitempty"`   // Failed account-level upstream attempts
 	LastUsed     int64   `json:"lastUsed,omitempty"`     // Last request timestamp
 	TotalTokens  int     `json:"totalTokens,omitempty"`  // Cumulative tokens processed
 	TotalCredits float64 `json:"totalCredits,omitempty"` // Cumulative credits consumed
@@ -459,7 +460,7 @@ type AccountInfo struct {
 }
 
 // Version current version
-const Version = "1.2.13"
+const Version = "1.2.14"
 
 var (
 	cfg           *Config
@@ -2337,6 +2338,25 @@ func UpdateStats(totalReq, successReq, failedReq, totalTokens int, totalCredits 
 	cfg.FailedRequests = failedReq
 	cfg.TotalTokens = totalTokens
 	cfg.TotalCredits = totalCredits
+	return Save()
+}
+
+// ResetStatistics clears global and per-account cumulative runtime counters.
+func ResetStatistics() error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	cfg.TotalRequests = 0
+	cfg.SuccessRequests = 0
+	cfg.FailedRequests = 0
+	cfg.TotalTokens = 0
+	cfg.TotalCredits = 0
+	for i := range cfg.Accounts {
+		cfg.Accounts[i].RequestCount = 0
+		cfg.Accounts[i].ErrorCount = 0
+		cfg.Accounts[i].TotalTokens = 0
+		cfg.Accounts[i].TotalCredits = 0
+		cfg.Accounts[i].LastUsed = 0
+	}
 	return Save()
 }
 

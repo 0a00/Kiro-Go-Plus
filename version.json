@@ -1,5 +1,5 @@
 {
-  "version": "1.2.13",
-  "changelog": "Make the persisted request-log retention limit configurable from the Web admin panel. Operators can retain 100 to 20,000 metadata-only request records; changes apply immediately, shrinking the in-memory and persisted history when necessary. Existing deployments keep the previous 1,000-record default until changed.\n请求日志保留上限现在可在 Web 后台设置，范围为 100-20000 条。修改立即生效，缩小上限时会同步裁剪内存和持久化记录；现有部署升级后仍保持原来的 1000 条默认值，直到手动修改。",
+  "version": "1.2.14",
+  "changelog": "Expose persisted per-account success and failure counters in the account list and detail views while retaining the legacy requestCount/errorCount API fields. Global cards now clearly label total successful and failed client requests. Reset Statistics now clears both global and every account's cumulative counters.\n账号列表和详情现在明确显示每个账号的成功次数与失败次数，并继续保留旧的 requestCount/errorCount API 字段兼容。顶部统计明确显示总成功次数和总失败次数；重置统计会同时清空全局及所有账号累计计数。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }

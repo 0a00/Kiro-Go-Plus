@@ -29,6 +29,44 @@ func TestThinkingSourceReasoningFirst(t *testing.T) {
 	}
 }
 
+func TestApiGetAccountsExposesExplicitOutcomeCounts(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	if err := config.AddAccount(config.Account{
+		ID:           "outcome-counts",
+		Enabled:      true,
+		RequestCount: 17,
+		ErrorCount:   5,
+	}); err != nil {
+		t.Fatalf("config.AddAccount: %v", err)
+	}
+	pool := accountpool.GetPool()
+	pool.Reload()
+	h := &Handler{pool: pool}
+	rec := httptest.NewRecorder()
+	h.apiGetAccounts(rec, httptest.NewRequest(http.MethodGet, "/admin/api/accounts", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var accounts []struct {
+		RequestCount int `json:"requestCount"`
+		ErrorCount   int `json:"errorCount"`
+		SuccessCount int `json:"successCount"`
+		FailureCount int `json:"failureCount"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &accounts); err != nil {
+		t.Fatalf("decode accounts: %v", err)
+	}
+	if len(accounts) != 1 {
+		t.Fatalf("account count = %d, want 1", len(accounts))
+	}
+	got := accounts[0]
+	if got.SuccessCount != 17 || got.FailureCount != 5 || got.RequestCount != 17 || got.ErrorCount != 5 {
+		t.Fatalf("unexpected account counters: %+v", got)
+	}
+}
+
 func TestThinkingConfigAPIUpdatesTokenDefaults(t *testing.T) {
 	tempDir := t.TempDir()
 	if err := config.Init(filepath.Join(tempDir, "config.json")); err != nil {
