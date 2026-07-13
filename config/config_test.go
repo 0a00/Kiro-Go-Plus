@@ -24,6 +24,33 @@ func TestVersionMetadataMatchesBinaryVersion(t *testing.T) {
 	}
 }
 
+func TestRequestLogConfigDefaultsAndPersistence(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := Init(path); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	if got := GetRequestLogConfig().MaxEntries; got != DefaultRequestLogMaxEntries {
+		t.Fatalf("default max entries = %d, want %d", got, DefaultRequestLogMaxEntries)
+	}
+
+	if err := UpdateRequestLogConfig(RequestLogConfig{MaxEntries: 5000}); err != nil {
+		t.Fatalf("update request log config: %v", err)
+	}
+	if err := Init(path); err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	if got := GetRequestLogConfig().MaxEntries; got != 5000 {
+		t.Fatalf("persisted max entries = %d, want 5000", got)
+	}
+
+	if err := UpdateRequestLogConfig(RequestLogConfig{MaxEntries: MaxRequestLogMaxEntries + 1}); err != nil {
+		t.Fatalf("clamp request log config: %v", err)
+	}
+	if got := GetRequestLogConfig().MaxEntries; got != MaxRequestLogMaxEntries {
+		t.Fatalf("clamped max entries = %d, want %d", got, MaxRequestLogMaxEntries)
+	}
+}
+
 func TestThinkingConfigDefaultsAndPersistence(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	if err := Init(path); err != nil {

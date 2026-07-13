@@ -331,7 +331,8 @@ func NewHandler() *Handler {
 	promptCache := newPromptCacheTrackerWithEfficiencyRange(time.Duration(promptCacheCfg.KvCacheTTLSecs)*time.Second, promptCacheCfg.CacheReadEfficiencyMin, promptCacheCfg.CacheReadEfficiencyMax)
 	promptCache.ConfigurePolicy(promptCacheCfg.Enabled, promptCacheCfg.NamespaceMode)
 	promptCache.ConfigureLimits(promptCacheCfg.MaxEntriesPerAccount, promptCacheCfg.MaxEntriesTotal)
-	requestLog, requestLogErr := newPersistentRequestLog(defaultRequestLogLimit, requestLogPath())
+	requestLogCfg := config.GetRequestLogConfig()
+	requestLog, requestLogErr := newPersistentRequestLog(requestLogCfg.MaxEntries, requestLogPath())
 	if requestLogErr != nil {
 		logger.Warnf("[RequestLog] Failed to restore persisted request log: %v", requestLogErr)
 	}
@@ -3625,6 +3626,10 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 		h.apiUpdateDiagnostics(w, r)
 	case path == "/diagnostics/events" && r.Method == "GET":
 		h.apiGetDiagnosticEvents(w, r)
+	case path == "/request-log" && r.Method == "GET":
+		h.apiGetRequestLogConfig(w, r)
+	case path == "/request-log" && r.Method == "POST":
+		h.apiUpdateRequestLogConfig(w, r)
 	case path == "/web-search" && r.Method == "GET":
 		h.apiGetWebSearch(w, r)
 	case path == "/web-search" && r.Method == "POST":
@@ -5469,6 +5474,35 @@ func (h *Handler) apiGetDiagnosticEvents(w http.ResponseWriter, r *http.Request)
 	})
 }
 
+func (h *Handler) apiGetRequestLogConfig(w http.ResponseWriter, r *http.Request) {
+	json.NewEncoder(w).Encode(config.GetRequestLogConfig())
+}
+
+func (h *Handler) apiUpdateRequestLogConfig(w http.ResponseWriter, r *http.Request) {
+	var req config.RequestLogConfig
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON"})
+		return
+	}
+	if req.MaxEntries < config.MinRequestLogMaxEntries || req.MaxEntries > config.MaxRequestLogMaxEntries {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "maxEntries must be between 100 and 20000"})
+		return
+	}
+	if err := config.UpdateRequestLogConfig(req); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	if h.requestLog == nil {
+		h.requestLog = newRequestLog(req.MaxEntries)
+	} else {
+		h.requestLog.configure(req.MaxEntries)
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "config": config.GetRequestLogConfig()})
+}
+
 func (h *Handler) apiGetWebSearch(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(config.GetWebSearchConfig())
 }
@@ -5551,15 +5585,17 @@ func (h *Handler) apiGetRequests(w http.ResponseWriter, r *http.Request) {
 			limit = parsed
 		}
 	}
-	if limit > defaultRequestLogLimit {
-		limit = defaultRequestLogLimit
+	requestLogCfg := config.GetRequestLogConfig()
+	if limit > requestLogCfg.MaxEntries {
+		limit = requestLogCfg.MaxEntries
 	}
 	if h.requestLog == nil {
-		h.requestLog = newRequestLog(defaultRequestLogLimit)
+		h.requestLog = newRequestLog(requestLogCfg.MaxEntries)
 	}
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"requests": h.requestLog.list(limit),
-		"limit":    limit,
+		"requests":   h.requestLog.list(limit),
+		"limit":      limit,
+		"maxEntries": requestLogCfg.MaxEntries,
 	})
 }
 

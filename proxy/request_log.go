@@ -16,10 +16,10 @@ import (
 )
 
 const (
-	defaultRequestLogLimit      = 1000
+	defaultRequestLogLimit      = config.DefaultRequestLogMaxEntries
 	requestLogStateVersion      = 1
 	requestLogSaveDelay         = 2 * time.Second
-	maxPersistedRequestLogBytes = 16 << 20
+	maxPersistedRequestLogBytes = 64 << 20
 	requestLogPersistenceFile   = "request_log.json"
 )
 
@@ -75,6 +75,22 @@ func newRequestLog(limit int) *requestLog {
 		limit = defaultRequestLogLimit
 	}
 	return &requestLog{limit: limit, entries: make([]requestLogEntry, 0, limit)}
+}
+
+func (l *requestLog) configure(limit int) {
+	if l == nil {
+		return
+	}
+	if limit <= 0 {
+		limit = defaultRequestLogLimit
+	}
+	l.mu.Lock()
+	l.limit = limit
+	if overflow := len(l.entries) - limit; overflow > 0 {
+		l.entries = append([]requestLogEntry(nil), l.entries[overflow:]...)
+	}
+	l.mu.Unlock()
+	l.scheduleSave()
 }
 
 func requestLogPath() string {
@@ -277,7 +293,7 @@ func (h *Handler) recordRequestLog(entry requestLogEntry) {
 		return
 	}
 	if h.requestLog == nil {
-		h.requestLog = newRequestLog(defaultRequestLogLimit)
+		h.requestLog = newRequestLog(config.GetRequestLogConfig().MaxEntries)
 	}
 	h.requestLog.add(entry)
 }

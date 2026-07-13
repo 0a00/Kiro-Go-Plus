@@ -289,6 +289,17 @@ type DiagnosticConfig struct {
 	MaxEntries            int  `json:"maxEntries"`
 }
 
+const (
+	DefaultRequestLogMaxEntries = 1000
+	MinRequestLogMaxEntries     = 100
+	MaxRequestLogMaxEntries     = 20000
+)
+
+// RequestLogConfig controls the bounded, persisted recent-request history.
+type RequestLogConfig struct {
+	MaxEntries int `json:"maxEntries"`
+}
+
 // WebSearchConfig controls the Anthropic web_search compatibility shim.
 type WebSearchConfig struct {
 	Enabled bool `json:"enabled"`
@@ -360,6 +371,9 @@ type Config struct {
 
 	// Diagnostics controls optional failure diagnostics.
 	Diagnostics DiagnosticConfig `json:"diagnostics,omitempty"`
+
+	// RequestLog controls persisted recent-request metadata.
+	RequestLog RequestLogConfig `json:"requestLog,omitempty"`
 
 	// WebSearch controls the optional Anthropic web_search shim.
 	WebSearch WebSearchConfig `json:"webSearch,omitempty"`
@@ -445,7 +459,7 @@ type AccountInfo struct {
 }
 
 // Version current version
-const Version = "1.2.12"
+const Version = "1.2.13"
 
 var (
 	cfg           *Config
@@ -503,6 +517,7 @@ func loadLocked() error {
 				ModelRegistry:             defaultModelRegistryConfig(),
 				Health:                    defaultHealthConfig(),
 				Diagnostics:               defaultDiagnosticConfig(),
+				RequestLog:                defaultRequestLogConfig(),
 				WebSearch:                 defaultWebSearchConfig(),
 				CountTokensProvider:       defaultCountTokensProviderConfig(),
 			}
@@ -588,6 +603,9 @@ func loadLocked() error {
 	if !rawConfigHasKey(data, "diagnostics") {
 		c.Diagnostics = defaultDiagnosticConfig()
 	}
+	if !rawConfigHasKey(data, "requestLog") {
+		c.RequestLog = defaultRequestLogConfig()
+	}
 	if !rawConfigHasKey(data, "webSearch") {
 		c.WebSearch = defaultWebSearchConfig()
 	}
@@ -611,6 +629,7 @@ func loadLocked() error {
 	normalizeModelRegistryLocked()
 	normalizeHealthLocked()
 	normalizeDiagnosticLocked()
+	normalizeRequestLogLocked()
 	normalizeCountTokensProviderLocked()
 
 	// Migration: if a legacy single ApiKey is present and the new ApiKeys list is empty,
@@ -1179,6 +1198,21 @@ func normalizeDiagnosticLocked() {
 	}
 	if cfg.Diagnostics.MaxEntries > 2000 {
 		cfg.Diagnostics.MaxEntries = 2000
+	}
+}
+
+func defaultRequestLogConfig() RequestLogConfig {
+	return RequestLogConfig{MaxEntries: DefaultRequestLogMaxEntries}
+}
+
+func normalizeRequestLogLocked() {
+	if cfg.RequestLog.MaxEntries <= 0 {
+		cfg.RequestLog.MaxEntries = DefaultRequestLogMaxEntries
+	} else if cfg.RequestLog.MaxEntries < MinRequestLogMaxEntries {
+		cfg.RequestLog.MaxEntries = MinRequestLogMaxEntries
+	}
+	if cfg.RequestLog.MaxEntries > MaxRequestLogMaxEntries {
+		cfg.RequestLog.MaxEntries = MaxRequestLogMaxEntries
 	}
 }
 
@@ -1777,6 +1811,32 @@ func UpdateDiagnosticConfig(diagnostics DiagnosticConfig) error {
 	defer cfgLock.Unlock()
 	cfg.Diagnostics = diagnostics
 	normalizeDiagnosticLocked()
+	return Save()
+}
+
+func GetRequestLogConfig() RequestLogConfig {
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	if cfg == nil {
+		return defaultRequestLogConfig()
+	}
+	out := cfg.RequestLog
+	if out.MaxEntries <= 0 {
+		out.MaxEntries = DefaultRequestLogMaxEntries
+	} else if out.MaxEntries < MinRequestLogMaxEntries {
+		out.MaxEntries = MinRequestLogMaxEntries
+	}
+	if out.MaxEntries > MaxRequestLogMaxEntries {
+		out.MaxEntries = MaxRequestLogMaxEntries
+	}
+	return out
+}
+
+func UpdateRequestLogConfig(requestLog RequestLogConfig) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	cfg.RequestLog = requestLog
+	normalizeRequestLogLocked()
 	return Save()
 }
 

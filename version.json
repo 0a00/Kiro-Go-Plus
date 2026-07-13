@@ -1,5 +1,5 @@
 {
-  "version": "1.2.12",
-  "changelog": "Persist the bounded recent-request log across restarts. The service restores the newest 1,000 metadata-only entries from data/request_log.json, preserves request IDs, batches atomic disk writes, uses owner-only file permissions, and flushes pending records during graceful shutdown. Corrupt state is ignored without blocking startup.\n最近请求日志现在可跨重启保留。服务会从 data/request_log.json 恢复最近 1000 条仅含元数据的记录并延续请求 ID；写入采用合并、原子替换和仅所有者可读写权限，正常关闭时强制落盘。文件损坏不会阻止服务启动。",
+  "version": "1.2.13",
+  "changelog": "Make the persisted request-log retention limit configurable from the Web admin panel. Operators can retain 100 to 20,000 metadata-only request records; changes apply immediately, shrinking the in-memory and persisted history when necessary. Existing deployments keep the previous 1,000-record default until changed.\n请求日志保留上限现在可在 Web 后台设置，范围为 100-20000 条。修改立即生效，缩小上限时会同步裁剪内存和持久化记录；现有部署升级后仍保持原来的 1000 条默认值，直到手动修改。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }

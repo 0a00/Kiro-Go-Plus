@@ -676,6 +676,17 @@
           </div>
         </div>
 
+        <!-- Request log settings -->
+        <div class="card">
+          <div class="card-header"><span class="card-title" data-i18n="settings.requestLog"></span></div>
+          <div class="form-group">
+            <label data-i18n="settings.requestLogMaxEntries"></label>
+            <input type="number" id="requestLogMaxEntries" min="100" max="20000" step="100" />
+            <small data-i18n="settings.requestLogHint"></small>
+          </div>
+          <button class="btn btn-primary" id="saveRequestLogBtn" data-i18n="settings.saveRequestLog"></button>
+        </div>
+
         <!-- Count tokens provider settings -->
         <div class="card">
           <div class="card-header"><span class="card-title" data-i18n="settings.countTokensProvider"></span></div>

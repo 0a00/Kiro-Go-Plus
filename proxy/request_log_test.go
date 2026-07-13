@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -93,6 +94,58 @@ func TestRequestLogKeepsNewestFirstWithLimit(t *testing.T) {
 	}
 	if got[0].Protocol != "three" || got[1].Protocol != "two" {
 		t.Fatalf("expected newest retained entries first, got %+v", got)
+	}
+}
+
+func TestRequestLogConfigureAppliesLimitImmediately(t *testing.T) {
+	log := newRequestLog(3)
+	log.add(requestLogEntry{Protocol: "one"})
+	log.add(requestLogEntry{Protocol: "two"})
+	log.add(requestLogEntry{Protocol: "three"})
+
+	log.configure(2)
+	got := log.list(10)
+	if len(got) != 2 || got[0].Protocol != "three" || got[1].Protocol != "two" {
+		t.Fatalf("unexpected entries after shrinking limit: %+v", got)
+	}
+
+	log.configure(4)
+	log.add(requestLogEntry{Protocol: "four"})
+	log.add(requestLogEntry{Protocol: "five"})
+	if got := log.list(10); len(got) != 4 || got[0].Protocol != "five" {
+		t.Fatalf("unexpected entries after expanding limit: %+v", got)
+	}
+}
+
+func TestApiRequestLogConfigUpdatesRuntimeLimit(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	log := newRequestLog(200)
+	for i := 0; i < 101; i++ {
+		log.add(requestLogEntry{Protocol: "request"})
+	}
+	h := &Handler{requestLog: log}
+	req := httptest.NewRequest(http.MethodPost, "/request-log", strings.NewReader(`{"maxEntries":100}`))
+	rec := httptest.NewRecorder()
+
+	h.apiUpdateRequestLogConfig(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if got := config.GetRequestLogConfig().MaxEntries; got != 100 {
+		t.Fatalf("persisted max entries = %d, want 100", got)
+	}
+	if got := h.requestLog.list(200); len(got) != 100 {
+		t.Fatalf("runtime request log length = %d, want 100", len(got))
+	}
+
+	badReq := httptest.NewRequest(http.MethodPost, "/request-log", strings.NewReader(`{"maxEntries":99}`))
+	badRec := httptest.NewRecorder()
+	h.apiUpdateRequestLogConfig(badRec, badReq)
+	if badRec.Code != http.StatusBadRequest {
+		t.Fatalf("expected invalid limit to return 400, got %d", badRec.Code)
 	}
 }
 

@@ -1652,6 +1652,7 @@
       loadUpstreamProtectionConfig(),
       loadPromptCacheConfig(),
       loadDiagnosticsConfig(),
+      loadRequestLogConfig(),
       loadCountTokensProviderConfig(),
       loadWebSearchConfig(),
       loadPromptFilter(),
@@ -2271,6 +2272,29 @@
     }
     toast(t('settings.diagnosticsSaved'), 'success');
     loadDiagnosticsConfig();
+  }
+  async function loadRequestLogConfig() {
+    const res = await api('/request-log');
+    const d = await res.json();
+    $('requestLogMaxEntries').value = d.maxEntries || 1000;
+  }
+  async function saveRequestLogConfig() {
+    const maxEntries = Math.round(Number($('requestLogMaxEntries').value) || 0);
+    if (maxEntries < 100 || maxEntries > 20000) {
+      toast(t('settings.requestLogInvalid'), 'warning');
+      return;
+    }
+    const res = await api('/request-log', {
+      method: 'POST',
+      body: JSON.stringify({ maxEntries })
+    });
+    const d = await res.json().catch(() => ({}));
+    if (!res.ok || d.success === false) {
+      toast(t('common.saveFailed') + ': ' + (d.error || t('common.unknownError')), 'error');
+      return;
+    }
+    toast(t('settings.requestLogSaved'), 'success');
+    loadRequestLogConfig();
   }
   async function loadCountTokensProviderConfig() {
     const res = await api('/count-tokens-provider');
@@ -3667,6 +3691,7 @@
     $('savePromptCacheBtn').addEventListener('click', savePromptCacheConfig);
     $('clearPromptCacheBtn').addEventListener('click', clearPromptCache);
     $('saveDiagnosticsBtn').addEventListener('click', saveDiagnosticsConfig);
+    $('saveRequestLogBtn').addEventListener('click', saveRequestLogConfig);
     $('saveCountTokensProviderBtn').addEventListener('click', saveCountTokensProviderConfig);
     $('saveWebSearchBtn').addEventListener('click', saveWebSearchConfig);
     $('saveThinkingBtn').addEventListener('click', saveThinkingConfig);
