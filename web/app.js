@@ -735,12 +735,14 @@
     const cooling = states.filter(s => (s.cooldownSeconds || 0) > 0).length;
 	const endpointCircuits = (((data || {}).networkCircuits || {}).endpoints || []).filter(s => s.state === 'open').length;
 	const proxyCircuits = (((data || {}).networkCircuits || {}).proxies || []).filter(s => s.state === 'open').length;
+    const accountEndpointCooldowns = (((data || {}).accountEndpointRoutes || {}).cooldowns || []).length;
     el.innerHTML =
       '<div class="request-summary-item"><span>' + escapeHtml(t('requests.protection')) + '</span><strong>' + escapeHtml(cfg.enabled === false ? t('common.disabled') : t('common.enabled')) + '</strong></div>' +
       '<div class="request-summary-item"><span>' + escapeHtml(t('requests.inFlight')) + '</span><strong>' + active + '</strong></div>' +
       '<div class="request-summary-item"><span>' + escapeHtml(t('requests.cooling')) + '</span><strong>' + cooling + '</strong></div>' +
 	  '<div class="request-summary-item"><span>' + escapeHtml(t('requests.affinity')) + '</span><strong>' + ((data && data.routeAffinityCount) || 0) + '</strong></div>' +
 	  '<div class="request-summary-item"><span>' + escapeHtml(t('requests.endpointCircuits')) + '</span><strong>' + endpointCircuits + '</strong></div>' +
+	  '<div class="request-summary-item"><span>' + escapeHtml(t('requests.accountEndpointCooldowns')) + '</span><strong>' + accountEndpointCooldowns + '</strong></div>' +
 	  '<div class="request-summary-item"><span>' + escapeHtml(t('requests.proxyCircuits')) + '</span><strong>' + proxyCircuits + '</strong></div>';
   }
 

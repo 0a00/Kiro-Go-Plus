@@ -47,6 +47,7 @@
   "requests.cooling": "Cooling",
   "requests.affinity": "Affinity",
 	"requests.endpointCircuits": "Open Endpoint Circuits",
+	"requests.accountEndpointCooldowns": "Account Endpoint Cooldowns",
 	"requests.proxyCircuits": "Open Proxy Circuits",
   "requests.tools": "tools",
   "requests.toolPolicyExplicit": "client explicit",

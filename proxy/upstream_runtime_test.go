@@ -284,12 +284,21 @@ func TestQuotaErrorFallsBackAcrossEndpoints(t *testing.T) {
 	}
 }
 
+func TestRateLimitErrorFallsBackAcrossEndpoints(t *testing.T) {
+	err := classifyUpstreamHTTPError(http.StatusTooManyRequests, "CodeWhisperer", []byte(`{"message":"too many requests"}`))
+	if err.Kind != UpstreamErrorRateLimit || !err.RetryAcrossEndpoints || !err.RetryAcrossAccounts {
+		t.Fatalf("unexpected rate-limit classification: %+v", err)
+	}
+}
+
 func TestCallKiroAPIFallsBackAfterRuntimeQuota(t *testing.T) {
 	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatalf("init config: %v", err)
 	}
 	_ = config.UpdatePreferredEndpoint("auto")
 	_ = config.UpdateEndpointFallback(true)
+	sharedAccountEndpointRoutes.reset()
+	t.Cleanup(sharedAccountEndpointRoutes.reset)
 
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -321,6 +330,55 @@ func TestCallKiroAPIFallsBackAfterRuntimeQuota(t *testing.T) {
 	}
 	if requests.Load() != 2 || output.String() != "ok" {
 		t.Fatalf("unexpected fallback result: requests=%d output=%q", requests.Load(), output.String())
+	}
+}
+
+func TestCallKiroAPIFallsBackAfterEndpointRateLimit(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	_ = config.UpdatePreferredEndpoint("auto")
+	_ = config.UpdateEndpointFallback(true)
+	sharedAccountEndpointRoutes.reset()
+	t.Cleanup(sharedAccountEndpointRoutes.reset)
+
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if requests.Add(1) == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"message":"too many requests"}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "ok"}))
+	}))
+	defer server.Close()
+
+	oldEndpoints := kiroEndpoints
+	kiroEndpoints = []kiroEndpoint{
+		{Key: "runtime", URL: server.URL, Name: "Kiro Runtime"},
+		{Key: "kiro", URL: server.URL, Name: "Kiro IDE"},
+	}
+	t.Cleanup(func() { kiroEndpoints = oldEndpoints })
+
+	payload := &KiroPayload{}
+	payload.ConversationState.CurrentMessage.UserInputMessage.ModelID = "claude-sonnet-5"
+	var output strings.Builder
+	err := CallKiroAPI(
+		&config.Account{ID: "rate-limit-account", AccessToken: "token"},
+		payload,
+		&KiroStreamCallback{OnText: func(text string, _ bool) { output.WriteString(text) }},
+	)
+	if err != nil {
+		t.Fatalf("expected endpoint fallback, got %v", err)
+	}
+	if requests.Load() != 2 || output.String() != "ok" {
+		t.Fatalf("unexpected fallback result: requests=%d output=%q", requests.Load(), output.String())
+	}
+
+	endpoints, routeErr := sharedAccountEndpointRoutes.availableEndpoints("rate-limit-account", "claude-sonnet-5", "auto", kiroEndpoints)
+	if routeErr != nil || len(endpoints) != 1 || endpoints[0].Key != "kiro" {
+		t.Fatalf("expected successful endpoint affinity with runtime cooling, endpoints=%+v err=%v", endpoints, routeErr)
 	}
 }
 

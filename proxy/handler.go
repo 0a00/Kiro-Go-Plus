@@ -5576,6 +5576,7 @@ func (h *Handler) apiUpdateUpstreamProtection(w http.ResponseWriter, r *http.Req
 func (h *Handler) apiGetUpstreamProtectionStatus(w http.ResponseWriter, r *http.Request) {
 	snapshot := h.pool.ProtectionSnapshot()
 	snapshot["networkCircuits"] = sharedUpstreamHealth.Snapshot()
+	snapshot["accountEndpointRoutes"] = sharedAccountEndpointRoutes.snapshot()
 	json.NewEncoder(w).Encode(snapshot)
 }
 

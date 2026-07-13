@@ -262,6 +262,9 @@ func classifyUpstreamHTTPError(statusCode int, endpoint string, body []byte) *Up
 	case statusCode == 429 || strings.Contains(combined, "rate limit") ||
 		strings.Contains(combined, "too many requests"):
 		err.Kind = UpstreamErrorRateLimit
+		// Rate limits can be isolated to one Kiro data plane. Try the remaining
+		// endpoints for this account before cooling the whole account/model.
+		err.RetryAcrossEndpoints = true
 	case strings.Contains(combined, "invalid_model_id") || strings.Contains(combined, "invalid model") ||
 		strings.Contains(combined, "model_not_found"):
 		err.Kind = UpstreamErrorModelUnavailable

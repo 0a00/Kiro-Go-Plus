@@ -449,7 +449,18 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 
 	// Build endpoint list before profile lookup. Legacy/custom endpoints that do
 	// not require a profile must not pay for a potentially slow profile probe.
-	endpoints := getSortedEndpoints(config.GetPreferredEndpoint())
+	preferredEndpoint := config.GetPreferredEndpoint()
+	endpoints := getSortedEndpoints(preferredEndpoint)
+	accountID := ""
+	if account != nil {
+		accountID = account.ID
+	}
+	modelKey := endpointRouteModel(payload)
+	var routeErr error
+	endpoints, routeErr = sharedAccountEndpointRoutes.availableEndpoints(accountID, modelKey, preferredEndpoint, endpoints)
+	if routeErr != nil {
+		return routeErr
+	}
 	requiresProfileArn := false
 	for _, endpoint := range endpoints {
 		if endpoint.RequiresProfileArn {
@@ -624,6 +635,9 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 			classifiedErr := classifyUpstreamHTTPError(resp.StatusCode, ep.Name, errBody)
 			classifiedErr.RetryAfter = parseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
 			lastErr = classifiedErr
+			if cooldown := sharedAccountEndpointRoutes.recordFailure(accountID, modelKey, ep, lastErr); cooldown > 0 {
+				logger.Warnf("[EndpointRouting] Account %s model %s endpoint %s cooling for %s after %v", accountID, modelKey, ep.Name, cooldown, lastErr)
+			}
 			if circuitEligibleFailure(lastErr) {
 				lastCircuitError = lastErr
 				sharedUpstreamHealth.endpointFailure(endpointCircuitKey, lastErr, time.Since(attemptStartedAt))
@@ -671,6 +685,9 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 				err = classifyTransportError(ep.Name, err)
 			}
 			lastErr = err
+			if cooldown := sharedAccountEndpointRoutes.recordFailure(accountID, modelKey, ep, lastErr); cooldown > 0 {
+				logger.Warnf("[EndpointRouting] Account %s model %s endpoint %s cooling for %s after stream error: %v", accountID, modelKey, ep.Name, cooldown, lastErr)
+			}
 			if meaningfulGate.hasActionableOutput() || !circuitEligibleFailure(err) {
 				sharedUpstreamHealth.endpointSuccess(endpointCircuitKey, time.Since(attemptStartedAt))
 			} else {
@@ -693,6 +710,7 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 			return lastErr
 		}
 		sharedUpstreamHealth.endpointSuccess(endpointCircuitKey, time.Since(attemptStartedAt))
+		sharedAccountEndpointRoutes.recordSuccess(accountID, modelKey, ep)
 		payload.setSuccessfulEndpoint(ep.Name)
 		return nil
 	}

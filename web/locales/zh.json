@@ -47,6 +47,7 @@
   "requests.cooling": "冷却中",
   "requests.affinity": "粘性路由",
 	"requests.endpointCircuits": "端点熔断数",
+	"requests.accountEndpointCooldowns": "账号端点冷却数",
 	"requests.proxyCircuits": "代理熔断数",
   "requests.tools": "工具",
   "requests.toolPolicyExplicit": "客户端显式要求",
