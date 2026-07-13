@@ -267,7 +267,8 @@ func (h *Handler) handleAccountFailure(account *config.Account, err error) {
 				h.pool.RecordError(account.ID, false)
 			}
 			return
-		case UpstreamErrorEndpointUnavailable, UpstreamErrorFirstTokenTimeout, UpstreamErrorEmptyResponse:
+		case UpstreamErrorEndpointUnavailable, UpstreamErrorFirstTokenTimeout,
+			UpstreamErrorToolAssemblyTimeout, UpstreamErrorEmptyResponse:
 			return
 		}
 	}

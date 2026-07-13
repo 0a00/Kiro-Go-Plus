@@ -113,6 +113,8 @@ func TestRetryConfigAPIAcceptsUnlimitedAccountPolling(t *testing.T) {
 
 	retry := config.GetRetryConfig()
 	retry.MaxAccountAttempts = 0
+	retry.MaxRetryDurationSeconds = 1200
+	retry.ToolAssemblyTimeoutSeconds = 240
 	body, err := json.Marshal(retry)
 	if err != nil {
 		t.Fatalf("marshal retry config: %v", err)
@@ -125,6 +127,50 @@ func TestRetryConfigAPIAcceptsUnlimitedAccountPolling(t *testing.T) {
 	}
 	if got := config.GetRetryConfig().MaxAccountAttempts; got != 0 {
 		t.Fatalf("max account attempts = %d, want 0", got)
+	}
+	got := config.GetRetryConfig()
+	if got.MaxRetryDurationSeconds != 1200 || got.ToolAssemblyTimeoutSeconds != 240 {
+		t.Fatalf("retry timeout settings were not persisted: %+v", got)
+	}
+}
+
+func TestRetryConfigAPIPreservesNewTimeoutsWhenOmitted(t *testing.T) {
+	tempDir := t.TempDir()
+	if err := config.Init(filepath.Join(tempDir, "config.json")); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	t.Cleanup(func() { _ = config.Init(filepath.Join(tempDir, "reset.json")) })
+
+	retry := config.GetRetryConfig()
+	retry.MaxRetryDurationSeconds = 1200
+	retry.ToolAssemblyTimeoutSeconds = 240
+	if err := config.UpdateRetryConfig(retry); err != nil {
+		t.Fatalf("seed retry config: %v", err)
+	}
+	body, err := json.Marshal(retry)
+	if err != nil {
+		t.Fatalf("marshal retry config: %v", err)
+	}
+	var document map[string]interface{}
+	if err := json.Unmarshal(body, &document); err != nil {
+		t.Fatalf("parse retry config: %v", err)
+	}
+	delete(document, "maxRetryDurationSeconds")
+	delete(document, "toolAssemblyTimeoutSeconds")
+	body, err = json.Marshal(document)
+	if err != nil {
+		t.Fatalf("marshal legacy retry config: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/admin/api/retry", bytes.NewReader(body))
+	(&Handler{}).apiUpdateRetryConfig(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	got := config.GetRetryConfig()
+	if got.MaxRetryDurationSeconds != 1200 || got.ToolAssemblyTimeoutSeconds != 240 {
+		t.Fatalf("omitted timeout settings were reset: %+v", got)
 	}
 }
 

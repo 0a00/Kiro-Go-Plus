@@ -29,6 +29,7 @@ const (
 	UpstreamErrorEndpointUnavailable UpstreamErrorKind = "endpoint_unavailable"
 	UpstreamErrorTransient           UpstreamErrorKind = "transient"
 	UpstreamErrorFirstTokenTimeout   UpstreamErrorKind = "first_token_timeout"
+	UpstreamErrorToolAssemblyTimeout UpstreamErrorKind = "tool_assembly_timeout"
 	UpstreamErrorCanceled            UpstreamErrorKind = "canceled"
 	UpstreamErrorEmptyResponse       UpstreamErrorKind = "empty_response"
 	UpstreamErrorRetryBudget         UpstreamErrorKind = "retry_budget_exhausted"
@@ -173,7 +174,7 @@ func mapDownstreamError(err error) downstreamError {
 		// These credentials and models belong to the proxy, not the caller.
 		// Returning 401 would incorrectly tell clients their own API key failed.
 		mapped.Status = http.StatusServiceUnavailable
-	case UpstreamErrorFirstTokenTimeout:
+	case UpstreamErrorFirstTokenTimeout, UpstreamErrorToolAssemblyTimeout:
 		mapped.Status = http.StatusGatewayTimeout
 	case UpstreamErrorCanceled:
 		if errors.Is(upstreamErr.Cause, context.DeadlineExceeded) {
@@ -346,10 +347,43 @@ func newEmptyResponseError(endpoint string, retryEndpoints bool) *UpstreamError 
 	}
 }
 
-func newRetryBudgetError() *UpstreamError {
+func newToolAssemblyTimeoutError(endpoint, toolName string, argumentBytes int, timeout time.Duration) *UpstreamError {
+	message := fmt.Sprintf("tool call did not complete within %s", timeout.Round(time.Second))
+	if strings.TrimSpace(toolName) != "" {
+		message = fmt.Sprintf("tool %q did not complete within %s", toolName, timeout.Round(time.Second))
+	}
+	if argumentBytes > 0 {
+		message += fmt.Sprintf(" after %d argument bytes", argumentBytes)
+	}
+	return &UpstreamError{
+		Kind:                 UpstreamErrorToolAssemblyTimeout,
+		Endpoint:             endpoint,
+		Message:              message,
+		RetryAcrossEndpoints: true,
+		RetryAcrossAccounts:  true,
+	}
+}
+
+func newRetryBudgetError(budget *upstreamAttemptBudget) *UpstreamError {
+	message := "upstream retry budget exhausted"
+	if budget != nil {
+		snapshot := budget.snapshot()
+		limitType := "budget"
+		if snapshot.MaxDuration > 0 && snapshot.Elapsed >= snapshot.MaxDuration && (snapshot.MaxAttempts == 0 || snapshot.Attempts < snapshot.MaxAttempts) {
+			limitType = "window"
+		}
+		message = fmt.Sprintf("upstream retry %s exhausted after %d attempts in %s", limitType, snapshot.Attempts, snapshot.Elapsed.Round(time.Second))
+		if snapshot.LastError != "" {
+			if snapshot.LastEndpoint != "" {
+				message += fmt.Sprintf("; last failure from %s: %s", snapshot.LastEndpoint, snapshot.LastError)
+			} else {
+				message += "; last failure: " + snapshot.LastError
+			}
+		}
+	}
 	return &UpstreamError{
 		Kind:    UpstreamErrorRetryBudget,
-		Message: "upstream retry budget exhausted",
+		Message: message,
 	}
 }
 
@@ -404,13 +438,35 @@ type upstreamAttemptBudget struct {
 	emptyResponses int
 	maxAttempts    int
 	maxEmpty       int
+	startedAt      time.Time
+	maxDuration    time.Duration
+	lastEndpoint   string
+	lastError      string
+	now            func() time.Time
+}
+
+type upstreamAttemptBudgetSnapshot struct {
+	Attempts     int
+	MaxAttempts  int
+	Elapsed      time.Duration
+	MaxDuration  time.Duration
+	LastEndpoint string
+	LastError    string
 }
 
 func newUpstreamAttemptBudget() *upstreamAttemptBudget {
 	retry := config.GetRetryConfig()
+	maxAttempts := retry.MaxUpstreamAttempts
+	if retry.MaxAccountAttempts == 0 {
+		maxAttempts = 0
+	}
+	now := time.Now
 	return &upstreamAttemptBudget{
-		maxAttempts: retry.MaxUpstreamAttempts,
+		maxAttempts: maxAttempts,
 		maxEmpty:    retry.EmptyResponseRetries,
+		startedAt:   now(),
+		maxDuration: time.Duration(retry.MaxRetryDurationSeconds) * time.Second,
+		now:         now,
 	}
 }
 
@@ -420,11 +476,80 @@ func (b *upstreamAttemptBudget) take() bool {
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	now := b.currentTimeLocked()
+	if b.maxDuration > 0 && now.Sub(b.startedAt) >= b.maxDuration {
+		return false
+	}
 	if b.maxAttempts > 0 && b.attempts >= b.maxAttempts {
 		return false
 	}
 	b.attempts++
 	return true
+}
+
+func (b *upstreamAttemptBudget) deadline() (time.Time, bool) {
+	if b == nil {
+		return time.Time{}, false
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.maxDuration <= 0 {
+		return time.Time{}, false
+	}
+	return b.startedAt.Add(b.maxDuration), true
+}
+
+func (b *upstreamAttemptBudget) expired() bool {
+	if b == nil {
+		return false
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.maxDuration > 0 && b.currentTimeLocked().Sub(b.startedAt) >= b.maxDuration
+}
+
+func (b *upstreamAttemptBudget) recordFailure(endpoint string, err error) {
+	if b == nil || err == nil {
+		return
+	}
+	if endpoint == "" {
+		endpoint = upstreamErrorEndpoint(err)
+	}
+	message := strings.TrimSpace(err.Error())
+	if len(message) > 512 {
+		message = message[:512] + "..."
+	}
+	b.mu.Lock()
+	b.lastEndpoint = strings.TrimSpace(endpoint)
+	b.lastError = message
+	b.mu.Unlock()
+}
+
+func (b *upstreamAttemptBudget) snapshot() upstreamAttemptBudgetSnapshot {
+	if b == nil {
+		return upstreamAttemptBudgetSnapshot{}
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	elapsed := b.currentTimeLocked().Sub(b.startedAt)
+	if elapsed < 0 {
+		elapsed = 0
+	}
+	return upstreamAttemptBudgetSnapshot{
+		Attempts:     b.attempts,
+		MaxAttempts:  b.maxAttempts,
+		Elapsed:      elapsed,
+		MaxDuration:  b.maxDuration,
+		LastEndpoint: b.lastEndpoint,
+		LastError:    b.lastError,
+	}
+}
+
+func (b *upstreamAttemptBudget) currentTimeLocked() time.Time {
+	if b.now != nil {
+		return b.now()
+	}
+	return time.Now()
 }
 
 func (b *upstreamAttemptBudget) recordEmpty() bool {

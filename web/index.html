@@ -413,12 +413,20 @@
             <input type="number" id="retryMaxUpstreamAttempts" min="1" max="200" step="1" />
           </div>
           <div class="form-group">
+            <label data-i18n="settings.retryMaxDuration"></label>
+            <input type="number" id="retryMaxDurationSeconds" min="0" max="86400" step="60" />
+          </div>
+          <div class="form-group">
             <label data-i18n="settings.retryFirstTokenTimeout"></label>
             <input type="number" id="retryFirstTokenTimeoutSeconds" min="5" max="600" step="5" />
           </div>
           <div class="form-group">
             <label data-i18n="settings.retryStreamIdleTimeout"></label>
             <input type="number" id="retryStreamIdleTimeoutSeconds" min="15" max="3600" step="5" />
+          </div>
+          <div class="form-group">
+            <label data-i18n="settings.retryToolAssemblyTimeout"></label>
+            <input type="number" id="retryToolAssemblyTimeoutSeconds" min="0" max="3600" step="30" />
           </div>
           <div class="form-group">
             <label data-i18n="settings.retryEmptyResponses"></label>

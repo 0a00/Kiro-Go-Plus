@@ -332,6 +332,9 @@ type InferenceConfig struct {
 type KiroStreamCallback struct {
 	OnText         func(text string, isThinking bool)
 	OnToolUse      func(toolUse KiroToolUse)
+	OnToolUseStart func(toolUseID, name string)
+	OnToolUseDelta func(toolUseID, input string)
+	OnToolUseStop  func(toolUseID string)
 	OnProgress     func()
 	OnComplete     func(inputTokens, outputTokens int)
 	OnUsage        func(usage KiroTokenUsage)
@@ -402,26 +405,6 @@ func getSortedEndpoints(preferred string) []kiroEndpoint {
 	return result
 }
 
-func prioritizeGuardedToolEndpoints(endpoints []kiroEndpoint) []kiroEndpoint {
-	ordered := make([]kiroEndpoint, 0, len(endpoints))
-	added := make(map[string]bool, len(endpoints))
-	for _, key := range []string{"runtime", "kiro", "codewhisperer", "amazonq"} {
-		for _, endpoint := range endpoints {
-			if normalizeEndpointRoutePart(endpoint.Key) == key {
-				ordered = append(ordered, endpoint)
-				added[key] = true
-			}
-		}
-	}
-	for _, endpoint := range endpoints {
-		key := normalizeEndpointRoutePart(endpoint.Key)
-		if !added[key] {
-			ordered = append(ordered, endpoint)
-		}
-	}
-	return ordered
-}
-
 // CallKiroAPI calls the Kiro streaming API, trying each configured endpoint with automatic fallback.
 func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroStreamCallback) error {
 	requestContext := context.Background()
@@ -456,16 +439,27 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 			message.ModelID, len(payloadJSON), len(payload.ConversationState.History), toolCount, len(message.Images))
 	}
 
-	// Wrap OnToolUse to restore original tool names for the client.
-	if callback != nil && callback.OnToolUse != nil && len(payload.ToolNameMap) > 0 {
-		originalOnToolUse := callback.OnToolUse
+	// Restore original tool names before callbacks leave the upstream layer.
+	if callback != nil && len(payload.ToolNameMap) > 0 && (callback.OnToolUse != nil || callback.OnToolUseStart != nil) {
 		nameMap := payload.ToolNameMap
 		wrapped := *callback
-		wrapped.OnToolUse = func(tu KiroToolUse) {
-			if original, ok := nameMap[tu.Name]; ok {
-				tu.Name = original
+		if callback.OnToolUse != nil {
+			originalOnToolUse := callback.OnToolUse
+			wrapped.OnToolUse = func(tu KiroToolUse) {
+				if original, ok := nameMap[tu.Name]; ok {
+					tu.Name = original
+				}
+				originalOnToolUse(tu)
 			}
-			originalOnToolUse(tu)
+		}
+		if callback.OnToolUseStart != nil {
+			originalOnToolUseStart := callback.OnToolUseStart
+			wrapped.OnToolUseStart = func(toolUseID, name string) {
+				if original, ok := nameMap[name]; ok {
+					name = original
+				}
+				originalOnToolUseStart(toolUseID, name)
+			}
 		}
 		callback = &wrapped
 	}
@@ -483,11 +477,6 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 	endpoints, routeErr = sharedAccountEndpointRoutes.availableEndpoints(accountID, modelKey, preferredEndpoint, endpoints)
 	if routeErr != nil {
 		return routeErr
-	}
-	if payload != nil && payload.requireActionableOutput && (preferredEndpoint == "" || strings.EqualFold(preferredEndpoint, "auto")) {
-		// Long agent tool calls are most reliable on Runtime and Kiro IDE. Do not
-		// let a previous short CodeWhisperer success pin guarded requests there.
-		endpoints = prioritizeGuardedToolEndpoints(endpoints)
 	}
 	requiresProfileArn := false
 	for _, endpoint := range endpoints {
@@ -580,14 +569,26 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 		attemptStartedAt := time.Now()
 		if payload != nil && !payload.attemptBudget.take() {
 			sharedUpstreamHealth.releaseEndpoint(endpointCircuitKey)
-			return newRetryBudgetError()
+			return newRetryBudgetError(payload.attemptBudget)
 		}
-		upstreamContext, cancelRequest := context.WithCancel(requestContext)
+		upstreamContext := requestContext
+		var cancelRequest context.CancelFunc
+		if payload != nil {
+			if deadline, ok := payload.attemptBudget.deadline(); ok {
+				upstreamContext, cancelRequest = context.WithDeadline(requestContext, deadline)
+			}
+		}
+		if cancelRequest == nil {
+			upstreamContext, cancelRequest = context.WithCancel(requestContext)
+		}
 		req, err := http.NewRequestWithContext(upstreamContext, "POST", endpointURL, bytes.NewReader(reqBody))
 		if err != nil {
 			cancelRequest()
 			sharedUpstreamHealth.releaseEndpoint(endpointCircuitKey)
 			lastErr = err
+			if payload != nil {
+				payload.attemptBudget.recordFailure(ep.Name, lastErr)
+			}
 			continue
 		}
 
@@ -623,6 +624,10 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 				firstTokenTimer.Stop()
 			}
 		}, payload != nil && payload.requireActionableOutput, payload != nil && payload.requireToolUse, payload != nil && payload.deferTextUntilComplete, payload != nil && payload.streamThinkingPrecommit)
+		toolAssemblyTimeout := time.Duration(config.GetRetryConfig().ToolAssemblyTimeoutSeconds) * time.Second
+		wrappedCallback, toolMonitor := wrapToolAssemblyMonitor(wrappedCallback, toolAssemblyTimeout, func(toolAssemblySnapshot) {
+			cancelRequest()
+		})
 		if firstTokenTimeout > 0 {
 			firstTokenTimer = time.AfterFunc(firstTokenTimeout, func() {
 				firstTokenTimedOut.Store(true)
@@ -632,6 +637,7 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 
 		resp, err := client.Do(req)
 		if err != nil {
+			toolMonitor.Stop()
 			if firstTokenTimer != nil {
 				firstTokenTimer.Stop()
 			}
@@ -642,6 +648,9 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 				return classifyRequestCancellation(ep.Name, requestContext.Err())
 			}
 			lastErr = classifyTransportError(ep.Name, err)
+			if payload != nil {
+				payload.attemptBudget.recordFailure(ep.Name, lastErr)
+			}
 			if cooldown := sharedAccountEndpointRoutes.recordFailure(accountID, modelKey, ep, lastErr); cooldown > 0 {
 				logger.Warnf("[EndpointRouting] Account %s model %s endpoint %s cooling for %s after transport error: %v", accountID, modelKey, ep.Name, cooldown, lastErr)
 			}
@@ -649,6 +658,9 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 			proxyTransportFailed = true
 			sharedUpstreamHealth.endpointFailure(endpointCircuitKey, lastErr, time.Since(attemptStartedAt))
 			logger.Warnf("[KiroAPI] Endpoint %s failed: %v", ep.Name, err)
+			if payload != nil && payload.attemptBudget.expired() && requestContext.Err() == nil {
+				return newRetryBudgetError(payload.attemptBudget)
+			}
 			if shouldRetryAcrossEndpoints(lastErr) {
 				continue
 			}
@@ -657,6 +669,7 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 		proxyTransportSucceeded = true
 
 		if resp.StatusCode != 200 {
+			toolMonitor.Stop()
 			errBody := httpbody.ReadAllTruncated(resp.Body, httpbody.DefaultLimit)
 			resp.Body.Close()
 			if firstTokenTimer != nil {
@@ -666,6 +679,9 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 			classifiedErr := classifyUpstreamHTTPError(resp.StatusCode, ep.Name, errBody)
 			classifiedErr.RetryAfter = parseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
 			lastErr = classifiedErr
+			if payload != nil {
+				payload.attemptBudget.recordFailure(ep.Name, lastErr)
+			}
 			if cooldown := sharedAccountEndpointRoutes.recordFailure(accountID, modelKey, ep, lastErr); cooldown > 0 {
 				logger.Warnf("[EndpointRouting] Account %s model %s endpoint %s cooling for %s after %v", accountID, modelKey, ep.Name, cooldown, lastErr)
 			}
@@ -699,11 +715,15 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 		err = parseEventStream(idleReader, wrappedCallback)
 		idleReader.Stop()
 		resp.Body.Close()
+		toolMonitor.Stop()
 		if firstTokenTimer != nil {
 			firstTokenTimer.Stop()
 		}
 		cancelRequest()
 		if err != nil {
+			if toolSnapshot, timedOut := toolMonitor.TimedOut(); timedOut {
+				err = newToolAssemblyTimeoutError(ep.Name, toolSnapshot.Name, toolSnapshot.ArgumentBytes, toolAssemblyTimeout)
+			}
 			if requestContext.Err() != nil && !firstTokenTimedOut.Load() {
 				sharedUpstreamHealth.releaseEndpoint(endpointCircuitKey)
 				return classifyRequestCancellation(ep.Name, requestContext.Err())
@@ -716,6 +736,9 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 				err = classifyTransportError(ep.Name, err)
 			}
 			lastErr = err
+			if payload != nil {
+				payload.attemptBudget.recordFailure(ep.Name, lastErr)
+			}
 			if cooldown := sharedAccountEndpointRoutes.recordFailure(accountID, modelKey, ep, lastErr); cooldown > 0 {
 				logger.Warnf("[EndpointRouting] Account %s model %s endpoint %s cooling for %s after stream error: %v", accountID, modelKey, ep.Name, cooldown, lastErr)
 			}
@@ -725,6 +748,9 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 				lastCircuitError = err
 				sharedUpstreamHealth.endpointFailure(endpointCircuitKey, err, time.Since(attemptStartedAt))
 			}
+			if payload != nil && payload.attemptBudget.expired() && requestContext.Err() == nil {
+				return newRetryBudgetError(payload.attemptBudget)
+			}
 			if meaningfulGate.hasActionableOutput() || !shouldRetryAcrossEndpoints(err) {
 				return err
 			}
@@ -733,6 +759,9 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 		if !meaningfulGate.hasActionableOutput() {
 			retry := payload != nil && payload.attemptBudget.recordEmpty()
 			lastErr = newEmptyResponseError(ep.Name, retry)
+			if payload != nil {
+				payload.attemptBudget.recordFailure(ep.Name, lastErr)
+			}
 			lastCircuitError = lastErr
 			sharedUpstreamHealth.endpointFailure(endpointCircuitKey, lastErr, time.Since(attemptStartedAt))
 			if retry {
@@ -819,20 +848,25 @@ func parseEventStream(body io.Reader, callback *KiroStreamCallback) error {
 			}
 			return classified
 		}
-		if eventType == "" {
-			return &EventStreamError{Kind: EventStreamInvalidHeaders, Message: "missing :event-type header"}
-		}
 		if len(payloadBytes) == 0 {
 			return &EventStreamError{Kind: EventStreamInvalidPayload, Message: fmt.Sprintf("%s payload is empty", eventType)}
 		}
 
 		var event map[string]interface{}
 		if err := json.Unmarshal(payloadBytes, &event); err != nil {
+			label := eventType
+			if label == "" {
+				label = "event"
+			}
 			return &EventStreamError{
 				Kind:    EventStreamInvalidPayload,
-				Message: fmt.Sprintf("%s payload is not valid JSON", eventType),
+				Message: fmt.Sprintf("%s payload is not valid JSON", label),
 				Cause:   err,
 			}
+		}
+		toolEvent := isToolUseEventPayload(eventType, event, currentToolUse)
+		if eventType == "" && !toolEvent {
+			return &EventStreamError{Kind: EventStreamInvalidHeaders, Message: "missing :event-type header"}
 		}
 
 		previousUsage := tokenUsage
@@ -841,7 +875,20 @@ func parseEventStream(body io.Reader, callback *KiroStreamCallback) error {
 			callback.OnUsage(tokenUsage)
 		}
 
-		// Dispatch by event type.
+		// Some Kiro data planes use distinct event names for tool start, input,
+		// and stop frames. Classify those frames by both header and payload.
+		if toolEvent {
+			if toolUseEventSignalsStop(eventType) {
+				event["stop"] = true
+			}
+			sawOutput = true
+			currentToolUse, err = handleToolUseEvent(event, currentToolUse, callback)
+			if err != nil {
+				return err
+			}
+			continue
+		}
+
 		switch eventType {
 		case "assistantResponseEvent":
 			if content, ok := event["content"].(string); ok && content != "" {
@@ -859,19 +906,21 @@ func parseEventStream(body io.Reader, callback *KiroStreamCallback) error {
 					callback.OnText(normalized, true)
 				}
 			}
-		case "toolUseEvent":
-			sawOutput = true
-			currentToolUse, err = handleToolUseEvent(event, currentToolUse, callback)
-			if err != nil {
-				return err
-			}
 		case "meteringEvent":
 			sawCompletionSignal = true
+			if recoverCompleteToolUseWithoutStop(currentToolUse, callback, fmt.Errorf("%s completion signal", eventType)) {
+				currentToolUse = nil
+				recoveredToolUse = true
+			}
 			if usage, ok := event["usage"].(float64); ok {
 				totalCredits += usage
 			}
 		case "contextUsageEvent":
 			sawCompletionSignal = true
+			if recoverCompleteToolUseWithoutStop(currentToolUse, callback, fmt.Errorf("%s completion signal", eventType)) {
+				currentToolUse = nil
+				recoveredToolUse = true
+			}
 			if pct, ok := event["contextUsagePercentage"].(float64); ok {
 				if callback.OnContextUsage != nil {
 					callback.OnContextUsage(pct)
@@ -1169,14 +1218,40 @@ type toolUseState struct {
 	GeneratedID bool
 }
 
+var toolUseEventTypeNormalizer = strings.NewReplacer("_", "", "-", "", ".", "")
+
+func isToolUseEventPayload(eventType string, event map[string]interface{}, current *toolUseState) bool {
+	normalizedType := toolUseEventTypeNormalizer.Replace(strings.ToLower(strings.TrimSpace(eventType)))
+	if strings.Contains(normalizedType, "tooluse") {
+		return true
+	}
+	_, hasName := firstPresentField(event, "name", "toolName", "tool_name")
+	_, hasID := firstPresentField(event, "toolUseId", "toolUseID", "tool_use_id")
+	_, hasInput := event["input"]
+	_, hasStop := firstPresentField(event, "stop", "isStop", "done")
+	if hasName && (hasID || hasInput || hasStop) {
+		return true
+	}
+	return current != nil && (hasInput || hasStop)
+}
+
+func toolUseEventSignalsStop(eventType string) bool {
+	normalizedType := toolUseEventTypeNormalizer.Replace(strings.ToLower(strings.TrimSpace(eventType)))
+	return strings.Contains(normalizedType, "toolusestop") ||
+		strings.Contains(normalizedType, "tooluseend") ||
+		strings.Contains(normalizedType, "toolusecomplete")
+}
+
 func handleToolUseEvent(event map[string]interface{}, current *toolUseState, callback *KiroStreamCallback) (*toolUseState, error) {
 	toolUseID := firstStringField(event, "toolUseId", "toolUseID", "tool_use_id", "id")
 	name := firstStringField(event, "name", "toolName", "tool_name")
 	isStop := firstBoolField(event, "stop", "isStop", "done")
+	created := false
 
 	if toolUseID != "" && name != "" {
 		if current == nil {
 			current = &toolUseState{ToolUseID: toolUseID, Name: name}
+			created = true
 		} else if current.ToolUseID != toolUseID {
 			if current.GeneratedID && current.Name == name {
 				current.ToolUseID = toolUseID
@@ -1190,6 +1265,7 @@ func handleToolUseEvent(event map[string]interface{}, current *toolUseState, cal
 		}
 	} else if name != "" && current == nil {
 		current = &toolUseState{ToolUseID: "toolu_" + uuid.New().String(), Name: name, GeneratedID: true}
+		created = true
 	} else if name != "" && current != nil && current.Name != name {
 		return nil, &EventStreamError{
 			Kind:    EventStreamIncompleteToolUse,
@@ -1202,19 +1278,31 @@ func handleToolUseEvent(event map[string]interface{}, current *toolUseState, cal
 			Message: fmt.Sprintf("tool %q received input for unexpected id %q", current.Name, toolUseID),
 		}
 	}
+	if current == nil && isStop {
+		return nil, nil
+	}
 	if current == nil {
 		return nil, &EventStreamError{
 			Kind:    EventStreamInvalidPayload,
 			Message: "toolUseEvent is missing a tool name",
 		}
 	}
+	if created && callback != nil && callback.OnToolUseStart != nil {
+		callback.OnToolUseStart(current.ToolUseID, current.Name)
+	}
 
 	if input, ok := event["input"].(string); ok {
 		current.InputBuffer.WriteString(input)
+		if input != "" && callback != nil && callback.OnToolUseDelta != nil {
+			callback.OnToolUseDelta(current.ToolUseID, input)
+		}
 	} else if inputObj, ok := event["input"].(map[string]interface{}); ok && len(inputObj) > 0 {
 		data, _ := json.Marshal(inputObj)
 		current.InputBuffer.Reset()
 		current.InputBuffer.Write(data)
+		if callback != nil && callback.OnToolUseDelta != nil {
+			callback.OnToolUseDelta(current.ToolUseID, string(data))
+		}
 	}
 
 	if isStop && current != nil {
@@ -1233,6 +1321,9 @@ func finishToolUse(state *toolUseState, callback *KiroStreamCallback) error {
 	}
 	if state.ToolUseID == "" {
 		state.ToolUseID = "toolu_" + uuid.New().String()
+	}
+	if callback != nil && callback.OnToolUseStop != nil {
+		callback.OnToolUseStop(state.ToolUseID)
 	}
 	input := make(map[string]interface{})
 	if state.InputBuffer.Len() > 0 {
@@ -1285,9 +1376,30 @@ func firstStringField(m map[string]interface{}, keys ...string) string {
 
 func firstBoolField(m map[string]interface{}, keys ...string) bool {
 	for _, key := range keys {
-		if v, ok := m[key].(bool); ok {
-			return v
+		switch value := m[key].(type) {
+		case bool:
+			return value
+		case string:
+			parsed, err := strconv.ParseBool(strings.TrimSpace(value))
+			if err == nil {
+				return parsed
+			}
+			return strings.TrimSpace(value) == "1"
+		case float64:
+			return value != 0
+		case json.Number:
+			parsed, err := value.Int64()
+			return err == nil && parsed != 0
 		}
 	}
 	return false
+}
+
+func firstPresentField(m map[string]interface{}, keys ...string) (interface{}, bool) {
+	for _, key := range keys {
+		if value, ok := m[key]; ok {
+			return value, true
+		}
+	}
+	return nil, false
 }

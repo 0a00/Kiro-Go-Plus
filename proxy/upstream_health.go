@@ -244,7 +244,8 @@ func circuitEligibleFailure(err error) bool {
 		return err != nil
 	}
 	switch upstreamErr.Kind {
-	case UpstreamErrorTransient, UpstreamErrorFirstTokenTimeout, UpstreamErrorEndpointUnavailable, UpstreamErrorEmptyResponse, UpstreamErrorUnknown:
+	case UpstreamErrorTransient, UpstreamErrorFirstTokenTimeout, UpstreamErrorToolAssemblyTimeout,
+		UpstreamErrorEndpointUnavailable, UpstreamErrorEmptyResponse, UpstreamErrorUnknown:
 		return true
 	default:
 		return false

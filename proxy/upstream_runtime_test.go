@@ -28,6 +28,59 @@ func TestAutoEndpointOrderStartsWithRuntime(t *testing.T) {
 	}
 }
 
+func TestGuardedCallKeepsLearnedAutoEndpointAffinity(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	if err := config.UpdatePreferredEndpoint("auto"); err != nil {
+		t.Fatalf("set endpoint: %v", err)
+	}
+	if err := config.UpdateEndpointFallback(true); err != nil {
+		t.Fatalf("set fallback: %v", err)
+	}
+	sharedAccountEndpointRoutes.reset()
+	t.Cleanup(sharedAccountEndpointRoutes.reset)
+
+	var runtimeRequests atomic.Int32
+	runtimeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		runtimeRequests.Add(1)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "runtime"}))
+	}))
+	defer runtimeServer.Close()
+
+	var codeWhispererRequests atomic.Int32
+	codeWhispererServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		codeWhispererRequests.Add(1)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "preferred"}))
+	}))
+	defer codeWhispererServer.Close()
+
+	oldEndpoints := kiroEndpoints
+	kiroEndpoints = []kiroEndpoint{
+		{Key: "runtime", URL: runtimeServer.URL, Name: "Kiro Runtime"},
+		{Key: "codewhisperer", URL: codeWhispererServer.URL, Name: "CodeWhisperer"},
+	}
+	t.Cleanup(func() { kiroEndpoints = oldEndpoints })
+
+	account := &config.Account{ID: "affinity-account", AccessToken: "token"}
+	model := "claude-sonnet-5"
+	sharedAccountEndpointRoutes.recordSuccess(account.ID, model, kiroEndpoints[1])
+	payload := &KiroPayload{requireActionableOutput: true}
+	payload.ConversationState.CurrentMessage.UserInputMessage.ModelID = model
+	var output strings.Builder
+	if err := CallKiroAPI(account, payload, &KiroStreamCallback{
+		OnText: func(text string, _ bool) { output.WriteString(text) },
+	}); err != nil {
+		t.Fatalf("guarded call failed: %v", err)
+	}
+	if codeWhispererRequests.Load() != 1 || runtimeRequests.Load() != 0 || output.String() != "preferred" {
+		t.Fatalf("learned affinity was overridden: runtime=%d codewhisperer=%d output=%q",
+			runtimeRequests.Load(), codeWhispererRequests.Load(), output.String())
+	}
+}
+
 func TestRuntimeEndpointUsesRegionContentTypeTargetAndProfile(t *testing.T) {
 	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatalf("init config: %v", err)
@@ -118,6 +171,112 @@ func TestEmptyResponseRetryExhaustionStillAllowsAccountFailover(t *testing.T) {
 	}
 	if !err.RetryAcrossAccounts {
 		t.Fatal("exhausted empty response should still allow account failover")
+	}
+}
+
+func TestCallKiroAPIStopsToolStreamThatNeverCompletes(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	retry := config.GetRetryConfig()
+	retry.MaxAccountAttempts = 1
+	retry.MaxUpstreamAttempts = 2
+	retry.MaxRetryDurationSeconds = 5
+	retry.FirstTokenTimeoutSeconds = 5
+	retry.StreamIdleTimeoutSeconds = 15
+	retry.ToolAssemblyTimeoutSeconds = 1
+	if err := config.UpdateRetryConfig(retry); err != nil {
+		t.Fatalf("update retry config: %v", err)
+	}
+	_ = config.UpdatePreferredEndpoint("kiro")
+	_ = config.UpdateEndpointFallback(false)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(awsEventStreamFrame(t, "toolUseEvent", map[string]interface{}{
+			"toolUseId": "toolu_never_finishes",
+			"name":      "Write",
+			"input":     `{"content":"`,
+		}))
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		ticker := time.NewTicker(50 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-r.Context().Done():
+				return
+			case <-ticker.C:
+				_, _ = w.Write(awsEventStreamFrame(t, "toolUseInputEvent", map[string]interface{}{"input": "x"}))
+				if flusher, ok := w.(http.Flusher); ok {
+					flusher.Flush()
+				}
+			}
+		}
+	}))
+	defer server.Close()
+	oldEndpoints := kiroEndpoints
+	kiroEndpoints = []kiroEndpoint{{Key: "kiro", URL: server.URL, Name: "Kiro IDE"}}
+	t.Cleanup(func() { kiroEndpoints = oldEndpoints })
+
+	payload := &KiroPayload{requireActionableOutput: true, requireToolUse: true}
+	startedAt := time.Now()
+	err := CallKiroAPI(&config.Account{ID: "a", AccessToken: "token"}, payload, &KiroStreamCallback{})
+	if time.Since(startedAt) > 3*time.Second {
+		t.Fatalf("tool assembly timeout took too long: %s", time.Since(startedAt))
+	}
+	upstreamErr, ok := asUpstreamError(err)
+	if !ok || upstreamErr.Kind != UpstreamErrorToolAssemblyTimeout || !upstreamErr.RetryAcrossAccounts {
+		t.Fatalf("expected retryable tool assembly timeout, got %#v", err)
+	}
+	if !strings.Contains(upstreamErr.Error(), `tool "Write" did not complete`) {
+		t.Fatalf("unexpected tool timeout error: %v", upstreamErr)
+	}
+}
+
+func TestRetryWindowErrorIncludesCurrentTransportFailure(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	retry := config.GetRetryConfig()
+	retry.MaxAccountAttempts = 0
+	retry.MaxUpstreamAttempts = 1
+	retry.MaxRetryDurationSeconds = 1
+	retry.FirstTokenTimeoutSeconds = 5
+	retry.StreamIdleTimeoutSeconds = 15
+	if err := config.UpdateRetryConfig(retry); err != nil {
+		t.Fatalf("update retry config: %v", err)
+	}
+	_ = config.UpdatePreferredEndpoint("kiro")
+	_ = config.UpdateEndpointFallback(false)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-time.After(2 * time.Second):
+		}
+	}))
+	defer func() {
+		server.CloseClientConnections()
+		server.Close()
+	}()
+	oldEndpoints := kiroEndpoints
+	kiroEndpoints = []kiroEndpoint{{Key: "kiro", URL: server.URL, Name: "Kiro IDE"}}
+	t.Cleanup(func() { kiroEndpoints = oldEndpoints })
+
+	startedAt := time.Now()
+	err := CallKiroAPI(&config.Account{ID: "a", AccessToken: "token"}, &KiroPayload{}, &KiroStreamCallback{})
+	if elapsed := time.Since(startedAt); elapsed > 3*time.Second {
+		t.Fatalf("retry window took too long: %s", elapsed)
+	}
+	upstreamErr, ok := asUpstreamError(err)
+	if !ok || upstreamErr.Kind != UpstreamErrorRetryBudget {
+		t.Fatalf("expected retry-window error, got %#v", err)
+	}
+	if !strings.Contains(upstreamErr.Error(), "last failure from Kiro IDE") ||
+		!strings.Contains(upstreamErr.Error(), "meaningful response before the timeout") {
+		t.Fatalf("retry-window error lost current failure: %v", upstreamErr)
 	}
 }
 

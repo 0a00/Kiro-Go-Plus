@@ -79,6 +79,23 @@ func wrapMeaningfulStreamCallback(target *KiroStreamCallback, onActivity func(),
 			gate.markActivity()
 			gate.handleEvent(pendingStreamEvent{kind: pendingToolUse, toolUse: toolUse})
 		},
+		OnToolUseStart: func(toolUseID, name string) {
+			gate.markActivity()
+			if target.OnToolUseStart != nil {
+				target.OnToolUseStart(toolUseID, name)
+			}
+		},
+		OnToolUseDelta: func(toolUseID, input string) {
+			gate.markActivity()
+			if target.OnToolUseDelta != nil {
+				target.OnToolUseDelta(toolUseID, input)
+			}
+		},
+		OnToolUseStop: func(toolUseID string) {
+			if target.OnToolUseStop != nil {
+				target.OnToolUseStop(toolUseID)
+			}
+		},
 		OnComplete: func(input, output int) {
 			gate.handleEvent(pendingStreamEvent{kind: pendingComplete, input: input, output: output})
 		},
@@ -98,7 +115,6 @@ func wrapMeaningfulStreamCallback(target *KiroStreamCallback, onActivity func(),
 			gate.handleEvent(pendingStreamEvent{kind: pendingContextUsage, percentage: percentage})
 		},
 		OnProgress: func() {
-			gate.markActivity()
 			if target.OnProgress != nil {
 				target.OnProgress()
 			}

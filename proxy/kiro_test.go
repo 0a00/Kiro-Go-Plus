@@ -9,6 +9,7 @@ import (
 	"kiro-go/config"
 	"net/http"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 )
@@ -73,6 +74,65 @@ func TestParseEventStreamRecoversCompletePendingToolUseOnEOF(t *testing.T) {
 	}
 	if truncated {
 		t.Fatal("a complete recovered tool call must not be marked as truncated")
+	}
+}
+
+func TestParseEventStreamHandlesSeparateToolFramesAndStopEvent(t *testing.T) {
+	stream := bytes.NewReader(bytes.Join([][]byte{
+		awsEventStreamFrame(t, "toolUseStartEvent", map[string]interface{}{
+			"toolUseId": "toolu_separate",
+			"name":      "Write",
+		}),
+		awsEventStreamFrame(t, "toolUseInputEvent", map[string]interface{}{
+			"input": `{"file_path":"index.html","content":"ok"}`,
+		}),
+		awsEventStreamFrame(t, "toolUseStopEvent", map[string]interface{}{}),
+		awsEventStreamFrame(t, "contextUsageEvent", map[string]interface{}{
+			"contextUsagePercentage": 1.0,
+		}),
+	}, nil))
+
+	var toolUses []KiroToolUse
+	var starts, stops int
+	var deltas strings.Builder
+	err := parseEventStream(stream, &KiroStreamCallback{
+		OnToolUseStart: func(toolUseID, name string) { starts++ },
+		OnToolUseDelta: func(toolUseID, input string) { deltas.WriteString(input) },
+		OnToolUseStop:  func(toolUseID string) { stops++ },
+		OnToolUse:      func(toolUse KiroToolUse) { toolUses = append(toolUses, toolUse) },
+	})
+	if err != nil {
+		t.Fatalf("parse separate tool frames: %v", err)
+	}
+	if starts != 1 || stops != 1 || len(toolUses) != 1 {
+		t.Fatalf("unexpected tool callbacks: starts=%d stops=%d uses=%d", starts, stops, len(toolUses))
+	}
+	if got := toolUses[0].Input["content"]; got != "ok" {
+		t.Fatalf("unexpected tool input: %#v", toolUses[0].Input)
+	}
+	if !strings.Contains(deltas.String(), `"index.html"`) {
+		t.Fatalf("missing tool delta: %q", deltas.String())
+	}
+}
+
+func TestParseEventStreamRecoversCompleteToolOnCompletionSignal(t *testing.T) {
+	stream := bytes.NewReader(bytes.Join([][]byte{
+		awsEventStreamFrame(t, "toolUseEvent", map[string]interface{}{
+			"toolUseId": "toolu_completion",
+			"name":      "Write",
+			"input":     `{"file_path":"index.html","content":"complete"}`,
+		}),
+		awsEventStreamFrame(t, "meteringEvent", map[string]interface{}{"usage": 1.0}),
+	}, nil))
+
+	var toolUses []KiroToolUse
+	if err := parseEventStream(stream, &KiroStreamCallback{
+		OnToolUse: func(toolUse KiroToolUse) { toolUses = append(toolUses, toolUse) },
+	}); err != nil {
+		t.Fatalf("recover tool on completion signal: %v", err)
+	}
+	if len(toolUses) != 1 || toolUses[0].ToolUseID != "toolu_completion" {
+		t.Fatalf("unexpected recovered tool use: %#v", toolUses)
 	}
 }
 
@@ -391,24 +451,6 @@ func TestNonKiroIDEEndpointKeepsConfiguredURL(t *testing.T) {
 	got := ep.ResolveURL(&config.Account{Region: "eu-west-1"})
 	if got != ep.URL {
 		t.Fatalf("expected configured URL to be preserved, got %q", got)
-	}
-}
-
-func TestPrioritizeGuardedToolEndpointsOverridesAutoAffinity(t *testing.T) {
-	got := prioritizeGuardedToolEndpoints([]kiroEndpoint{
-		{Key: "codewhisperer"},
-		{Key: "amazonq"},
-		{Key: "kiro"},
-		{Key: "runtime"},
-	})
-	want := []string{"runtime", "kiro", "codewhisperer", "amazonq"}
-	if len(got) != len(want) {
-		t.Fatalf("endpoint count = %d, want %d", len(got), len(want))
-	}
-	for i := range want {
-		if got[i].Key != want[i] {
-			t.Fatalf("endpoint order = %+v, want %v", got, want)
-		}
 	}
 }
 

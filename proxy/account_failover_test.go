@@ -5,6 +5,7 @@ import (
 	"errors"
 	"kiro-go/config"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -145,12 +146,43 @@ func TestAccountAttemptControllerShutdownStopsNewAttempts(t *testing.T) {
 	}
 }
 
-func TestUnlimitedAccountPollingStillHonorsUpstreamAttemptCap(t *testing.T) {
+func TestUnlimitedAccountPollingUsesRetryWindowInsteadOfAttemptCap(t *testing.T) {
 	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatalf("config.Init: %v", err)
 	}
 	retry := config.GetRetryConfig()
 	retry.MaxAccountAttempts = 0
+	retry.MaxUpstreamAttempts = 1
+	retry.MaxRetryDurationSeconds = 900
+	if err := config.UpdateRetryConfig(retry); err != nil {
+		t.Fatalf("UpdateRetryConfig: %v", err)
+	}
+
+	budget := newUpstreamAttemptBudget()
+	for attempt := 0; attempt < 3; attempt++ {
+		if !budget.take() {
+			t.Fatalf("unlimited account polling rejected attempt %d", attempt+1)
+		}
+	}
+	budget.recordFailure("Kiro IDE", errors.New("incomplete tool JSON"))
+	budget.maxDuration = time.Second
+	budget.now = func() time.Time { return budget.startedAt.Add(2 * time.Second) }
+	if budget.take() {
+		t.Fatal("retry window did not stop unlimited polling")
+	}
+	err := newRetryBudgetError(budget)
+	if !strings.Contains(err.Error(), "after 3 attempts") || !strings.Contains(err.Error(), "window exhausted") ||
+		!strings.Contains(err.Error(), "last failure from Kiro IDE: incomplete tool JSON") {
+		t.Fatalf("unexpected retry-window error: %v", err)
+	}
+}
+
+func TestFiniteAccountPollingStillHonorsUpstreamAttemptCap(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	retry := config.GetRetryConfig()
+	retry.MaxAccountAttempts = 2
 	retry.MaxUpstreamAttempts = 1
 	if err := config.UpdateRetryConfig(retry); err != nil {
 		t.Fatalf("UpdateRetryConfig: %v", err)
@@ -158,6 +190,6 @@ func TestUnlimitedAccountPollingStillHonorsUpstreamAttemptCap(t *testing.T) {
 
 	budget := newUpstreamAttemptBudget()
 	if !budget.take() || budget.take() {
-		t.Fatal("unlimited account polling bypassed the upstream attempt cap")
+		t.Fatal("finite account polling did not enforce upstream attempt cap")
 	}
 }

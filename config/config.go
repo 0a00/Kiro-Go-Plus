@@ -238,8 +238,10 @@ type AutoRefreshConfig struct {
 type RetryConfig struct {
 	MaxAccountAttempts             int `json:"maxAccountAttempts"`
 	MaxUpstreamAttempts            int `json:"maxUpstreamAttempts"`
+	MaxRetryDurationSeconds        int `json:"maxRetryDurationSeconds"`
 	FirstTokenTimeoutSeconds       int `json:"firstTokenTimeoutSeconds"`
 	StreamIdleTimeoutSeconds       int `json:"streamIdleTimeoutSeconds"`
+	ToolAssemblyTimeoutSeconds     int `json:"toolAssemblyTimeoutSeconds"`
 	EmptyResponseRetries           int `json:"emptyResponseRetries"`
 	EndpointFailureThreshold       int `json:"endpointFailureThreshold"`
 	EndpointCircuitCooldownSeconds int `json:"endpointCircuitCooldownSeconds"`
@@ -460,7 +462,7 @@ type AccountInfo struct {
 }
 
 // Version current version
-const Version = "1.2.19"
+const Version = "1.2.20"
 
 var (
 	cfg           *Config
@@ -589,8 +591,17 @@ func loadLocked() error {
 	}
 	if !rawConfigHasKey(data, "retry") {
 		c.Retry = defaultRetryConfig()
-	} else if !rawConfigHasNestedKey(data, "retry", "maxAccountAttempts") {
-		c.Retry.MaxAccountAttempts = defaultRetryConfig().MaxAccountAttempts
+	} else {
+		defaults := defaultRetryConfig()
+		if !rawConfigHasNestedKey(data, "retry", "maxAccountAttempts") {
+			c.Retry.MaxAccountAttempts = defaults.MaxAccountAttempts
+		}
+		if !rawConfigHasNestedKey(data, "retry", "maxRetryDurationSeconds") {
+			c.Retry.MaxRetryDurationSeconds = defaults.MaxRetryDurationSeconds
+		}
+		if !rawConfigHasNestedKey(data, "retry", "toolAssemblyTimeoutSeconds") {
+			c.Retry.ToolAssemblyTimeoutSeconds = defaults.ToolAssemblyTimeoutSeconds
+		}
 	}
 	if !rawConfigHasKey(data, "responsesStorage") {
 		c.ResponsesStorage = defaultResponsesStorageConfig()
@@ -991,8 +1002,10 @@ func defaultRetryConfig() RetryConfig {
 	return RetryConfig{
 		MaxAccountAttempts:             8,
 		MaxUpstreamAttempts:            12,
+		MaxRetryDurationSeconds:        900,
 		FirstTokenTimeoutSeconds:       45,
 		StreamIdleTimeoutSeconds:       120,
+		ToolAssemblyTimeoutSeconds:     180,
 		EmptyResponseRetries:           2,
 		EndpointFailureThreshold:       3,
 		EndpointCircuitCooldownSeconds: 30,
@@ -1015,6 +1028,12 @@ func normalizeRetryLocked() {
 	if cfg.Retry.MaxUpstreamAttempts > 200 {
 		cfg.Retry.MaxUpstreamAttempts = 200
 	}
+	if cfg.Retry.MaxRetryDurationSeconds < 0 {
+		cfg.Retry.MaxRetryDurationSeconds = defaults.MaxRetryDurationSeconds
+	}
+	if cfg.Retry.MaxRetryDurationSeconds > 86400 {
+		cfg.Retry.MaxRetryDurationSeconds = 86400
+	}
 	if cfg.Retry.FirstTokenTimeoutSeconds < 5 {
 		cfg.Retry.FirstTokenTimeoutSeconds = defaults.FirstTokenTimeoutSeconds
 	}
@@ -1026,6 +1045,12 @@ func normalizeRetryLocked() {
 	}
 	if cfg.Retry.StreamIdleTimeoutSeconds > 3600 {
 		cfg.Retry.StreamIdleTimeoutSeconds = 3600
+	}
+	if cfg.Retry.ToolAssemblyTimeoutSeconds < 0 {
+		cfg.Retry.ToolAssemblyTimeoutSeconds = defaults.ToolAssemblyTimeoutSeconds
+	}
+	if cfg.Retry.ToolAssemblyTimeoutSeconds > 3600 {
+		cfg.Retry.ToolAssemblyTimeoutSeconds = 3600
 	}
 	if cfg.Retry.EmptyResponseRetries < 0 {
 		cfg.Retry.EmptyResponseRetries = 0
@@ -1617,11 +1642,17 @@ func GetRetryConfig() RetryConfig {
 	if out.MaxUpstreamAttempts <= 0 {
 		out.MaxUpstreamAttempts = defaults.MaxUpstreamAttempts
 	}
+	if out.MaxRetryDurationSeconds < 0 {
+		out.MaxRetryDurationSeconds = defaults.MaxRetryDurationSeconds
+	}
 	if out.FirstTokenTimeoutSeconds < 5 {
 		out.FirstTokenTimeoutSeconds = defaults.FirstTokenTimeoutSeconds
 	}
 	if out.StreamIdleTimeoutSeconds < 15 {
 		out.StreamIdleTimeoutSeconds = defaults.StreamIdleTimeoutSeconds
+	}
+	if out.ToolAssemblyTimeoutSeconds < 0 {
+		out.ToolAssemblyTimeoutSeconds = defaults.ToolAssemblyTimeoutSeconds
 	}
 	if out.EmptyResponseRetries < 0 {
 		out.EmptyResponseRetries = 0

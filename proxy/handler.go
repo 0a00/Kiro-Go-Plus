@@ -5312,7 +5312,9 @@ func (h *Handler) apiGetRetryConfig(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) apiUpdateRetryConfig(w http.ResponseWriter, r *http.Request) {
 	var update struct {
 		config.RetryConfig
-		MaxAccountAttempts *int `json:"maxAccountAttempts"`
+		MaxAccountAttempts         *int `json:"maxAccountAttempts"`
+		MaxRetryDurationSeconds    *int `json:"maxRetryDurationSeconds"`
+		ToolAssemblyTimeoutSeconds *int `json:"toolAssemblyTimeoutSeconds"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&update); err != nil {
 		w.WriteHeader(400)
@@ -5326,13 +5328,26 @@ func (h *Handler) apiUpdateRetryConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	req := update.RetryConfig
 	req.MaxAccountAttempts = *update.MaxAccountAttempts
+	current := config.GetRetryConfig()
+	if update.MaxRetryDurationSeconds == nil {
+		req.MaxRetryDurationSeconds = current.MaxRetryDurationSeconds
+	} else {
+		req.MaxRetryDurationSeconds = *update.MaxRetryDurationSeconds
+	}
+	if update.ToolAssemblyTimeoutSeconds == nil {
+		req.ToolAssemblyTimeoutSeconds = current.ToolAssemblyTimeoutSeconds
+	} else {
+		req.ToolAssemblyTimeoutSeconds = *update.ToolAssemblyTimeoutSeconds
+	}
 	if req.StreamIdleTimeoutSeconds <= 0 {
-		req.StreamIdleTimeoutSeconds = config.GetRetryConfig().StreamIdleTimeoutSeconds
+		req.StreamIdleTimeoutSeconds = current.StreamIdleTimeoutSeconds
 	}
 	if req.MaxAccountAttempts < 0 || req.MaxAccountAttempts > 100 ||
 		req.MaxUpstreamAttempts < 1 || req.MaxUpstreamAttempts > 200 ||
+		req.MaxRetryDurationSeconds < 0 || req.MaxRetryDurationSeconds > 86400 ||
 		req.FirstTokenTimeoutSeconds < 5 || req.FirstTokenTimeoutSeconds > 600 ||
 		req.StreamIdleTimeoutSeconds < 15 || req.StreamIdleTimeoutSeconds > 3600 ||
+		(req.ToolAssemblyTimeoutSeconds != 0 && (req.ToolAssemblyTimeoutSeconds < 30 || req.ToolAssemblyTimeoutSeconds > 3600)) ||
 		req.EmptyResponseRetries < 0 || req.EmptyResponseRetries > 20 ||
 		req.EndpointFailureThreshold < 1 || req.EndpointFailureThreshold > 20 ||
 		req.EndpointCircuitCooldownSeconds < 5 || req.EndpointCircuitCooldownSeconds > 900 ||

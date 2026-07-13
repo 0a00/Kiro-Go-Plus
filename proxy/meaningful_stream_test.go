@@ -29,6 +29,60 @@ func TestStrictMeaningfulStreamRejectsThinkingAndStructuralTail(t *testing.T) {
 	}
 }
 
+func TestMeaningfulStreamProgressDoesNotCountAsActivity(t *testing.T) {
+	activityCalls := 0
+	progressCalls := 0
+	wrapper, gate := wrapMeaningfulStreamCallback(&KiroStreamCallback{
+		OnProgress: func() { progressCalls++ },
+	}, func() {
+		activityCalls++
+	}, true, false, false, false)
+
+	wrapper.OnProgress()
+
+	if progressCalls != 1 {
+		t.Fatalf("progress callback count = %d, want 1", progressCalls)
+	}
+	if activityCalls != 0 || gate.hasActivity() {
+		t.Fatalf("metadata-only progress marked meaningful activity: calls=%d activity=%v", activityCalls, gate.hasActivity())
+	}
+}
+
+func TestMeaningfulStreamToolFramesCountAsActivity(t *testing.T) {
+	tests := []struct {
+		name string
+		emit func(*KiroStreamCallback)
+	}{
+		{
+			name: "tool start",
+			emit: func(callback *KiroStreamCallback) {
+				callback.OnToolUseStart("toolu_write", "Write")
+			},
+		},
+		{
+			name: "tool delta",
+			emit: func(callback *KiroStreamCallback) {
+				callback.OnToolUseDelta("toolu_write", `{"content":"partial`)
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			activityCalls := 0
+			wrapper, gate := wrapMeaningfulStreamCallback(&KiroStreamCallback{}, func() {
+				activityCalls++
+			}, true, true, false, false)
+
+			tc.emit(wrapper)
+
+			if activityCalls != 1 || !gate.hasActivity() {
+				t.Fatalf("tool frame did not mark activity: calls=%d activity=%v", activityCalls, gate.hasActivity())
+			}
+		})
+	}
+}
+
 func TestStrictMeaningfulStreamFlushesAfterSubstantiveText(t *testing.T) {
 	var received []string
 	wrapper, gate := wrapMeaningfulStreamCallback(&KiroStreamCallback{
