@@ -1,5 +1,5 @@
 {
-  "version": "1.2.11",
-  "changelog": "Add account/model/endpoint-aware failover. Generic 429 responses now cool only the failing endpoint and continue through the remaining endpoints before switching accounts. Auto routing remembers the most recently successful endpoint per account and model, while bounded route state and admin diagnostics expose endpoint cooldowns.\n新增账号、模型、端点三级故障切换。普通 429 只冷却失败端点，并在切换账号前继续尝试同账号的其他端点；自动路由会记住每个账号模型最近成功的端点。路由状态有容量限制，管理端可查看账号端点冷却数量。",
+  "version": "1.2.12",
+  "changelog": "Persist the bounded recent-request log across restarts. The service restores the newest 1,000 metadata-only entries from data/request_log.json, preserves request IDs, batches atomic disk writes, uses owner-only file permissions, and flushes pending records during graceful shutdown. Corrupt state is ignored without blocking startup.\n最近请求日志现在可跨重启保留。服务会从 data/request_log.json 恢复最近 1000 条仅含元数据的记录并延续请求 ID；写入采用合并、原子替换和仅所有者可读写权限，正常关闭时强制落盘。文件损坏不会阻止服务启动。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }

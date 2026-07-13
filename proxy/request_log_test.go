@@ -7,10 +7,79 @@ import (
 	accountpool "kiro-go/pool"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
 )
+
+func TestRequestLogPersistenceRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "request_log.json")
+	log, err := newPersistentRequestLog(2, path)
+	if err != nil {
+		t.Fatalf("create persistent log: %v", err)
+	}
+	log.add(requestLogEntry{Protocol: "one", Timestamp: 1, RequestToolNames: []string{"Read"}})
+	log.add(requestLogEntry{Protocol: "two", Timestamp: 2})
+	log.add(requestLogEntry{Protocol: "three", Timestamp: 3})
+	if err := log.Flush(); err != nil {
+		t.Fatalf("flush request log: %v", err)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat request log: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("request log mode = %o, want 600", got)
+	}
+
+	restored, err := newPersistentRequestLog(2, path)
+	if err != nil {
+		t.Fatalf("restore request log: %v", err)
+	}
+	got := restored.list(10)
+	if len(got) != 2 || got[0].Protocol != "three" || got[1].Protocol != "two" {
+		t.Fatalf("unexpected restored entries: %+v", got)
+	}
+	if got[0].ID != 3 || got[1].ID != 2 {
+		t.Fatalf("unexpected restored IDs: %+v", got)
+	}
+	restored.add(requestLogEntry{Protocol: "four", Timestamp: 4})
+	got = restored.list(1)
+	if len(got) != 1 || got[0].ID != 4 {
+		t.Fatalf("restored log did not continue IDs: %+v", got)
+	}
+	if err := restored.Flush(); err != nil {
+		t.Fatalf("flush restored request log: %v", err)
+	}
+}
+
+func TestRequestLogPersistenceRejectsCorruptFileAndRecovers(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "request_log.json")
+	if err := os.WriteFile(path, []byte(`{"version":1,"entries":`), 0o600); err != nil {
+		t.Fatalf("write corrupt request log: %v", err)
+	}
+
+	log, err := newPersistentRequestLog(10, path)
+	if err == nil {
+		t.Fatal("expected corrupt request log to report an error")
+	}
+	if got := log.list(10); len(got) != 0 {
+		t.Fatalf("corrupt request log restored entries: %+v", got)
+	}
+	log.add(requestLogEntry{Protocol: "recovered", Timestamp: 1})
+	if err := log.Flush(); err != nil {
+		t.Fatalf("replace corrupt request log: %v", err)
+	}
+	restored, err := newPersistentRequestLog(10, path)
+	if err != nil {
+		t.Fatalf("restore recovered request log: %v", err)
+	}
+	if got := restored.list(1); len(got) != 1 || got[0].Protocol != "recovered" {
+		t.Fatalf("unexpected recovered entries: %+v", got)
+	}
+}
 
 func TestRequestLogKeepsNewestFirstWithLimit(t *testing.T) {
 	log := newRequestLog(2)

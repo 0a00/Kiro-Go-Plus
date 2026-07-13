@@ -331,6 +331,10 @@ func NewHandler() *Handler {
 	promptCache := newPromptCacheTrackerWithEfficiencyRange(time.Duration(promptCacheCfg.KvCacheTTLSecs)*time.Second, promptCacheCfg.CacheReadEfficiencyMin, promptCacheCfg.CacheReadEfficiencyMax)
 	promptCache.ConfigurePolicy(promptCacheCfg.Enabled, promptCacheCfg.NamespaceMode)
 	promptCache.ConfigureLimits(promptCacheCfg.MaxEntriesPerAccount, promptCacheCfg.MaxEntriesTotal)
+	requestLog, requestLogErr := newPersistentRequestLog(defaultRequestLogLimit, requestLogPath())
+	if requestLogErr != nil {
+		logger.Warnf("[RequestLog] Failed to restore persisted request log: %v", requestLogErr)
+	}
 	backgroundCtx, backgroundCancel := context.WithCancel(context.Background())
 	h := &Handler{
 		pool:             pool.GetPool(),
@@ -342,7 +346,7 @@ func NewHandler() *Handler {
 		backgroundCancel: backgroundCancel,
 		promptCache:      promptCache,
 		modelsByAccount:  make(map[string][]ModelInfo),
-		requestLog:       newRequestLog(defaultRequestLogLimit),
+		requestLog:       requestLog,
 		diagnosticLog:    newDiagnosticLog(config.GetDiagnosticConfig().MaxEntries),
 		alerts:           newHealthAlertManager(),
 		autoRefreshFail:  pool.GetPool().RefreshFailureCooldowns(),
@@ -2457,6 +2461,11 @@ func (h *Handler) Close() {
 	h.closeOnce.Do(func() {
 		h.StopBackground()
 		h.backgroundWG.Wait()
+		if h.requestLog != nil {
+			if err := h.requestLog.Flush(); err != nil {
+				logger.Warnf("[RequestLog] Failed to flush request log: %v", err)
+			}
+		}
 		if h.alerts != nil {
 			h.alerts.Close()
 		}

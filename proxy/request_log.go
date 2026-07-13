@@ -1,14 +1,27 @@
 package proxy
 
 import (
+	"encoding/json"
+	"fmt"
+	"io"
 	"kiro-go/config"
+	"kiro-go/logger"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 	"unicode/utf8"
 )
 
-const defaultRequestLogLimit = 1000
+const (
+	defaultRequestLogLimit      = 1000
+	requestLogStateVersion      = 1
+	requestLogSaveDelay         = 2 * time.Second
+	maxPersistedRequestLogBytes = 16 << 20
+	requestLogPersistenceFile   = "request_log.json"
+)
 
 type requestLogEntry struct {
 	ID                       uint64   `json:"id"`
@@ -41,10 +54,20 @@ type requestLogEntry struct {
 }
 
 type requestLog struct {
-	mu      sync.RWMutex
-	nextID  atomic.Uint64
-	limit   int
-	entries []requestLogEntry
+	mu        sync.RWMutex
+	nextID    atomic.Uint64
+	limit     int
+	entries   []requestLogEntry
+	path      string
+	persistMu sync.Mutex
+	writeMu   sync.Mutex
+	saveTimer *time.Timer
+}
+
+type persistedRequestLog struct {
+	Version int               `json:"version"`
+	SavedAt int64             `json:"savedAt"`
+	Entries []requestLogEntry `json:"entries"`
 }
 
 func newRequestLog(limit int) *requestLog {
@@ -52,6 +75,67 @@ func newRequestLog(limit int) *requestLog {
 		limit = defaultRequestLogLimit
 	}
 	return &requestLog{limit: limit, entries: make([]requestLogEntry, 0, limit)}
+}
+
+func requestLogPath() string {
+	return filepath.Join(config.GetConfigDir(), requestLogPersistenceFile)
+}
+
+func newPersistentRequestLog(limit int, path string) (*requestLog, error) {
+	log := newRequestLog(limit)
+	log.path = strings.TrimSpace(path)
+	if log.path == "" {
+		return log, nil
+	}
+	return log, log.loadFrom(log.path)
+}
+
+func (l *requestLog) loadFrom(path string) error {
+	file, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("open request log: %w", err)
+	}
+	defer file.Close()
+
+	data, err := io.ReadAll(io.LimitReader(file, maxPersistedRequestLogBytes+1))
+	if err != nil {
+		return fmt.Errorf("read request log: %w", err)
+	}
+	if len(data) > maxPersistedRequestLogBytes {
+		return fmt.Errorf("request log exceeds %d bytes", maxPersistedRequestLogBytes)
+	}
+	var state persistedRequestLog
+	if err := json.Unmarshal(data, &state); err != nil {
+		return fmt.Errorf("decode request log: %w", err)
+	}
+	if state.Version != requestLogStateVersion {
+		return fmt.Errorf("unsupported request log version %d", state.Version)
+	}
+	entries := state.Entries
+	if len(entries) > l.limit {
+		entries = entries[len(entries)-l.limit:]
+	}
+	entries = append([]requestLogEntry(nil), entries...)
+	var maxID uint64
+	for i := range entries {
+		if entries[i].ID == 0 {
+			maxID++
+			entries[i].ID = maxID
+		} else if entries[i].ID > maxID {
+			maxID = entries[i].ID
+		}
+		if entries[i].RequestToolNames != nil {
+			entries[i].RequestToolNames = append([]string(nil), entries[i].RequestToolNames...)
+		}
+	}
+	l.mu.Lock()
+	l.entries = entries
+	l.mu.Unlock()
+	l.nextID.Store(maxID)
+	return nil
 }
 
 func (l *requestLog) add(entry requestLogEntry) {
@@ -62,14 +146,114 @@ func (l *requestLog) add(entry requestLogEntry) {
 	if entry.Timestamp == 0 {
 		entry.Timestamp = time.Now().Unix()
 	}
+	if entry.RequestToolNames != nil {
+		entry.RequestToolNames = append([]string(nil), entry.RequestToolNames...)
+	}
 
 	l.mu.Lock()
-	defer l.mu.Unlock()
 	l.entries = append(l.entries, entry)
 	if overflow := len(l.entries) - l.limit; overflow > 0 {
 		copy(l.entries, l.entries[overflow:])
 		l.entries = l.entries[:l.limit]
 	}
+	l.mu.Unlock()
+	l.scheduleSave()
+}
+
+func (l *requestLog) scheduleSave() {
+	if l == nil || strings.TrimSpace(l.path) == "" {
+		return
+	}
+	l.persistMu.Lock()
+	if l.saveTimer != nil {
+		l.persistMu.Unlock()
+		return
+	}
+	path := l.path
+	l.saveTimer = time.AfterFunc(requestLogSaveDelay, func() {
+		l.persistMu.Lock()
+		l.saveTimer = nil
+		l.persistMu.Unlock()
+		if err := l.saveTo(path); err != nil {
+			logger.Warnf("[RequestLog] Failed to persist request log: %v", err)
+		}
+	})
+	l.persistMu.Unlock()
+}
+
+func (l *requestLog) Flush() error {
+	if l == nil || strings.TrimSpace(l.path) == "" {
+		return nil
+	}
+	l.persistMu.Lock()
+	if l.saveTimer != nil {
+		l.saveTimer.Stop()
+		l.saveTimer = nil
+	}
+	path := l.path
+	l.persistMu.Unlock()
+	return l.saveTo(path)
+}
+
+func (l *requestLog) saveTo(path string) error {
+	l.writeMu.Lock()
+	defer l.writeMu.Unlock()
+
+	l.mu.RLock()
+	entries := append([]requestLogEntry(nil), l.entries...)
+	for i := range entries {
+		if entries[i].RequestToolNames != nil {
+			entries[i].RequestToolNames = append([]string(nil), entries[i].RequestToolNames...)
+		}
+	}
+	l.mu.RUnlock()
+
+	data, err := json.MarshalIndent(persistedRequestLog{
+		Version: requestLogStateVersion,
+		SavedAt: time.Now().Unix(),
+		Entries: entries,
+	}, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode request log: %w", err)
+	}
+	if len(data) > maxPersistedRequestLogBytes {
+		return fmt.Errorf("encoded request log exceeds %d bytes", maxPersistedRequestLogBytes)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("create request log directory: %w", err)
+	}
+	tmpPath := path + ".tmp"
+	file, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	if err != nil {
+		return fmt.Errorf("create request log temp file: %w", err)
+	}
+	removeTemp := true
+	defer func() {
+		if file != nil {
+			_ = file.Close()
+		}
+		if removeTemp {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if err := file.Chmod(0o600); err != nil {
+		return fmt.Errorf("secure request log temp file: %w", err)
+	}
+	if _, err := file.Write(data); err != nil {
+		return fmt.Errorf("write request log: %w", err)
+	}
+	if err := file.Sync(); err != nil {
+		return fmt.Errorf("sync request log: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("close request log: %w", err)
+	}
+	file = nil
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("commit request log: %w", err)
+	}
+	removeTemp = false
+	return nil
 }
 
 func (l *requestLog) list(limit int) []requestLogEntry {
