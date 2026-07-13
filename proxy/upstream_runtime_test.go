@@ -111,6 +111,16 @@ func TestCallKiroAPIRejectsHTTP200EmptyResponse(t *testing.T) {
 	}
 }
 
+func TestEmptyResponseRetryExhaustionStillAllowsAccountFailover(t *testing.T) {
+	err := newEmptyResponseError("CodeWhisperer", false)
+	if err.RetryAcrossEndpoints {
+		t.Fatal("exhausted empty response should stop endpoint retries")
+	}
+	if !err.RetryAcrossAccounts {
+		t.Fatal("exhausted empty response should still allow account failover")
+	}
+}
+
 func TestCallKiroAPIRetriesToolStreamWithOnlyThinkingAndStructuralTail(t *testing.T) {
 	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatalf("init config: %v", err)

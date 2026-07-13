@@ -31,6 +31,8 @@ const maxRequestBodyBytes int64 = 8 << 20
 const maxCredentialImportBatch = 5000
 const externalIdpImportMaxTrust = 15 * time.Minute
 
+var claudeStreamHeartbeatInterval = 10 * time.Second
+
 func requestBodyErrorStatus(err error) int {
 	var maxBytesErr *http.MaxBytesError
 	if errors.As(err, &maxBytesErr) {
@@ -1797,6 +1799,7 @@ func (h *Handler) handleClaudeMessages(w http.ResponseWriter, r *http.Request) {
 	kiroPayload.requireActionableOutput = (len(req.Tools) > 0 || thinking) && (!req.Stream || guardActionableStream)
 	kiroPayload.toolUsePolicy = req.ToolUsePolicy
 	kiroPayload.deferTextUntilComplete = guardActionableStream && req.ToolUsePolicy == toolUsePolicyInferred
+	kiroPayload.streamThinkingPrecommit = guardActionableStream && thinking && !thinkingResponseOpts.OmitDisplay
 	// Inferred workspace intent still adds strong tool guidance, but only an
 	// explicit client tool_choice may reject an otherwise valid text response.
 	kiroPayload.requireToolUse = requiresStrictClaudeToolUse(&req)
@@ -1832,6 +1835,8 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 	messageStarted := false
 	var messageStartUsage promptCacheUsage
 	lastPingAt := startedAt
+	nextContentIndex := 0
+	var rawThinkingBuilder strings.Builder
 
 	ensureMessageStart := func() {
 		if messageStarted {
@@ -1901,10 +1906,8 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 		var upstreamUsage KiroTokenUsage
 		var truncated bool
 		var toolUses []KiroToolUse
-		var nextContentIndex int
 		var rawContentBuilder strings.Builder
-		var rawThinkingBuilder strings.Builder
-		contentCommitted := false
+		actionableCommitted := false
 		activeBlockIndex := -1
 		activeBlockType := ""
 
@@ -1925,7 +1928,6 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 				return
 			}
 			ensureMessageStart()
-			contentCommitted = true
 			closeActiveBlock()
 
 			idx := nextContentIndex
@@ -1967,6 +1969,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 				if text == "" {
 					return
 				}
+				actionableCommitted = true
 				startContentBlock("text")
 				h.sendSSE(w, flusher, "content_block_delta", map[string]interface{}{
 					"type":  "content_block_delta",
@@ -2171,7 +2174,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 
 				toolUses = append(toolUses, tu)
 				ensureMessageStart()
-				contentCommitted = true
+				actionableCommitted = true
 				closeActiveBlock()
 
 				idx := nextContentIndex
@@ -2208,10 +2211,21 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 				outputTokens = outTok
 			},
 			OnProgress: func() {
-				if !messageStarted || time.Since(lastPingAt) < 10*time.Second {
+				if !messageStarted || time.Since(lastPingAt) < claudeStreamHeartbeatInterval {
 					return
 				}
 				lastPingAt = time.Now()
+				if payload.streamThinkingPrecommit && !actionableCommitted && thinkingFormat == "thinking" {
+					startContentBlock("thinking")
+					h.sendSSE(w, flusher, "content_block_delta", map[string]interface{}{
+						"type":  "content_block_delta",
+						"index": activeBlockIndex,
+						"delta": map[string]string{"type": "thinking_delta", "thinking": " "},
+					})
+					thinkingStarted = true
+					eventThinkingOpen = true
+					return
+				}
 				h.sendSSE(w, flusher, "ping", map[string]string{"type": "ping"})
 			},
 			OnUsage: func(usage KiroTokenUsage) {
@@ -2240,7 +2254,13 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 			lastErr = err
 			excluded[account.ID] = true
 			h.handleAccountFailureForModel(account, model, err)
-			if !contentCommitted {
+			if !actionableCommitted {
+				if eventThinkingOpen {
+					sendText("", 3)
+					eventThinkingOpen = false
+					thinkingStarted = false
+				}
+				closeActiveBlock()
 				if !shouldRetryAcrossAccounts(err) {
 					break
 				}

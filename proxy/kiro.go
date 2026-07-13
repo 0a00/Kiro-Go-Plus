@@ -211,6 +211,7 @@ type KiroPayload struct {
 	requireActionableOutput bool
 	requireToolUse          bool
 	deferTextUntilComplete  bool
+	streamThinkingPrecommit bool
 	toolUsePolicy           string
 	tokenRefreshMu          sync.Mutex
 	tokenRefreshAttempts    map[string]int
@@ -401,6 +402,26 @@ func getSortedEndpoints(preferred string) []kiroEndpoint {
 	return result
 }
 
+func prioritizeGuardedToolEndpoints(endpoints []kiroEndpoint) []kiroEndpoint {
+	ordered := make([]kiroEndpoint, 0, len(endpoints))
+	added := make(map[string]bool, len(endpoints))
+	for _, key := range []string{"runtime", "kiro", "codewhisperer", "amazonq"} {
+		for _, endpoint := range endpoints {
+			if normalizeEndpointRoutePart(endpoint.Key) == key {
+				ordered = append(ordered, endpoint)
+				added[key] = true
+			}
+		}
+	}
+	for _, endpoint := range endpoints {
+		key := normalizeEndpointRoutePart(endpoint.Key)
+		if !added[key] {
+			ordered = append(ordered, endpoint)
+		}
+	}
+	return ordered
+}
+
 // CallKiroAPI calls the Kiro streaming API, trying each configured endpoint with automatic fallback.
 func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroStreamCallback) error {
 	requestContext := context.Background()
@@ -462,6 +483,11 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 	endpoints, routeErr = sharedAccountEndpointRoutes.availableEndpoints(accountID, modelKey, preferredEndpoint, endpoints)
 	if routeErr != nil {
 		return routeErr
+	}
+	if payload != nil && payload.requireActionableOutput && (preferredEndpoint == "" || strings.EqualFold(preferredEndpoint, "auto")) {
+		// Long agent tool calls are most reliable on Runtime and Kiro IDE. Do not
+		// let a previous short CodeWhisperer success pin guarded requests there.
+		endpoints = prioritizeGuardedToolEndpoints(endpoints)
 	}
 	requiresProfileArn := false
 	for _, endpoint := range endpoints {
@@ -596,7 +622,7 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 			if firstTokenTimer != nil {
 				firstTokenTimer.Stop()
 			}
-		}, payload != nil && payload.requireActionableOutput, payload != nil && payload.requireToolUse, payload != nil && payload.deferTextUntilComplete)
+		}, payload != nil && payload.requireActionableOutput, payload != nil && payload.requireToolUse, payload != nil && payload.deferTextUntilComplete, payload != nil && payload.streamThinkingPrecommit)
 		if firstTokenTimeout > 0 {
 			firstTokenTimer = time.AfterFunc(firstTokenTimeout, func() {
 				firstTokenTimedOut.Store(true)

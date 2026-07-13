@@ -394,6 +394,24 @@ func TestNonKiroIDEEndpointKeepsConfiguredURL(t *testing.T) {
 	}
 }
 
+func TestPrioritizeGuardedToolEndpointsOverridesAutoAffinity(t *testing.T) {
+	got := prioritizeGuardedToolEndpoints([]kiroEndpoint{
+		{Key: "codewhisperer"},
+		{Key: "amazonq"},
+		{Key: "kiro"},
+		{Key: "runtime"},
+	})
+	want := []string{"runtime", "kiro", "codewhisperer", "amazonq"}
+	if len(got) != len(want) {
+		t.Fatalf("endpoint count = %d, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i].Key != want[i] {
+			t.Fatalf("endpoint order = %+v, want %v", got, want)
+		}
+	}
+}
+
 func mustParseURL(t *testing.T, raw string) *url.URL {
 	t.Helper()
 	parsed, err := url.Parse(raw)

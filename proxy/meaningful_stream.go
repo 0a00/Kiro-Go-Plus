@@ -40,13 +40,14 @@ type pendingStreamEvent struct {
 // text or a complete tool call. This keeps hidden reasoning and malformed tails
 // such as a lone "}" from turning an unusable response into HTTP 200 success.
 type meaningfulStreamCallback struct {
-	target                 *KiroStreamCallback
-	onActivity             func()
-	strict                 bool
-	requireToolUse         bool
-	deferTextUntilComplete bool
-	activity               atomic.Bool
-	actionable             atomic.Bool
+	target                  *KiroStreamCallback
+	onActivity              func()
+	strict                  bool
+	requireToolUse          bool
+	deferTextUntilComplete  bool
+	streamThinkingPrecommit bool
+	activity                atomic.Bool
+	actionable              atomic.Bool
 
 	mu           sync.Mutex
 	committed    bool
@@ -54,16 +55,17 @@ type meaningfulStreamCallback struct {
 	pending      []pendingStreamEvent
 }
 
-func wrapMeaningfulStreamCallback(target *KiroStreamCallback, onActivity func(), strict, requireToolUse, deferTextUntilComplete bool) (*KiroStreamCallback, *meaningfulStreamCallback) {
+func wrapMeaningfulStreamCallback(target *KiroStreamCallback, onActivity func(), strict, requireToolUse, deferTextUntilComplete, streamThinkingPrecommit bool) (*KiroStreamCallback, *meaningfulStreamCallback) {
 	if target == nil {
 		target = &KiroStreamCallback{}
 	}
 	gate := &meaningfulStreamCallback{
-		target:                 target,
-		onActivity:             onActivity,
-		strict:                 strict,
-		requireToolUse:         requireToolUse,
-		deferTextUntilComplete: deferTextUntilComplete,
+		target:                  target,
+		onActivity:              onActivity,
+		strict:                  strict,
+		requireToolUse:          requireToolUse,
+		deferTextUntilComplete:  deferTextUntilComplete,
+		streamThinkingPrecommit: streamThinkingPrecommit,
 	}
 	wrapper := &KiroStreamCallback{
 		OnText: func(text string, isThinking bool) {
@@ -135,6 +137,11 @@ func (g *meaningfulStreamCallback) handleEvent(event pendingStreamEvent) {
 		g.dispatch(event)
 		return
 	}
+	if event.kind == pendingText && event.isThinking && g.streamThinkingPrecommit && !g.hasPendingVisibleOutputLocked() {
+		g.mu.Unlock()
+		g.dispatch(event)
+		return
+	}
 	g.appendPendingLocked(event)
 
 	commit := event.kind == pendingToolUse
@@ -169,6 +176,15 @@ func (g *meaningfulStreamCallback) handleEvent(event pendingStreamEvent) {
 	for _, item := range pending {
 		g.dispatch(item)
 	}
+}
+
+func (g *meaningfulStreamCallback) hasPendingVisibleOutputLocked() bool {
+	for _, event := range g.pending {
+		if event.kind == pendingToolUse || (event.kind == pendingText && !event.isThinking) {
+			return true
+		}
+	}
+	return false
 }
 
 func (g *meaningfulStreamCallback) appendPendingLocked(event pendingStreamEvent) {

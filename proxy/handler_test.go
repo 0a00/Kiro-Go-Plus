@@ -575,6 +575,106 @@ func TestClaudeToolStreamCommitsBeforeUpstreamCompletes(t *testing.T) {
 	}
 }
 
+func TestClaudeInferredToolStreamEmitsThinkingHeartbeatBeforeToolCompletes(t *testing.T) {
+	t.Setenv("ALLOW_UNAUTHENTICATED_API", "true")
+	oldHeartbeatInterval := claudeStreamHeartbeatInterval
+	claudeStreamHeartbeatInterval = 10 * time.Millisecond
+	defer func() { claudeStreamHeartbeatInterval = oldHeartbeatInterval }()
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	if err := config.AddAccount(config.Account{
+		ID: "thinking-stream-account", Enabled: true, AccessToken: "token-thinking", ProfileArn: "arn:aws:codewhisperer:profile/thinking",
+	}); err != nil {
+		t.Fatalf("add account: %v", err)
+	}
+	if err := config.UpdatePreferredEndpoint("kiro"); err != nil {
+		t.Fatalf("set preferred endpoint: %v", err)
+	}
+	if err := config.UpdateEndpointFallback(false); err != nil {
+		t.Fatalf("disable endpoint fallback: %v", err)
+	}
+
+	releaseUpstream := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseUpstream) }) }
+	defer release()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		time.Sleep(20 * time.Millisecond)
+		_, _ = w.Write(awsEventStreamFrame(t, "toolUseEvent", map[string]interface{}{
+			"toolUseId": "toolu_write",
+			"name":      "Write",
+			"input":     `{"file_path":"index.html","content":"`,
+		}))
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		select {
+		case <-releaseUpstream:
+		case <-r.Context().Done():
+			return
+		}
+		_, _ = w.Write(awsEventStreamFrame(t, "toolUseEvent", map[string]interface{}{
+			"toolUseId": "toolu_write",
+			"name":      "Write",
+			"input":     `complete"}`,
+			"stop":      true,
+		}))
+		_, _ = w.Write(awsEventStreamFrame(t, "contextUsageEvent", map[string]interface{}{
+			"contextUsagePercentage": 1.0,
+		}))
+	}))
+	defer upstream.Close()
+	defer swapKiroEndpointsForTest(t, upstream)()
+
+	p := accountpool.GetPool()
+	p.Reload()
+	h := &Handler{pool: p, promptCache: newPromptCacheTracker(defaultPromptCacheTTL), requestLog: newRequestLog(defaultRequestLogLimit)}
+	server := httptest.NewServer(h)
+	defer server.Close()
+
+	req, err := http.NewRequest(http.MethodPost, server.URL+"/v1/messages", strings.NewReader(`{
+		"model":"claude-sonnet-4.5",
+		"stream":true,
+		"max_tokens":2048,
+		"thinking":{"type":"enabled","budget_tokens":1024},
+		"messages":[{"role":"user","content":"任务目标：请创建一个 HTML 文件并写入工作区。"}],
+		"tools":[{"name":"Write","description":"write a file","input_schema":{"type":"object","properties":{"file_path":{"type":"string"},"content":{"type":"string"}}}}]
+	}`))
+	if err != nil {
+		t.Fatalf("create request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := (&http.Client{Timeout: 3 * time.Second}).Do(req)
+	if err != nil {
+		t.Fatalf("start streamed request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	reader := bufio.NewReader(resp.Body)
+	var first strings.Builder
+	for !strings.Contains(first.String(), `"type":"thinking_delta"`) {
+		line, readErr := reader.ReadString('\n')
+		if readErr != nil {
+			t.Fatalf("read thinking heartbeat: %v body=%s", readErr, first.String())
+		}
+		first.WriteString(line)
+	}
+	if strings.Contains(first.String(), `"type":"tool_use"`) {
+		t.Fatalf("tool completed before thinking was observed: %s", first.String())
+	}
+
+	release()
+	rest, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("read remaining stream: %v", err)
+	}
+	if !strings.Contains(string(rest), `"type":"tool_use"`) || !strings.Contains(string(rest), "message_stop") {
+		t.Fatalf("remaining tool stream is incomplete: %s", rest)
+	}
+}
+
 func TestClaudeInferredToolStreamRetriesAfterPreambleTransportFailure(t *testing.T) {
 	t.Setenv("ALLOW_UNAUTHENTICATED_API", "true")
 	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
@@ -600,6 +700,9 @@ func TestClaudeInferredToolStreamRetriesAfterPreambleTransportFailure(t *testing
 		upstreamCalls++
 		w.WriteHeader(http.StatusOK)
 		if upstreamCalls == 1 {
+			_, _ = w.Write(awsEventStreamFrame(t, "reasoningContentEvent", map[string]interface{}{
+				"text": "reasoning from the failed attempt",
+			}))
 			_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{
 				"content": "I will create the requested file now.",
 			}))
@@ -629,6 +732,8 @@ func TestClaudeInferredToolStreamRetriesAfterPreambleTransportFailure(t *testing
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{
 		"model":"claude-sonnet-4.5",
 		"stream":true,
+		"max_tokens":2048,
+		"thinking":{"type":"enabled","budget_tokens":1024},
 		"messages":[{"role":"user","content":"任务目标：请创建一个 HTML 文件并写入工作区。"}],
 		"tools":[{"name":"Write","description":"write a file","input_schema":{"type":"object","properties":{"file_path":{"type":"string"},"content":{"type":"string"}}}}]
 	}`))
@@ -647,6 +752,9 @@ func TestClaudeInferredToolStreamRetriesAfterPreambleTransportFailure(t *testing
 	}
 	if strings.Contains(body, "I will create the requested file now") {
 		t.Fatalf("failed-attempt preamble leaked downstream: %s", body)
+	}
+	if !strings.Contains(body, "reasoning from the failed attempt") {
+		t.Fatalf("retryable thinking was not streamed downstream: %s", body)
 	}
 	if !strings.Contains(body, `"type":"tool_use"`) || !strings.Contains(body, "event: message_stop") {
 		t.Fatalf("retried tool stream is incomplete: %s", body)

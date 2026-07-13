@@ -334,13 +334,15 @@ func classifyRequestCancellation(endpoint string, err error) *UpstreamError {
 	}
 }
 
-func newEmptyResponseError(endpoint string, retry bool) *UpstreamError {
+func newEmptyResponseError(endpoint string, retryEndpoints bool) *UpstreamError {
 	return &UpstreamError{
 		Kind:                 UpstreamErrorEmptyResponse,
 		Endpoint:             endpoint,
 		Message:              "upstream returned HTTP 200 without actionable text or a complete tool call",
-		RetryAcrossEndpoints: retry,
-		RetryAcrossAccounts:  retry,
+		RetryAcrossEndpoints: retryEndpoints,
+		// Exhausting endpoint-level empty retries must not prevent another
+		// account from serving the request.
+		RetryAcrossAccounts: true,
 	}
 }
 

@@ -1,5 +1,5 @@
 {
-  "version": "1.2.17",
-  "changelog": "Improve long Claude tool streams on /v1/messages. Guarded streams now start immediately, send progress pings during lengthy upstream generation, and keep inferred workspace preambles retryable until a complete tool call or clean text-only completion. Transport failures also clear sticky endpoint affinity, while diagnostics retain request IDs and wrapped root causes.\n优化 /v1/messages 的长工具流。受保护流现在会立即建立并在长时上游生成期间发送进度 ping；工作区任务的简短前言在完整工具调用或纯文本正常完成前仍可安全重试。传输失败会清除粘性端点偏好，失败诊断也会保留请求 ID 和底层原因。",
+  "version": "1.2.18",
+  "changelog": "Prevent Claude Code's 300-second stream-idle reset during long agent tool generation. Guarded /v1/messages streams now forward thinking deltas before actionable output and emit a thinking heartbeat while large tool arguments are still arriving, while preserving endpoint/account failover until visible text or a complete tool call is committed. Auto routing prioritizes Runtime and Kiro IDE for guarded tool requests, and exhausted empty-response retries continue with another account.\n防止 Claude Code 在长 Agent 工具生成期间因 300 秒无内容分块而重置连接。受保护的 /v1/messages 流现在会在正文或完整工具调用前实时转发 thinking delta，并在大型工具参数持续到达时发送 thinking 心跳；正文或完整工具尚未提交时仍可切换端点与账号。自动路由会为受保护工具请求优先使用 Runtime 和 Kiro IDE，空响应端点重试用尽后仍会继续切换账号。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }
