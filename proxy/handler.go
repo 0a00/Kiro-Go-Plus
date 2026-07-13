@@ -1032,21 +1032,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 路由
 	switch {
 	// API 端点（需要验证 API Key）
-	case path == "/v1/messages" || path == "/messages" || path == "/anthropic/v1/messages":
+	case path == "/v1/messages":
 		ar := h.authenticateForClaude(w, r)
 		if ar == nil {
 			return
 		}
 		defer releaseAPIKeyAdmission(ar.Context())
 		h.handleClaudeMessages(w, ar)
-	case path == "/cc/v1/messages":
-		ar := h.authenticateForClaude(w, r)
-		if ar == nil {
-			return
-		}
-		defer releaseAPIKeyAdmission(ar.Context())
-		h.handleClaudeMessagesBuffered(w, ar)
-	case path == "/v1/messages/count_tokens" || path == "/messages/count_tokens" || path == "/cc/v1/messages/count_tokens":
+	case path == "/v1/messages/count_tokens":
 		ar := h.authenticateForClaude(w, r)
 		if ar == nil {
 			return
@@ -1744,14 +1737,6 @@ func (h *Handler) handleCountTokens(w http.ResponseWriter, r *http.Request) {
 
 // handleClaudeMessages Claude API 处理
 func (h *Handler) handleClaudeMessages(w http.ResponseWriter, r *http.Request) {
-	h.handleClaudeMessagesInternal(w, r, false)
-}
-
-func (h *Handler) handleClaudeMessagesBuffered(w http.ResponseWriter, r *http.Request) {
-	h.handleClaudeMessagesInternal(w, r, true)
-}
-
-func (h *Handler) handleClaudeMessagesInternal(w http.ResponseWriter, r *http.Request, bufferedStream bool) {
 	if r.Method != "POST" {
 		http.Error(w, "Method Not Allowed", 405)
 		return
@@ -1808,25 +1793,21 @@ func (h *Handler) handleClaudeMessagesInternal(w http.ResponseWriter, r *http.Re
 	namespaceConversationID(kiroPayload, requestConversationNamespace(r, apiKeyID))
 	routeKey := kiroPayload.ConversationState.ConversationID
 	guardToolStream := len(req.Tools) > 0 && (thinkingCfg.BufferToolStreams || req.RequireToolUse)
-	guardActionableStream := req.Stream && (bufferedStream || guardToolStream)
+	guardActionableStream := req.Stream && guardToolStream
 	kiroPayload.requireActionableOutput = (len(req.Tools) > 0 || thinking) && (!req.Stream || guardActionableStream)
 	kiroPayload.toolUsePolicy = req.ToolUsePolicy
 	// Inferred workspace intent still adds strong tool guidance, but only an
 	// explicit client tool_choice may reject an otherwise valid text response.
 	kiroPayload.requireToolUse = requiresStrictClaudeToolUse(&req)
 	if req.Stream {
-		protocol := "claude.messages.stream"
-		if bufferedStream {
-			protocol = "claude.messages.cc.stream"
-		}
-		h.handleClaudeStream(w, kiroPayload, req.Model, thinking, thinkingResponseOpts, estimatedInputTokens, cacheProfile, apiKeyID, routeKey, protocol)
+		h.handleClaudeStream(w, kiroPayload, req.Model, thinking, thinkingResponseOpts, estimatedInputTokens, cacheProfile, apiKeyID, routeKey)
 	} else {
 		h.handleClaudeNonStream(w, kiroPayload, req.Model, thinking, thinkingResponseOpts, estimatedInputTokens, cacheProfile, apiKeyID, routeKey)
 	}
 }
 
 // handleClaudeStream Claude 流式响应
-func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, thinkingOpts claudeThinkingResponseOptions, estimatedInputTokens int, cacheProfile *promptCacheProfile, apiKeyID, routeKey, protocol string) {
+func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, thinkingOpts claudeThinkingResponseOptions, estimatedInputTokens int, cacheProfile *promptCacheProfile, apiKeyID, routeKey string) {
 	startedAt := time.Now()
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -2241,7 +2222,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 			h.recordFailure()
 			h.recordRequestLogForPayload(payload, requestLogEntry{
 				Timestamp:    time.Now().Unix(),
-				Protocol:     protocol,
+				Protocol:     "claude.messages.stream",
 				Model:        model,
 				AccountID:    account.ID,
 				AccountEmail: account.Email,
@@ -2251,7 +2232,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 				Error:        err.Error(),
 			})
 			h.recordDiagnosticFailure(diagnosticLogEntry{
-				Protocol:       protocol,
+				Protocol:       "claude.messages.stream",
 				Model:          model,
 				AccountID:      account.ID,
 				AccountEmail:   account.Email,
@@ -2302,7 +2283,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 		h.promptCache.RecordUsage(cacheUsage, cacheProfile != nil || upstreamUsage.HasCacheBreakdown)
 		h.recordRequestLogForPayload(payload, requestLogEntry{
 			Timestamp:                time.Now().Unix(),
-			Protocol:                 protocol,
+			Protocol:                 "claude.messages.stream",
 			Model:                    model,
 			AccountID:                account.ID,
 			AccountEmail:             account.Email,
@@ -2343,7 +2324,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 			h.recordFailure()
 			h.recordRequestLogForPayload(payload, requestLogEntry{
 				Timestamp:  time.Now().Unix(),
-				Protocol:   protocol,
+				Protocol:   "claude.messages.stream",
 				Model:      model,
 				Status:     "failed",
 				StatusCode: 429,
@@ -2351,7 +2332,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 				Error:      busyErr.Error(),
 			})
 			h.recordDiagnosticFailure(diagnosticLogEntry{
-				Protocol:       protocol,
+				Protocol:       "claude.messages.stream",
 				Model:          model,
 				StatusCode:     429,
 				Error:          busyErr.Error(),
@@ -2369,7 +2350,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 	h.recordFailure()
 	h.recordRequestLogForPayload(payload, requestLogEntry{
 		Timestamp:  time.Now().Unix(),
-		Protocol:   protocol,
+		Protocol:   "claude.messages.stream",
 		Model:      model,
 		Status:     "failed",
 		StatusCode: mapped.Status,
@@ -2377,7 +2358,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 		Error:      lastErr.Error(),
 	})
 	h.recordDiagnosticFailure(diagnosticLogEntry{
-		Protocol:       protocol,
+		Protocol:       "claude.messages.stream",
 		Model:          model,
 		StatusCode:     mapped.Status,
 		Error:          lastErr.Error(),

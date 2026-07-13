@@ -692,7 +692,6 @@
   async function loadData() {
     await Promise.all([loadStats(), loadAccounts(), loadSettings(), loadVersion()]);
     renderEndpointCode('claudeEndpoint', baseUrl + '/v1/messages');
-    renderEndpointCode('claudeCodeEndpoint', baseUrl + '/cc/v1/messages');
     renderEndpointCode('openaiEndpoint', baseUrl + '/v1/chat/completions');
     renderEndpointCode('openaiResponsesEndpoint', baseUrl + '/v1/responses');
     renderEndpointCode('modelsEndpoint', baseUrl + '/v1/models');

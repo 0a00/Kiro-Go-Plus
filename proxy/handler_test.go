@@ -408,7 +408,7 @@ func TestApiRuntimeConfigUpdatesConfigAndLogger(t *testing.T) {
 	}
 }
 
-func TestClaudeCodeStreamReportsRealInputTokensAtCompletion(t *testing.T) {
+func TestClaudeStreamReportsRealInputTokensAtCompletion(t *testing.T) {
 	t.Setenv("ALLOW_UNAUTHENTICATED_API", "true")
 	cfgFile := t.TempDir() + "/config.json"
 	if err := config.Init(cfgFile); err != nil {
@@ -449,7 +449,7 @@ func TestClaudeCodeStreamReportsRealInputTokensAtCompletion(t *testing.T) {
 		requestLog:  newRequestLog(defaultRequestLogLimit),
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "/cc/v1/messages", strings.NewReader(`{
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{
 		"model":"claude-sonnet-4.5",
 		"stream":true,
 		"messages":[{"role":"user","content":"hi"}]
@@ -468,7 +468,7 @@ func TestClaudeCodeStreamReportsRealInputTokensAtCompletion(t *testing.T) {
 		t.Fatalf("expected final usage to report real input_tokens 2460, got:\n%s", body)
 	}
 	entries := h.requestLog.list(1)
-	if len(entries) != 1 || entries[0].Protocol != "claude.messages.cc.stream" {
+	if len(entries) != 1 || entries[0].Protocol != "claude.messages.stream" {
 		t.Fatalf("unexpected request log protocol: %+v", entries)
 	}
 }
@@ -532,7 +532,7 @@ func TestClaudeToolStreamCommitsBeforeUpstreamCompletes(t *testing.T) {
 	server := httptest.NewServer(h)
 	defer server.Close()
 
-	req, err := http.NewRequest(http.MethodPost, server.URL+"/cc/v1/messages", strings.NewReader(`{
+	req, err := http.NewRequest(http.MethodPost, server.URL+"/v1/messages", strings.NewReader(`{
 		"model":"claude-sonnet-4.5",
 		"stream":true,
 		"messages":[{"role":"user","content":"stream this"}],
@@ -572,6 +572,25 @@ func TestClaudeToolStreamCommitsBeforeUpstreamCompletes(t *testing.T) {
 	}
 	if !strings.Contains(string(rest), "second chunk") || !strings.Contains(string(rest), "message_stop") {
 		t.Fatalf("remaining stream is incomplete: %s", rest)
+	}
+}
+
+func TestRemovedClaudeAliasesReturnNotFound(t *testing.T) {
+	h := &Handler{}
+	for _, path := range []string{
+		"/cc/v1/messages",
+		"/messages",
+		"/anthropic/v1/messages",
+		"/cc/v1/messages/count_tokens",
+		"/messages/count_tokens",
+	} {
+		t.Run(path, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{}`)))
+			if rec.Code != http.StatusNotFound {
+				t.Fatalf("status = %d, want 404; body=%s", rec.Code, rec.Body.String())
+			}
+		})
 	}
 }
 
