@@ -1813,6 +1813,7 @@ func (h *Handler) handleClaudeMessages(w http.ResponseWriter, r *http.Request) {
 // handleClaudeStream Claude 流式响应
 func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, thinkingOpts claudeThinkingResponseOptions, estimatedInputTokens int, cacheProfile *promptCacheProfile, apiKeyID, routeKey string) {
 	startedAt := time.Now()
+	firstContent := newRequestFirstContentTimer(startedAt)
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -2155,6 +2156,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 
 		callback := &KiroStreamCallback{
 			OnText: func(text string, isThinking bool) {
+				firstContent.MarkText(text)
 				if text == "" {
 					return
 				}
@@ -2166,6 +2168,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 				processClaudeText(text, isThinking, false)
 			},
 			OnToolUse: func(tu KiroToolUse) {
+				firstContent.Mark()
 				processClaudeText("", false, true)
 				rawContentBuilder.WriteString(tu.Name)
 				if b, err := json.Marshal(tu.Input); err == nil {
@@ -2277,6 +2280,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 				Endpoint:            upstreamErrorEndpoint(err),
 				Status:              "failed",
 				StatusCode:          mapped.Status,
+				FirstContentMs:      firstContent.Value(),
 				DurationMs:          requestDurationMs(startedAt),
 				VisibleOutputChars:  outputCharCount(rawContentBuilder.String()),
 				ThinkingOutputChars: outputCharCount(rawThinkingBuilder.String()),
@@ -2330,6 +2334,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 			AccountEmail:             account.Email,
 			Status:                   "success",
 			StatusCode:               200,
+			FirstContentMs:           firstContent.Value(),
 			DurationMs:               requestDurationMs(startedAt),
 			InputTokens:              inputTokens,
 			OutputTokens:             outputTokens,
@@ -2364,13 +2369,14 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 		if busyErr != nil {
 			h.recordFailure()
 			h.recordRequestLogForPayload(payload, requestLogEntry{
-				Timestamp:  time.Now().Unix(),
-				Protocol:   "claude.messages.stream",
-				Model:      model,
-				Status:     "failed",
-				StatusCode: 429,
-				DurationMs: requestDurationMs(startedAt),
-				Error:      busyErr.Error(),
+				Timestamp:      time.Now().Unix(),
+				Protocol:       "claude.messages.stream",
+				Model:          model,
+				Status:         "failed",
+				StatusCode:     429,
+				FirstContentMs: firstContent.Value(),
+				DurationMs:     requestDurationMs(startedAt),
+				Error:          busyErr.Error(),
 			})
 			h.recordDiagnosticFailureForPayload("claude.messages.stream", model, nil, 429, busyErr, payload)
 			w.Header().Set("Retry-After", "1")
@@ -2384,14 +2390,15 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 	mapped := mapDownstreamError(lastErr)
 	h.recordFailure()
 	h.recordRequestLogForPayload(payload, requestLogEntry{
-		Timestamp:  time.Now().Unix(),
-		Protocol:   "claude.messages.stream",
-		Model:      model,
-		Endpoint:   upstreamErrorEndpoint(lastErr),
-		Status:     "failed",
-		StatusCode: mapped.Status,
-		DurationMs: requestDurationMs(startedAt),
-		Error:      lastErr.Error(),
+		Timestamp:      time.Now().Unix(),
+		Protocol:       "claude.messages.stream",
+		Model:          model,
+		Endpoint:       upstreamErrorEndpoint(lastErr),
+		Status:         "failed",
+		StatusCode:     mapped.Status,
+		FirstContentMs: firstContent.Value(),
+		DurationMs:     requestDurationMs(startedAt),
+		Error:          lastErr.Error(),
 	})
 	h.recordDiagnosticFailureForPayload("claude.messages.stream", model, nil, mapped.Status, lastErr, payload)
 	applyDownstreamErrorHeaders(w, mapped)
@@ -2531,6 +2538,7 @@ func (h *Handler) recordFailure() {
 // handleClaudeNonStream Claude 非流式响应
 func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, thinkingOpts claudeThinkingResponseOptions, estimatedInputTokens int, cacheProfile *promptCacheProfile, apiKeyID, routeKey string) {
 	startedAt := time.Now()
+	firstContent := newRequestFirstContentTimer(startedAt)
 	attempts := h.newAccountAttemptController(payload.requestContext)
 	excluded := attempts.excluded
 	var lastErr error
@@ -2572,6 +2580,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 
 		callback := &KiroStreamCallback{
 			OnText: func(text string, isThinking bool) {
+				firstContent.MarkText(text)
 				if isThinking {
 					thinkingContent += text
 				} else {
@@ -2579,6 +2588,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 				}
 			},
 			OnToolUse: func(tu KiroToolUse) {
+				firstContent.Mark()
 				toolUses = append(toolUses, tu)
 			},
 			OnComplete: func(inTok, outTok int) {
@@ -2652,6 +2662,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 			AccountEmail:             account.Email,
 			Status:                   "success",
 			StatusCode:               200,
+			FirstContentMs:           firstContent.Value(),
 			DurationMs:               requestDurationMs(startedAt),
 			InputTokens:              inputTokens,
 			OutputTokens:             outputTokens,
@@ -2707,13 +2718,14 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 		if busyErr != nil {
 			h.recordFailure()
 			h.recordRequestLogForPayload(payload, requestLogEntry{
-				Timestamp:  time.Now().Unix(),
-				Protocol:   "claude.messages",
-				Model:      model,
-				Status:     "failed",
-				StatusCode: 429,
-				DurationMs: requestDurationMs(startedAt),
-				Error:      busyErr.Error(),
+				Timestamp:      time.Now().Unix(),
+				Protocol:       "claude.messages",
+				Model:          model,
+				Status:         "failed",
+				StatusCode:     429,
+				FirstContentMs: firstContent.Value(),
+				DurationMs:     requestDurationMs(startedAt),
+				Error:          busyErr.Error(),
 			})
 			h.recordDiagnosticFailure(diagnosticLogEntry{
 				Protocol:       "claude.messages",
@@ -2733,13 +2745,14 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 	mapped := mapDownstreamError(lastErr)
 	h.recordFailure()
 	h.recordRequestLogForPayload(payload, requestLogEntry{
-		Timestamp:  time.Now().Unix(),
-		Protocol:   "claude.messages",
-		Model:      model,
-		Status:     "failed",
-		StatusCode: mapped.Status,
-		DurationMs: requestDurationMs(startedAt),
-		Error:      lastErr.Error(),
+		Timestamp:      time.Now().Unix(),
+		Protocol:       "claude.messages",
+		Model:          model,
+		Status:         "failed",
+		StatusCode:     mapped.Status,
+		FirstContentMs: firstContent.Value(),
+		DurationMs:     requestDurationMs(startedAt),
+		Error:          lastErr.Error(),
 	})
 	h.recordDiagnosticFailure(diagnosticLogEntry{
 		Protocol:       "claude.messages",
@@ -2819,6 +2832,7 @@ func (h *Handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 // handleOpenAIStream OpenAI 流式响应
 func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int, apiKeyID string) {
 	startedAt := time.Now()
+	firstContent := newRequestFirstContentTimer(startedAt)
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -3083,6 +3097,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 
 		callback := &KiroStreamCallback{
 			OnText: func(text string, isThinking bool) {
+				firstContent.MarkText(text)
 				if text == "" {
 					return
 				}
@@ -3094,6 +3109,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 				processText(text, isThinking, false)
 			},
 			OnToolUse: func(tu KiroToolUse) {
+				firstContent.Mark()
 				processText("", false, true)
 
 				args, _ := json.Marshal(tu.Input)
@@ -3164,15 +3180,16 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 			mapped := mapDownstreamError(err)
 			h.recordFailure()
 			h.recordRequestLogForPayload(payload, requestLogEntry{
-				Timestamp:    time.Now().Unix(),
-				Protocol:     "openai.chat.stream",
-				Model:        model,
-				AccountID:    account.ID,
-				AccountEmail: account.Email,
-				Status:       "failed",
-				StatusCode:   mapped.Status,
-				DurationMs:   requestDurationMs(startedAt),
-				Error:        err.Error(),
+				Timestamp:      time.Now().Unix(),
+				Protocol:       "openai.chat.stream",
+				Model:          model,
+				AccountID:      account.ID,
+				AccountEmail:   account.Email,
+				Status:         "failed",
+				StatusCode:     mapped.Status,
+				FirstContentMs: firstContent.Value(),
+				DurationMs:     requestDurationMs(startedAt),
+				Error:          err.Error(),
 			})
 			h.recordDiagnosticFailureForPayload("openai.chat.stream", model, account, mapped.Status, err, payload)
 			chunk, _ := json.Marshal(map[string]interface{}{
@@ -3213,17 +3230,18 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 		h.pool.ClearModelUnavailable(account.ID, model)
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
 		h.recordRequestLogForPayload(payload, requestLogEntry{
-			Timestamp:    time.Now().Unix(),
-			Protocol:     "openai.chat.stream",
-			Model:        model,
-			AccountID:    account.ID,
-			AccountEmail: account.Email,
-			Status:       "success",
-			StatusCode:   200,
-			DurationMs:   requestDurationMs(startedAt),
-			InputTokens:  inputTokens,
-			OutputTokens: outputTokens,
-			Credits:      credits,
+			Timestamp:      time.Now().Unix(),
+			Protocol:       "openai.chat.stream",
+			Model:          model,
+			AccountID:      account.ID,
+			AccountEmail:   account.Email,
+			Status:         "success",
+			StatusCode:     200,
+			FirstContentMs: firstContent.Value(),
+			DurationMs:     requestDurationMs(startedAt),
+			InputTokens:    inputTokens,
+			OutputTokens:   outputTokens,
+			Credits:        credits,
 		})
 
 		finishReason := "stop"
@@ -3263,13 +3281,14 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 		if busyErr != nil {
 			h.recordFailure()
 			h.recordRequestLogForPayload(payload, requestLogEntry{
-				Timestamp:  time.Now().Unix(),
-				Protocol:   "openai.chat.stream",
-				Model:      model,
-				Status:     "failed",
-				StatusCode: 429,
-				DurationMs: requestDurationMs(startedAt),
-				Error:      busyErr.Error(),
+				Timestamp:      time.Now().Unix(),
+				Protocol:       "openai.chat.stream",
+				Model:          model,
+				Status:         "failed",
+				StatusCode:     429,
+				FirstContentMs: firstContent.Value(),
+				DurationMs:     requestDurationMs(startedAt),
+				Error:          busyErr.Error(),
 			})
 			h.recordDiagnosticFailureForPayload("openai.chat.stream", model, nil, 429, busyErr, payload)
 			w.Header().Set("Retry-After", "1")
@@ -3283,13 +3302,14 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 	mapped := mapDownstreamError(lastErr)
 	h.recordFailure()
 	h.recordRequestLogForPayload(payload, requestLogEntry{
-		Timestamp:  time.Now().Unix(),
-		Protocol:   "openai.chat.stream",
-		Model:      model,
-		Status:     "failed",
-		StatusCode: mapped.Status,
-		DurationMs: requestDurationMs(startedAt),
-		Error:      lastErr.Error(),
+		Timestamp:      time.Now().Unix(),
+		Protocol:       "openai.chat.stream",
+		Model:          model,
+		Status:         "failed",
+		StatusCode:     mapped.Status,
+		FirstContentMs: firstContent.Value(),
+		DurationMs:     requestDurationMs(startedAt),
+		Error:          lastErr.Error(),
 	})
 	h.recordDiagnosticFailureForPayload("openai.chat.stream", model, nil, mapped.Status, lastErr, payload)
 	applyDownstreamErrorHeaders(w, mapped)
@@ -3299,6 +3319,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 // handleOpenAINonStream OpenAI 非流式响应
 func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int, apiKeyID string) {
 	startedAt := time.Now()
+	firstContent := newRequestFirstContentTimer(startedAt)
 	attempts := h.newAccountAttemptController(payload.requestContext)
 	excluded := attempts.excluded
 	var lastErr error
@@ -3337,13 +3358,17 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 
 		callback := &KiroStreamCallback{
 			OnText: func(text string, isThinking bool) {
+				firstContent.MarkText(text)
 				if isThinking {
 					reasoningContent += text
 				} else {
 					content += text
 				}
 			},
-			OnToolUse:   func(tu KiroToolUse) { toolUses = append(toolUses, tu) },
+			OnToolUse: func(tu KiroToolUse) {
+				firstContent.Mark()
+				toolUses = append(toolUses, tu)
+			},
 			OnComplete:  func(inTok, outTok int) { inputTokens = inTok; outputTokens = outTok },
 			OnTruncated: func(string) { truncated = true },
 			OnCredits:   func(c float64) { credits = c },
@@ -3386,17 +3411,18 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 		h.pool.ClearModelUnavailable(account.ID, model)
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
 		h.recordRequestLogForPayload(payload, requestLogEntry{
-			Timestamp:    time.Now().Unix(),
-			Protocol:     "openai.chat",
-			Model:        model,
-			AccountID:    account.ID,
-			AccountEmail: account.Email,
-			Status:       "success",
-			StatusCode:   200,
-			DurationMs:   requestDurationMs(startedAt),
-			InputTokens:  inputTokens,
-			OutputTokens: outputTokens,
-			Credits:      credits,
+			Timestamp:      time.Now().Unix(),
+			Protocol:       "openai.chat",
+			Model:          model,
+			AccountID:      account.ID,
+			AccountEmail:   account.Email,
+			Status:         "success",
+			StatusCode:     200,
+			FirstContentMs: firstContent.Value(),
+			DurationMs:     requestDurationMs(startedAt),
+			InputTokens:    inputTokens,
+			OutputTokens:   outputTokens,
+			Credits:        credits,
 		})
 
 		thinkingFormat := config.GetThinkingConfig().OpenAIFormat
@@ -3416,13 +3442,14 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 		if busyErr != nil {
 			h.recordFailure()
 			h.recordRequestLogForPayload(payload, requestLogEntry{
-				Timestamp:  time.Now().Unix(),
-				Protocol:   "openai.chat",
-				Model:      model,
-				Status:     "failed",
-				StatusCode: 429,
-				DurationMs: requestDurationMs(startedAt),
-				Error:      busyErr.Error(),
+				Timestamp:      time.Now().Unix(),
+				Protocol:       "openai.chat",
+				Model:          model,
+				Status:         "failed",
+				StatusCode:     429,
+				FirstContentMs: firstContent.Value(),
+				DurationMs:     requestDurationMs(startedAt),
+				Error:          busyErr.Error(),
 			})
 			h.recordDiagnosticFailureForPayload("openai.chat", model, nil, 429, busyErr, payload)
 			w.Header().Set("Retry-After", "1")
@@ -3436,13 +3463,14 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 	mapped := mapDownstreamError(lastErr)
 	h.recordFailure()
 	h.recordRequestLogForPayload(payload, requestLogEntry{
-		Timestamp:  time.Now().Unix(),
-		Protocol:   "openai.chat",
-		Model:      model,
-		Status:     "failed",
-		StatusCode: mapped.Status,
-		DurationMs: requestDurationMs(startedAt),
-		Error:      lastErr.Error(),
+		Timestamp:      time.Now().Unix(),
+		Protocol:       "openai.chat",
+		Model:          model,
+		Status:         "failed",
+		StatusCode:     mapped.Status,
+		FirstContentMs: firstContent.Value(),
+		DurationMs:     requestDurationMs(startedAt),
+		Error:          lastErr.Error(),
 	})
 	h.recordDiagnosticFailureForPayload("openai.chat", model, nil, mapped.Status, lastErr, payload)
 	applyDownstreamErrorHeaders(w, mapped)

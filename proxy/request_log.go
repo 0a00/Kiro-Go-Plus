@@ -36,6 +36,7 @@ type requestLogEntry struct {
 	Endpoint                 string   `json:"endpoint,omitempty"`
 	Status                   string   `json:"status"`
 	StatusCode               int      `json:"statusCode"`
+	FirstContentMs           *int64   `json:"firstContentMs,omitempty"`
 	DurationMs               int64    `json:"durationMs"`
 	InputTokens              int      `json:"inputTokens,omitempty"`
 	OutputTokens             int      `json:"outputTokens,omitempty"`
@@ -328,6 +329,46 @@ func (h *Handler) recordRequestLogForPayload(payload *KiroPayload, entry request
 
 func requestDurationMs(start time.Time) int64 {
 	return time.Since(start).Milliseconds()
+}
+
+type requestFirstContentTimer struct {
+	startedAt time.Time
+	elapsedMs atomic.Int64
+}
+
+func newRequestFirstContentTimer(startedAt time.Time) *requestFirstContentTimer {
+	timer := &requestFirstContentTimer{startedAt: startedAt}
+	timer.elapsedMs.Store(-1)
+	return timer
+}
+
+func (t *requestFirstContentTimer) MarkText(text string) {
+	if strings.TrimSpace(text) == "" {
+		return
+	}
+	t.Mark()
+}
+
+func (t *requestFirstContentTimer) Mark() {
+	if t == nil {
+		return
+	}
+	elapsed := time.Since(t.startedAt).Milliseconds()
+	if elapsed < 0 {
+		elapsed = 0
+	}
+	t.elapsedMs.CompareAndSwap(-1, elapsed)
+}
+
+func (t *requestFirstContentTimer) Value() *int64 {
+	if t == nil {
+		return nil
+	}
+	elapsed := t.elapsedMs.Load()
+	if elapsed < 0 {
+		return nil
+	}
+	return &elapsed
 }
 
 func outputCharCount(text string) int {

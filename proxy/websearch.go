@@ -168,6 +168,7 @@ func normalizeWebSearchQuery(text string) string {
 
 func (h *Handler) handleClaudeWebSearch(ctx context.Context, w http.ResponseWriter, req *ClaudeRequest, estimatedInputTokens int, apiKeyID string) {
 	startedAt := time.Now()
+	firstContent := newRequestFirstContentTimer(startedAt)
 	query := extractWebSearchQuery(req)
 	if query == "" {
 		h.sendClaudeError(w, 400, "invalid_request_error", "Unable to extract web_search query")
@@ -192,18 +193,20 @@ func (h *Handler) handleClaudeWebSearch(ctx context.Context, w http.ResponseWrit
 	}
 
 	output := webSearchSummary(query, results)
+	firstContent.MarkText(output)
 	outputTokens := estimateApproxTokens(output)
 	h.recordSuccessForApiKey(ctx, apiKeyID, estimatedInputTokens, outputTokens, 0)
 	h.recordRequestLog(requestLogEntry{
-		Timestamp:    time.Now().Unix(),
-		RequestID:    requestIDFromContext(ctx),
-		Protocol:     "claude.web_search",
-		Model:        req.Model,
-		Status:       "success",
-		StatusCode:   200,
-		DurationMs:   requestDurationMs(startedAt),
-		InputTokens:  estimatedInputTokens,
-		OutputTokens: outputTokens,
+		Timestamp:      time.Now().Unix(),
+		RequestID:      requestIDFromContext(ctx),
+		Protocol:       "claude.web_search",
+		Model:          req.Model,
+		Status:         "success",
+		StatusCode:     200,
+		FirstContentMs: firstContent.Value(),
+		DurationMs:     requestDurationMs(startedAt),
+		InputTokens:    estimatedInputTokens,
+		OutputTokens:   outputTokens,
 	})
 
 	if req.Stream {

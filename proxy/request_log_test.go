@@ -16,13 +16,14 @@ import (
 
 func TestRequestLogPersistenceRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "request_log.json")
+	firstContentMs := int64(123)
 	log, err := newPersistentRequestLog(2, path)
 	if err != nil {
 		t.Fatalf("create persistent log: %v", err)
 	}
 	log.add(requestLogEntry{Protocol: "one", Timestamp: 1, RequestToolNames: []string{"Read"}})
 	log.add(requestLogEntry{Protocol: "two", Timestamp: 2})
-	log.add(requestLogEntry{Protocol: "three", Timestamp: 3})
+	log.add(requestLogEntry{Protocol: "three", Timestamp: 3, FirstContentMs: &firstContentMs})
 	if err := log.Flush(); err != nil {
 		t.Fatalf("flush request log: %v", err)
 	}
@@ -46,6 +47,12 @@ func TestRequestLogPersistenceRoundTrip(t *testing.T) {
 	if got[0].ID != 3 || got[1].ID != 2 {
 		t.Fatalf("unexpected restored IDs: %+v", got)
 	}
+	if got[0].FirstContentMs == nil || *got[0].FirstContentMs != firstContentMs {
+		t.Fatalf("first-content latency was not restored: %+v", got[0])
+	}
+	if got[1].FirstContentMs != nil {
+		t.Fatalf("legacy entry should not gain first-content latency: %+v", got[1])
+	}
 	restored.add(requestLogEntry{Protocol: "four", Timestamp: 4})
 	got = restored.list(1)
 	if len(got) != 1 || got[0].ID != 4 {
@@ -53,6 +60,24 @@ func TestRequestLogPersistenceRoundTrip(t *testing.T) {
 	}
 	if err := restored.Flush(); err != nil {
 		t.Fatalf("flush restored request log: %v", err)
+	}
+}
+
+func TestRequestFirstContentTimerIgnoresBlankAndKeepsFirstValue(t *testing.T) {
+	timer := newRequestFirstContentTimer(time.Now().Add(-time.Second))
+	timer.MarkText(" \n\t")
+	if got := timer.Value(); got != nil {
+		t.Fatalf("blank content recorded latency: %d", *got)
+	}
+
+	timer.MarkText("first token")
+	first := timer.Value()
+	if first == nil || *first < 900 {
+		t.Fatalf("unexpected first-content latency: %v", first)
+	}
+	timer.Mark()
+	if got := timer.Value(); got == nil || *got != *first {
+		t.Fatalf("first-content latency changed: first=%v got=%v", first, got)
 	}
 }
 

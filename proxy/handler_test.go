@@ -471,6 +471,12 @@ func TestClaudeStreamReportsRealInputTokensAtCompletion(t *testing.T) {
 	if len(entries) != 1 || entries[0].Protocol != "claude.messages.stream" {
 		t.Fatalf("unexpected request log protocol: %+v", entries)
 	}
+	if entries[0].FirstContentMs == nil {
+		t.Fatalf("request log did not capture first-content latency: %+v", entries[0])
+	}
+	if *entries[0].FirstContentMs < 0 || *entries[0].FirstContentMs > entries[0].DurationMs {
+		t.Fatalf("invalid first-content latency: %+v", entries[0])
+	}
 }
 
 func TestClaudeToolStreamCommitsBeforeUpstreamCompletes(t *testing.T) {
@@ -665,6 +671,7 @@ func TestClaudeInferredToolStreamEmitsThinkingHeartbeatBeforeToolCompletes(t *te
 		t.Fatalf("tool completed before thinking was observed: %s", first.String())
 	}
 
+	time.Sleep(40 * time.Millisecond)
 	release()
 	rest, err := io.ReadAll(reader)
 	if err != nil {
@@ -672,6 +679,13 @@ func TestClaudeInferredToolStreamEmitsThinkingHeartbeatBeforeToolCompletes(t *te
 	}
 	if !strings.Contains(string(rest), `"type":"tool_use"`) || !strings.Contains(string(rest), "message_stop") {
 		t.Fatalf("remaining tool stream is incomplete: %s", rest)
+	}
+	entries := h.requestLog.list(1)
+	if len(entries) != 1 || entries[0].FirstContentMs == nil {
+		t.Fatalf("request log did not capture completed tool latency: %+v", entries)
+	}
+	if *entries[0].FirstContentMs < 30 {
+		t.Fatalf("blank thinking heartbeat counted as first content: %+v", entries[0])
 	}
 }
 

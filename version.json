@@ -1,5 +1,5 @@
 {
-  "version": "1.2.18",
-  "changelog": "Prevent Claude Code's 300-second stream-idle reset during long agent tool generation. Guarded /v1/messages streams now forward thinking deltas before actionable output and emit a thinking heartbeat while large tool arguments are still arriving, while preserving endpoint/account failover until visible text or a complete tool call is committed. Auto routing prioritizes Runtime and Kiro IDE for guarded tool requests, and exhausted empty-response retries continue with another account.\n防止 Claude Code 在长 Agent 工具生成期间因 300 秒无内容分块而重置连接。受保护的 /v1/messages 流现在会在正文或完整工具调用前实时转发 thinking delta，并在大型工具参数持续到达时发送 thinking 心跳；正文或完整工具尚未提交时仍可切换端点与账号。自动路由会为受保护工具请求优先使用 Runtime 和 Kiro IDE，空响应端点重试用尽后仍会继续切换账号。",
+  "version": "1.2.19",
+  "changelog": "Show first-content latency and total duration together in Request Log for Claude Messages, OpenAI Chat, Responses API, and WebSearch. First-content timing starts only on real model text, reasoning, or a complete tool call, excluding SSE metadata and synthetic heartbeats; historical records display a dash when the metric is unavailable.\n请求日志现在同时显示 Claude Messages、OpenAI Chat、Responses API 和 WebSearch 的首字时间与总耗时。首字计时只从真实正文、思考内容或完整工具调用开始，不计入 SSE 元数据和合成心跳；历史记录没有该指标时显示横线。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }

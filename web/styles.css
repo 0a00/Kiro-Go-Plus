@@ -1018,6 +1018,24 @@ label:has(> .switch) > span {
   text-overflow: ellipsis;
 }
 
+.request-duration {
+  min-width: 7.5rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.request-duration-line {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+  line-height: 1.45;
+}
+
+.request-duration-label {
+  color: var(--muted-foreground);
+  font-weight: 500;
+}
+
 .request-empty {
   color: var(--muted-foreground);
   text-align: center !important;

@@ -166,6 +166,7 @@ func (h *Handler) handleResponsesNonStream(
 	req *ResponsesRequest, storedInput json.RawMessage, storeResponse bool,
 ) {
 	startedAt := time.Now()
+	firstContent := newRequestFirstContentTimer(startedAt)
 	attempts := h.newAccountAttemptController(payload.requestContext)
 	excluded := attempts.excluded
 	var lastErr error
@@ -203,13 +204,17 @@ func (h *Handler) handleResponsesNonStream(
 
 		callback := &KiroStreamCallback{
 			OnText: func(text string, isThinking bool) {
+				firstContent.MarkText(text)
 				if isThinking {
 					reasoningContent += text
 				} else {
 					content += text
 				}
 			},
-			OnToolUse:   func(tu KiroToolUse) { toolUses = append(toolUses, tu) },
+			OnToolUse: func(tu KiroToolUse) {
+				firstContent.Mark()
+				toolUses = append(toolUses, tu)
+			},
 			OnComplete:  func(inTok, outTok int) { inputTokens = inTok; outputTokens = outTok },
 			OnTruncated: func(string) { truncated = true },
 			OnCredits:   func(c float64) { credits = c },
@@ -250,17 +255,18 @@ func (h *Handler) handleResponsesNonStream(
 		h.pool.ClearModelUnavailable(account.ID, model)
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
 		h.recordRequestLogForPayload(payload, requestLogEntry{
-			Timestamp:    time.Now().Unix(),
-			Protocol:     "openai.responses",
-			Model:        model,
-			AccountID:    account.ID,
-			AccountEmail: account.Email,
-			Status:       "success",
-			StatusCode:   200,
-			DurationMs:   requestDurationMs(startedAt),
-			InputTokens:  inputTokens,
-			OutputTokens: outputTokens,
-			Credits:      credits,
+			Timestamp:      time.Now().Unix(),
+			Protocol:       "openai.responses",
+			Model:          model,
+			AccountID:      account.ID,
+			AccountEmail:   account.Email,
+			Status:         "success",
+			StatusCode:     200,
+			FirstContentMs: firstContent.Value(),
+			DurationMs:     requestDurationMs(startedAt),
+			InputTokens:    inputTokens,
+			OutputTokens:   outputTokens,
+			Credits:        credits,
 		})
 
 		respObj := buildResponsesObject(respID, model, finalContent, reasoningContent, toolUses, inputTokens, outputTokens, req)
@@ -289,13 +295,14 @@ func (h *Handler) handleResponsesNonStream(
 		if busyErr != nil {
 			h.recordFailure()
 			h.recordRequestLogForPayload(payload, requestLogEntry{
-				Timestamp:  time.Now().Unix(),
-				Protocol:   "openai.responses",
-				Model:      model,
-				Status:     "failed",
-				StatusCode: 429,
-				DurationMs: requestDurationMs(startedAt),
-				Error:      busyErr.Error(),
+				Timestamp:      time.Now().Unix(),
+				Protocol:       "openai.responses",
+				Model:          model,
+				Status:         "failed",
+				StatusCode:     429,
+				FirstContentMs: firstContent.Value(),
+				DurationMs:     requestDurationMs(startedAt),
+				Error:          busyErr.Error(),
 			})
 			h.recordDiagnosticFailureForPayload("openai.responses", model, nil, 429, busyErr, payload)
 			w.Header().Set("Retry-After", "1")
@@ -308,13 +315,14 @@ func (h *Handler) handleResponsesNonStream(
 	mapped := mapDownstreamError(lastErr)
 	h.recordFailure()
 	h.recordRequestLogForPayload(payload, requestLogEntry{
-		Timestamp:  time.Now().Unix(),
-		Protocol:   "openai.responses",
-		Model:      model,
-		Status:     "failed",
-		StatusCode: mapped.Status,
-		DurationMs: requestDurationMs(startedAt),
-		Error:      lastErr.Error(),
+		Timestamp:      time.Now().Unix(),
+		Protocol:       "openai.responses",
+		Model:          model,
+		Status:         "failed",
+		StatusCode:     mapped.Status,
+		FirstContentMs: firstContent.Value(),
+		DurationMs:     requestDurationMs(startedAt),
+		Error:          lastErr.Error(),
 	})
 	h.recordDiagnosticFailureForPayload("openai.responses", model, nil, mapped.Status, lastErr, payload)
 	applyDownstreamErrorHeaders(w, mapped)
@@ -404,6 +412,7 @@ func (h *Handler) handleResponsesStream(
 	req *ResponsesRequest, storedInput json.RawMessage, storeResponse bool,
 ) {
 	startedAt := time.Now()
+	firstContent := newRequestFirstContentTimer(startedAt)
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -588,6 +597,7 @@ func (h *Handler) handleResponsesStream(
 
 		callback := &KiroStreamCallback{
 			OnText: func(text string, isThinking bool) {
+				firstContent.MarkText(text)
 				if text == "" {
 					return
 				}
@@ -618,6 +628,7 @@ func (h *Handler) handleResponsesStream(
 				responseStarted = true
 			},
 			OnToolUse: func(tu KiroToolUse) {
+				firstContent.Mark()
 				finishReasoning()
 				if messageStarted {
 					send("response.content_part.done", map[string]interface{}{
@@ -721,15 +732,16 @@ func (h *Handler) handleResponsesStream(
 			})
 			h.recordFailure()
 			h.recordRequestLogForPayload(payload, requestLogEntry{
-				Timestamp:    time.Now().Unix(),
-				Protocol:     "openai.responses.stream",
-				Model:        model,
-				AccountID:    account.ID,
-				AccountEmail: account.Email,
-				Status:       "failed",
-				StatusCode:   mapped.Status,
-				DurationMs:   requestDurationMs(startedAt),
-				Error:        err.Error(),
+				Timestamp:      time.Now().Unix(),
+				Protocol:       "openai.responses.stream",
+				Model:          model,
+				AccountID:      account.ID,
+				AccountEmail:   account.Email,
+				Status:         "failed",
+				StatusCode:     mapped.Status,
+				FirstContentMs: firstContent.Value(),
+				DurationMs:     requestDurationMs(startedAt),
+				Error:          err.Error(),
 			})
 			h.recordDiagnosticFailureForPayload("openai.responses.stream", model, account, mapped.Status, err, payload)
 			return
@@ -781,17 +793,18 @@ func (h *Handler) handleResponsesStream(
 		h.pool.ClearModelUnavailable(account.ID, model)
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
 		h.recordRequestLogForPayload(payload, requestLogEntry{
-			Timestamp:    time.Now().Unix(),
-			Protocol:     "openai.responses.stream",
-			Model:        model,
-			AccountID:    account.ID,
-			AccountEmail: account.Email,
-			Status:       "success",
-			StatusCode:   200,
-			DurationMs:   requestDurationMs(startedAt),
-			InputTokens:  inputTokens,
-			OutputTokens: outputTokens,
-			Credits:      credits,
+			Timestamp:      time.Now().Unix(),
+			Protocol:       "openai.responses.stream",
+			Model:          model,
+			AccountID:      account.ID,
+			AccountEmail:   account.Email,
+			Status:         "success",
+			StatusCode:     200,
+			FirstContentMs: firstContent.Value(),
+			DurationMs:     requestDurationMs(startedAt),
+			InputTokens:    inputTokens,
+			OutputTokens:   outputTokens,
+			Credits:        credits,
 		})
 
 		respObj := buildResponsesObject(respID, model, finalContent, reasoning, toolUses, inputTokens, outputTokens, req)
@@ -829,13 +842,14 @@ func (h *Handler) handleResponsesStream(
 		if busyErr != nil {
 			h.recordFailure()
 			h.recordRequestLogForPayload(payload, requestLogEntry{
-				Timestamp:  time.Now().Unix(),
-				Protocol:   "openai.responses.stream",
-				Model:      model,
-				Status:     "failed",
-				StatusCode: 429,
-				DurationMs: requestDurationMs(startedAt),
-				Error:      busyErr.Error(),
+				Timestamp:      time.Now().Unix(),
+				Protocol:       "openai.responses.stream",
+				Model:          model,
+				Status:         "failed",
+				StatusCode:     429,
+				FirstContentMs: firstContent.Value(),
+				DurationMs:     requestDurationMs(startedAt),
+				Error:          busyErr.Error(),
 			})
 			h.recordDiagnosticFailureForPayload("openai.responses.stream", model, nil, 429, busyErr, payload)
 			send("response.failed", map[string]interface{}{
@@ -867,13 +881,14 @@ func (h *Handler) handleResponsesStream(
 	mapped := mapDownstreamError(lastErr)
 	h.recordFailure()
 	h.recordRequestLogForPayload(payload, requestLogEntry{
-		Timestamp:  time.Now().Unix(),
-		Protocol:   "openai.responses.stream",
-		Model:      model,
-		Status:     "failed",
-		StatusCode: mapped.Status,
-		DurationMs: requestDurationMs(startedAt),
-		Error:      lastErr.Error(),
+		Timestamp:      time.Now().Unix(),
+		Protocol:       "openai.responses.stream",
+		Model:          model,
+		Status:         "failed",
+		StatusCode:     mapped.Status,
+		FirstContentMs: firstContent.Value(),
+		DurationMs:     requestDurationMs(startedAt),
+		Error:          lastErr.Error(),
 	})
 	h.recordDiagnosticFailureForPayload("openai.responses.stream", model, nil, mapped.Status, lastErr, payload)
 	send("response.failed", map[string]interface{}{

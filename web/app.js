@@ -772,6 +772,9 @@
       }
       const outcome = outcomeParts.join(' · ') || '-';
       const outcomeTitle = outcome + (Array.isArray(item.requestToolNames) && item.requestToolNames.length ? ' · ' + item.requestToolNames.join(', ') : '');
+      const firstContentDuration = formatRequestDuration(item.firstContentMs);
+      const totalDuration = formatRequestDuration(item.durationMs);
+      const durationTitle = t('requests.firstContent') + ': ' + firstContentDuration + ' · ' + t('requests.totalDuration') + ': ' + totalDuration;
       return '<tr>' +
         '<td>' + escapeHtml(formatTime(item.timestamp)) + '</td>' +
         '<td>' + escapeHtml(item.protocol || '-') + '</td>' +
@@ -784,7 +787,10 @@
         '<td>' + escapeHtml(tokens) + '</td>' +
         '<td>' + escapeHtml(cache) + '</td>' +
         '<td title="' + escapeAttr(outcomeTitle) + '">' + escapeHtml(outcome) + '</td>' +
-        '<td>' + escapeHtml((item.durationMs || 0) + 'ms') + '</td>' +
+        '<td class="request-duration" title="' + escapeAttr(durationTitle) + '">' +
+          '<span class="request-duration-line"><span class="request-duration-label">' + escapeHtml(t('requests.firstContent')) + '</span><strong>' + escapeHtml(firstContentDuration) + '</strong></span>' +
+          '<span class="request-duration-line"><span class="request-duration-label">' + escapeHtml(t('requests.totalDuration')) + '</span><strong>' + escapeHtml(totalDuration) + '</strong></span>' +
+        '</td>' +
         '<td class="request-error" title="' + escapeAttr(err) + '">' + escapeHtml(err) + '</td>' +
         '</tr>';
     }).join('');
@@ -915,6 +921,24 @@
   function formatTime(ts) {
     if (!ts) return '-';
     return new Date(ts * 1000).toLocaleString();
+  }
+  function formatRequestDuration(value) {
+    if (value === null || value === undefined || value === '') return '-';
+    const ms = Number(value);
+    if (!Number.isFinite(ms) || ms < 0) return '-';
+    if (ms < 1000) return Math.round(ms) + 'ms';
+    if (ms < 60000) {
+      const digits = ms < 10000 ? 2 : 1;
+      return Number((ms / 1000).toFixed(digits)) + 's';
+    }
+    if (ms < 3600000) {
+      const minutes = Math.floor(ms / 60000);
+      const seconds = (ms % 60000) / 1000;
+      return minutes + 'm ' + Number(seconds.toFixed(seconds < 10 ? 1 : 0)) + 's';
+    }
+    const hours = Math.floor(ms / 3600000);
+    const minutes = Math.floor((ms % 3600000) / 60000);
+    return hours + 'h ' + minutes + 'm';
   }
   function applyUsageBars(root) {
     qsa('.usage-fill[data-usage-pct]', root).forEach(el => {
