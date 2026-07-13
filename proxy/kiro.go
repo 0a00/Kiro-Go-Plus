@@ -210,6 +210,7 @@ type KiroPayload struct {
 	contextWindowTokens     int
 	requireActionableOutput bool
 	requireToolUse          bool
+	toolUsePolicy           string
 	tokenRefreshMu          sync.Mutex
 	tokenRefreshAttempts    map[string]int
 	runtimeMu               sync.RWMutex

@@ -152,6 +152,7 @@ type ClaudeRequest struct {
 
 	RequireToolUse   bool   `json:"-"`
 	RequiredToolName string `json:"-"`
+	ToolUsePolicy    string `json:"-"`
 }
 
 type ClaudeThinkingConfig struct {

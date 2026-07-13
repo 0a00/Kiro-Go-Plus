@@ -1,5 +1,5 @@
 {
-  "version": "1.2.9",
-  "changelog": "Fix credential JSON copying on public HTTP deployments. Clipboard operations now verify success and fall back to a secure, user-initiated copy dialog when browser clipboard APIs are unavailable or blocked.\n修复公网 HTTP 部署下账号凭据 JSON 无法复制的问题。复制操作现在会校验真实结果，并在浏览器剪贴板 API 不可用或被拦截时，降级为需要用户再次确认的安全复制弹窗。",
+  "version": "1.2.10",
+  "changelog": "Improve production API failover and tool-call compatibility. Quota failures now fall back across endpoints before switching accounts, inferred workspace tool policies accept valid text responses while explicit tool choices remain strict, and unlimited account polling still honors the configured upstream attempt budget. Request logs now identify inferred versus explicit tool policy.\n优化生产 API 的故障切换和工具调用兼容性。配额错误会先在同账号内切换端点再更换账号；代理推断的工作区工具策略允许返回有效文本，客户端明确指定的工具调用仍保持严格校验；账号持续轮询仍受最大上游尝试数保护。请求日志新增推断与显式工具策略标记。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }

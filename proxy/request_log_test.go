@@ -50,6 +50,7 @@ func TestRequestLogCapturesRequestedToolPolicy(t *testing.T) {
 	h := &Handler{requestLog: newRequestLog(defaultRequestLogLimit)}
 	payload := &KiroPayload{
 		requireToolUse: true,
+		toolUsePolicy:  toolUsePolicyExplicit,
 		ToolNameMap:    map[string]string{"writeH123": "mcp__workspace__Write"},
 	}
 	var tool KiroToolWrapper
@@ -62,6 +63,9 @@ func TestRequestLogCapturesRequestedToolPolicy(t *testing.T) {
 	got := h.requestLog.list(1)
 	if len(got) != 1 || got[0].RequestToolCount != 1 || !got[0].ToolUseRequired {
 		t.Fatalf("unexpected tool request metadata: %+v", got)
+	}
+	if got[0].ToolUsePolicy != toolUsePolicyExplicit {
+		t.Fatalf("unexpected tool policy metadata: %+v", got[0])
 	}
 	if len(got[0].RequestToolNames) != 1 || got[0].RequestToolNames[0] != "mcp__workspace__Write" {
 		t.Fatalf("expected restored tool name, got %+v", got[0].RequestToolNames)

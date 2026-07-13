@@ -1805,7 +1805,10 @@ func (h *Handler) handleClaudeMessagesInternal(w http.ResponseWriter, r *http.Re
 	bufferToolStream := len(req.Tools) > 0 && (thinkingCfg.BufferToolStreams || req.RequireToolUse)
 	useBufferedStream := req.Stream && (bufferedStream || bufferToolStream)
 	kiroPayload.requireActionableOutput = (len(req.Tools) > 0 || thinking) && (!req.Stream || useBufferedStream)
-	kiroPayload.requireToolUse = req.RequireToolUse
+	kiroPayload.toolUsePolicy = req.ToolUsePolicy
+	// Inferred workspace intent still adds strong tool guidance, but only an
+	// explicit client tool_choice may reject an otherwise valid text response.
+	kiroPayload.requireToolUse = requiresStrictClaudeToolUse(&req)
 	if useBufferedStream {
 		h.handleClaudeBufferedStream(w, kiroPayload, req.Model, thinking, thinkingResponseOpts, estimatedInputTokens, cacheProfile, apiKeyID, routeKey)
 	} else if req.Stream {

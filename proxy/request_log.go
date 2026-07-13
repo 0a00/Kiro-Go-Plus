@@ -33,6 +33,7 @@ type requestLogEntry struct {
 	RequestToolCount         int      `json:"requestToolCount,omitempty"`
 	RequestToolNames         []string `json:"requestToolNames,omitempty"`
 	ToolUseRequired          bool     `json:"toolUseRequired,omitempty"`
+	ToolUsePolicy            string   `json:"toolUsePolicy,omitempty"`
 	ToolUseCount             int      `json:"toolUseCount,omitempty"`
 	StopReason               string   `json:"stopReason,omitempty"`
 	Credits                  float64  `json:"credits,omitempty"`
@@ -118,6 +119,7 @@ func (h *Handler) recordRequestLogForPayload(payload *KiroPayload, entry request
 			}
 		}
 		entry.ToolUseRequired = payload.requireToolUse
+		entry.ToolUsePolicy = payload.toolUsePolicy
 	}
 	h.recordRequestLog(entry)
 }

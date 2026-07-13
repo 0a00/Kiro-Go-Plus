@@ -762,7 +762,13 @@
       const outcomeParts = [];
       if (item.stopReason) outcomeParts.push(item.stopReason);
       if (item.visibleOutputChars || item.thinkingOutputChars) outcomeParts.push((item.visibleOutputChars || 0) + ' / ' + (item.thinkingOutputChars || 0));
-      if (item.requestToolCount) outcomeParts.push('tools ' + (item.toolUseCount || 0) + ' / ' + item.requestToolCount + (item.toolUseRequired ? ' required' : ''));
+      if (item.requestToolCount) {
+        let toolOutcome = t('requests.tools') + ' ' + (item.toolUseCount || 0) + ' / ' + item.requestToolCount;
+        if (item.toolUsePolicy === 'explicit') toolOutcome += ' · ' + t('requests.toolPolicyExplicit');
+        if (item.toolUsePolicy === 'inferred') toolOutcome += ' · ' + t('requests.toolPolicyInferred');
+        if (item.toolUseRequired) toolOutcome += ' · ' + t('requests.toolRequired');
+        outcomeParts.push(toolOutcome);
+      }
       const outcome = outcomeParts.join(' · ') || '-';
       const outcomeTitle = outcome + (Array.isArray(item.requestToolNames) && item.requestToolNames.length ? ' · ' + item.requestToolNames.join(', ') : '');
       return '<tr>' +

@@ -277,6 +277,53 @@ func TestRuntimeUnknown403FallsBackWithoutMarkingRevoked(t *testing.T) {
 	}
 }
 
+func TestQuotaErrorFallsBackAcrossEndpoints(t *testing.T) {
+	err := classifyUpstreamHTTPError(http.StatusTooManyRequests, "Kiro Runtime", []byte(`{"message":"quota exhausted"}`))
+	if err.Kind != UpstreamErrorQuota || !err.RetryAcrossEndpoints || !err.RetryAcrossAccounts {
+		t.Fatalf("unexpected quota classification: %+v", err)
+	}
+}
+
+func TestCallKiroAPIFallsBackAfterRuntimeQuota(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	_ = config.UpdatePreferredEndpoint("auto")
+	_ = config.UpdateEndpointFallback(true)
+
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if requests.Add(1) == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"message":"quota exhausted"}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "ok"}))
+	}))
+	defer server.Close()
+
+	oldEndpoints := kiroEndpoints
+	kiroEndpoints = []kiroEndpoint{
+		{Key: "runtime", URL: server.URL, Name: "Kiro Runtime"},
+		{Key: "kiro", URL: server.URL, Name: "Kiro IDE"},
+	}
+	t.Cleanup(func() { kiroEndpoints = oldEndpoints })
+
+	var output strings.Builder
+	err := CallKiroAPI(
+		&config.Account{ID: "a", AccessToken: "token"},
+		&KiroPayload{},
+		&KiroStreamCallback{OnText: func(text string, _ bool) { output.WriteString(text) }},
+	)
+	if err != nil {
+		t.Fatalf("expected legacy endpoint fallback, got %v", err)
+	}
+	if requests.Load() != 2 || output.String() != "ok" {
+		t.Fatalf("unexpected fallback result: requests=%d output=%q", requests.Load(), output.String())
+	}
+}
+
 func TestParseRetryAfterSupportsSecondsAndHTTPDate(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	if got := parseRetryAfter("7", now); got != 7*time.Second {

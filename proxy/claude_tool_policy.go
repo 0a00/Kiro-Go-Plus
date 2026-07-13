@@ -9,6 +9,8 @@ import (
 const (
 	agentToolPolicyMarker         = "<agent_tool_policy>"
 	agentRequiredToolActionMarker = "<required_tool_action>"
+	toolUsePolicyExplicit         = "explicit"
+	toolUsePolicyInferred         = "inferred"
 )
 
 var (
@@ -21,6 +23,9 @@ func prepareClaudeToolPolicy(req *ClaudeRequest, enforceWorkspaceActions bool) e
 	if req == nil {
 		return nil
 	}
+	req.RequireToolUse = false
+	req.RequiredToolName = ""
+	req.ToolUsePolicy = ""
 
 	mode, name, err := parseClaudeToolChoice(req.ToolChoice)
 	if err != nil {
@@ -35,22 +40,29 @@ func prepareClaudeToolPolicy(req *ClaudeRequest, enforceWorkspaceActions bool) e
 			return fmt.Errorf("tool_choice=any requires at least one tool")
 		}
 		req.RequireToolUse = true
+		req.ToolUsePolicy = toolUsePolicyExplicit
 	case "tool":
 		if !claudeToolExists(req.Tools, name) {
 			return fmt.Errorf("tool_choice references unknown tool %q", name)
 		}
 		req.RequireToolUse = true
 		req.RequiredToolName = name
+		req.ToolUsePolicy = toolUsePolicyExplicit
 	}
 
 	if enforceWorkspaceActions && !req.RequireToolUse && shouldRequireWorkspaceTool(req) {
 		req.RequireToolUse = true
+		req.ToolUsePolicy = toolUsePolicyInferred
 	}
 	if len(req.Tools) == 0 {
 		return nil
 	}
 	req.System = appendClaudeSystemText(req.System, buildClaudeAgentToolPolicy(req))
 	return nil
+}
+
+func requiresStrictClaudeToolUse(req *ClaudeRequest) bool {
+	return req != nil && req.ToolUsePolicy == toolUsePolicyExplicit
 }
 
 func parseClaudeToolChoice(raw interface{}) (mode, name string, err error) {

@@ -145,7 +145,7 @@ func TestAccountAttemptControllerShutdownStopsNewAttempts(t *testing.T) {
 	}
 }
 
-func TestUnlimitedAccountAttemptsDisableTotalUpstreamAttemptCap(t *testing.T) {
+func TestUnlimitedAccountPollingStillHonorsUpstreamAttemptCap(t *testing.T) {
 	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatalf("config.Init: %v", err)
 	}
@@ -157,18 +157,7 @@ func TestUnlimitedAccountAttemptsDisableTotalUpstreamAttemptCap(t *testing.T) {
 	}
 
 	budget := newUpstreamAttemptBudget()
-	for attempt := 0; attempt < 3; attempt++ {
-		if !budget.take() {
-			t.Fatalf("unlimited account mode rejected upstream attempt %d", attempt+1)
-		}
-	}
-
-	retry.MaxAccountAttempts = 2
-	if err := config.UpdateRetryConfig(retry); err != nil {
-		t.Fatalf("UpdateRetryConfig: %v", err)
-	}
-	budget = newUpstreamAttemptBudget()
 	if !budget.take() || budget.take() {
-		t.Fatal("finite account mode did not preserve the upstream attempt cap")
+		t.Fatal("unlimited account polling bypassed the upstream attempt cap")
 	}
 }

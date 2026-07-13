@@ -20,6 +20,12 @@ func TestPrepareClaudeToolPolicyRequiresToolForWorkspaceTask(t *testing.T) {
 	if !req.RequireToolUse {
 		t.Fatal("expected workspace task to require a tool")
 	}
+	if req.ToolUsePolicy != toolUsePolicyInferred {
+		t.Fatalf("expected inferred tool policy, got %q", req.ToolUsePolicy)
+	}
+	if requiresStrictClaudeToolUse(req) {
+		t.Fatal("inferred workspace policy must not reject a valid text response")
+	}
 	if !strings.Contains(extractSystemPrompt(req.System), agentToolPolicyMarker) {
 		t.Fatal("expected agent tool policy in system prompt")
 	}
@@ -53,6 +59,12 @@ func TestPrepareClaudeToolPolicyHonorsRequiredChoice(t *testing.T) {
 	}
 	if !req.RequireToolUse || req.RequiredToolName != "Bash" {
 		t.Fatalf("unexpected required tool state: %+v", req)
+	}
+	if req.ToolUsePolicy != toolUsePolicyExplicit {
+		t.Fatalf("expected explicit tool policy, got %q", req.ToolUsePolicy)
+	}
+	if !requiresStrictClaudeToolUse(req) {
+		t.Fatal("explicit tool choice must keep strict tool enforcement")
 	}
 }
 

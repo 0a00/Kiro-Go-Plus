@@ -253,6 +253,10 @@ func classifyUpstreamHTTPError(statusCode int, endpoint string, body []byte) *Up
 	case statusCode == 402 || strings.Contains(combined, "monthly_request_count") ||
 		strings.Contains(combined, "quota exhausted") || strings.Contains(combined, "overage"):
 		err.Kind = UpstreamErrorQuota
+		// Kiro Runtime and the legacy data planes do not always share quota
+		// state. A quota response from one endpoint must not hide another
+		// endpoint that is still usable for the same account.
+		err.RetryAcrossEndpoints = true
 	case statusCode == http.StatusRequestTimeout || statusCode == http.StatusGatewayTimeout:
 		err.Kind = UpstreamErrorFirstTokenTimeout
 	case statusCode == 429 || strings.Contains(combined, "rate limit") ||
@@ -392,12 +396,8 @@ type upstreamAttemptBudget struct {
 
 func newUpstreamAttemptBudget() *upstreamAttemptBudget {
 	retry := config.GetRetryConfig()
-	maxAttempts := retry.MaxUpstreamAttempts
-	if retry.MaxAccountAttempts == 0 {
-		maxAttempts = 0
-	}
 	return &upstreamAttemptBudget{
-		maxAttempts: maxAttempts,
+		maxAttempts: retry.MaxUpstreamAttempts,
 		maxEmpty:    retry.EmptyResponseRetries,
 	}
 }
