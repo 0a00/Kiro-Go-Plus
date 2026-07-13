@@ -301,7 +301,9 @@ func (h *Handler) recordRequestLog(entry requestLogEntry) {
 func (h *Handler) recordRequestLogForPayload(payload *KiroPayload, entry requestLogEntry) {
 	if payload != nil {
 		entry.RequestID = requestIDFromContext(payload.requestContext)
-		entry.Endpoint = payload.successfulEndpoint()
+		if entry.Endpoint == "" {
+			entry.Endpoint = payload.successfulEndpoint()
+		}
 		entry.APIKeyID = apiKeyIDFromContext(payload.requestContext)
 		if apiKey := config.GetApiKeyEntry(entry.APIKeyID); apiKey != nil {
 			entry.APIKeyName = apiKey.Name

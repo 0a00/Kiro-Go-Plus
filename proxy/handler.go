@@ -1796,6 +1796,7 @@ func (h *Handler) handleClaudeMessages(w http.ResponseWriter, r *http.Request) {
 	guardActionableStream := req.Stream && guardToolStream
 	kiroPayload.requireActionableOutput = (len(req.Tools) > 0 || thinking) && (!req.Stream || guardActionableStream)
 	kiroPayload.toolUsePolicy = req.ToolUsePolicy
+	kiroPayload.deferTextUntilComplete = guardActionableStream && req.ToolUsePolicy == toolUsePolicyInferred
 	// Inferred workspace intent still adds strong tool guidance, but only an
 	// explicit client tool_choice may reject an otherwise valid text response.
 	kiroPayload.requireToolUse = requiresStrictClaudeToolUse(&req)
@@ -1830,6 +1831,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 	var busyErr error
 	messageStarted := false
 	var messageStartUsage promptCacheUsage
+	lastPingAt := startedAt
 
 	ensureMessageStart := func() {
 		if messageStarted {
@@ -1849,6 +1851,22 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 			},
 		})
 		messageStarted = true
+	}
+	sendStreamError := func(status int, errorType, message string) {
+		if messageStarted {
+			h.sendSSE(w, flusher, "error", map[string]interface{}{
+				"type":  "error",
+				"error": map[string]string{"type": errorType, "message": message},
+			})
+			return
+		}
+		h.sendClaudeError(w, status, errorType, message)
+	}
+	if payload.requireActionableOutput {
+		// A guarded tool stream may spend a long time generating a complete tool
+		// payload. Start the standard Anthropic stream immediately while keeping
+		// account and endpoint retries safe until actual content is committed.
+		ensureMessageStart()
 	}
 
 	for {
@@ -1886,6 +1904,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 		var nextContentIndex int
 		var rawContentBuilder strings.Builder
 		var rawThinkingBuilder strings.Builder
+		contentCommitted := false
 		activeBlockIndex := -1
 		activeBlockType := ""
 
@@ -1906,6 +1925,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 				return
 			}
 			ensureMessageStart()
+			contentCommitted = true
 			closeActiveBlock()
 
 			idx := nextContentIndex
@@ -2151,6 +2171,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 
 				toolUses = append(toolUses, tu)
 				ensureMessageStart()
+				contentCommitted = true
 				closeActiveBlock()
 
 				idx := nextContentIndex
@@ -2186,6 +2207,13 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 				inputTokens = inTok
 				outputTokens = outTok
 			},
+			OnProgress: func() {
+				if !messageStarted || time.Since(lastPingAt) < 10*time.Second {
+					return
+				}
+				lastPingAt = time.Now()
+				h.sendSSE(w, flusher, "ping", map[string]string{"type": "ping"})
+			},
 			OnUsage: func(usage KiroTokenUsage) {
 				upstreamUsage = usage
 				if !messageStarted && usage.HasCacheBreakdown {
@@ -2212,7 +2240,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 			lastErr = err
 			excluded[account.ID] = true
 			h.handleAccountFailureForModel(account, model, err)
-			if !messageStarted {
+			if !contentCommitted {
 				if !shouldRetryAcrossAccounts(err) {
 					break
 				}
@@ -2221,29 +2249,22 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 			mapped := mapDownstreamError(err)
 			h.recordFailure()
 			h.recordRequestLogForPayload(payload, requestLogEntry{
-				Timestamp:    time.Now().Unix(),
-				Protocol:     "claude.messages.stream",
-				Model:        model,
-				AccountID:    account.ID,
-				AccountEmail: account.Email,
-				Status:       "failed",
-				StatusCode:   mapped.Status,
-				DurationMs:   requestDurationMs(startedAt),
-				Error:        err.Error(),
+				Timestamp:           time.Now().Unix(),
+				Protocol:            "claude.messages.stream",
+				Model:               model,
+				AccountID:           account.ID,
+				AccountEmail:        account.Email,
+				Endpoint:            upstreamErrorEndpoint(err),
+				Status:              "failed",
+				StatusCode:          mapped.Status,
+				DurationMs:          requestDurationMs(startedAt),
+				VisibleOutputChars:  outputCharCount(rawContentBuilder.String()),
+				ThinkingOutputChars: outputCharCount(rawThinkingBuilder.String()),
+				ToolUseCount:        len(toolUses),
+				Error:               err.Error(),
 			})
-			h.recordDiagnosticFailure(diagnosticLogEntry{
-				Protocol:       "claude.messages.stream",
-				Model:          model,
-				AccountID:      account.ID,
-				AccountEmail:   account.Email,
-				StatusCode:     mapped.Status,
-				Error:          err.Error(),
-				RequestSummary: summarizeKiroPayload(payload),
-			})
-			h.sendSSE(w, flusher, "error", map[string]interface{}{
-				"type":  "error",
-				"error": map[string]string{"type": mapped.ClaudeType, "message": err.Error()},
-			})
+			h.recordDiagnosticFailureForPayload("claude.messages.stream", model, account, mapped.Status, err, payload)
+			sendStreamError(mapped.Status, mapped.ClaudeType, err.Error())
 			return
 		}
 
@@ -2331,18 +2352,12 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 				DurationMs: requestDurationMs(startedAt),
 				Error:      busyErr.Error(),
 			})
-			h.recordDiagnosticFailure(diagnosticLogEntry{
-				Protocol:       "claude.messages.stream",
-				Model:          model,
-				StatusCode:     429,
-				Error:          busyErr.Error(),
-				RequestSummary: summarizeKiroPayload(payload),
-			})
+			h.recordDiagnosticFailureForPayload("claude.messages.stream", model, nil, 429, busyErr, payload)
 			w.Header().Set("Retry-After", "1")
-			h.sendClaudeError(w, 429, "rate_limit_error", busyErr.Error())
+			sendStreamError(429, "rate_limit_error", busyErr.Error())
 			return
 		}
-		h.sendClaudeError(w, 503, "api_error", "No available accounts")
+		sendStreamError(503, "api_error", "No available accounts")
 		return
 	}
 
@@ -2352,20 +2367,15 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 		Timestamp:  time.Now().Unix(),
 		Protocol:   "claude.messages.stream",
 		Model:      model,
+		Endpoint:   upstreamErrorEndpoint(lastErr),
 		Status:     "failed",
 		StatusCode: mapped.Status,
 		DurationMs: requestDurationMs(startedAt),
 		Error:      lastErr.Error(),
 	})
-	h.recordDiagnosticFailure(diagnosticLogEntry{
-		Protocol:       "claude.messages.stream",
-		Model:          model,
-		StatusCode:     mapped.Status,
-		Error:          lastErr.Error(),
-		RequestSummary: summarizeKiroPayload(payload),
-	})
+	h.recordDiagnosticFailureForPayload("claude.messages.stream", model, nil, mapped.Status, lastErr, payload)
 	applyDownstreamErrorHeaders(w, mapped)
-	h.sendClaudeError(w, mapped.Status, mapped.ClaudeType, lastErr.Error())
+	sendStreamError(mapped.Status, mapped.ClaudeType, lastErr.Error())
 }
 
 func (h *Handler) sendSSE(w http.ResponseWriter, flusher http.Flusher, event string, data interface{}) {

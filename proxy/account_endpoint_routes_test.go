@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"kiro-go/config"
 	"net/http"
 	"path/filepath"
@@ -59,6 +60,28 @@ func TestAccountEndpointRouteSkipsCoolingRateLimitedEndpoint(t *testing.T) {
 		if endpoint.Key == "runtime" {
 			t.Fatal("cooling runtime endpoint was returned")
 		}
+	}
+}
+
+func TestAccountEndpointRouteClearsAffinityAfterTransportFailure(t *testing.T) {
+	registry, _ := newAccountEndpointRouteTestRegistry(t)
+	endpoint := kiroEndpoint{Key: "codewhisperer", Name: "CodeWhisperer"}
+	registry.recordSuccess("account-a", "claude-sonnet-5", endpoint)
+	if cooldown := registry.recordFailure("account-a", "claude-sonnet-5", endpoint, classifyTransportError(endpoint.Name, context.DeadlineExceeded)); cooldown <= 0 {
+		t.Fatal("expected transport failure to cool the sticky endpoint")
+	}
+
+	endpoints, err := registry.availableEndpoints("account-a", "claude-sonnet-5", "auto", testRouteEndpoints())
+	if err != nil {
+		t.Fatalf("available endpoints: %v", err)
+	}
+	for _, candidate := range endpoints {
+		if candidate.Key == endpoint.Key {
+			t.Fatalf("failed sticky endpoint remained available: %+v", endpoints)
+		}
+	}
+	if len(endpoints) == 0 || endpoints[0].Key != "runtime" {
+		t.Fatalf("auto order did not return to the default route: %+v", endpoints)
 	}
 }
 

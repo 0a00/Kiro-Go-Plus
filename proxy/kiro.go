@@ -210,6 +210,7 @@ type KiroPayload struct {
 	contextWindowTokens     int
 	requireActionableOutput bool
 	requireToolUse          bool
+	deferTextUntilComplete  bool
 	toolUsePolicy           string
 	tokenRefreshMu          sync.Mutex
 	tokenRefreshAttempts    map[string]int
@@ -330,6 +331,7 @@ type InferenceConfig struct {
 type KiroStreamCallback struct {
 	OnText         func(text string, isThinking bool)
 	OnToolUse      func(toolUse KiroToolUse)
+	OnProgress     func()
 	OnComplete     func(inputTokens, outputTokens int)
 	OnUsage        func(usage KiroTokenUsage)
 	OnTruncated    func(reason string)
@@ -594,7 +596,7 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 			if firstTokenTimer != nil {
 				firstTokenTimer.Stop()
 			}
-		}, payload != nil && payload.requireActionableOutput, payload != nil && payload.requireToolUse)
+		}, payload != nil && payload.requireActionableOutput, payload != nil && payload.requireToolUse, payload != nil && payload.deferTextUntilComplete)
 		if firstTokenTimeout > 0 {
 			firstTokenTimer = time.AfterFunc(firstTokenTimeout, func() {
 				firstTokenTimedOut.Store(true)
@@ -614,6 +616,9 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 				return classifyRequestCancellation(ep.Name, requestContext.Err())
 			}
 			lastErr = classifyTransportError(ep.Name, err)
+			if cooldown := sharedAccountEndpointRoutes.recordFailure(accountID, modelKey, ep, lastErr); cooldown > 0 {
+				logger.Warnf("[EndpointRouting] Account %s model %s endpoint %s cooling for %s after transport error: %v", accountID, modelKey, ep.Name, cooldown, lastErr)
+			}
 			lastCircuitError = lastErr
 			proxyTransportFailed = true
 			sharedUpstreamHealth.endpointFailure(endpointCircuitKey, lastErr, time.Since(attemptStartedAt))
@@ -758,6 +763,9 @@ func parseEventStream(body io.Reader, callback *KiroStreamCallback) error {
 				break
 			}
 			return err
+		}
+		if callback.OnProgress != nil {
+			callback.OnProgress()
 		}
 
 		eventType := frame.header(":event-type")

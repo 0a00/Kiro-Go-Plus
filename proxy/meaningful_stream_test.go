@@ -15,7 +15,7 @@ func TestStrictMeaningfulStreamRejectsThinkingAndStructuralTail(t *testing.T) {
 		OnComplete: func(int, int) {
 			received = append(received, "complete")
 		},
-	}, nil, true, false)
+	}, nil, true, false, false)
 
 	wrapper.OnText("long hidden reasoning", true)
 	wrapper.OnText("}", false)
@@ -42,7 +42,7 @@ func TestStrictMeaningfulStreamFlushesAfterSubstantiveText(t *testing.T) {
 		OnComplete: func(int, int) {
 			received = append(received, "complete")
 		},
-	}, nil, true, false)
+	}, nil, true, false, false)
 
 	wrapper.OnText("plan", true)
 	wrapper.OnText("<", false)
@@ -58,6 +58,52 @@ func TestStrictMeaningfulStreamFlushesAfterSubstantiveText(t *testing.T) {
 	}
 }
 
+func TestDeferredMeaningfulStreamCommitsTextOnlyResponseAtCompletion(t *testing.T) {
+	var received []string
+	wrapper, gate := wrapMeaningfulStreamCallback(&KiroStreamCallback{
+		OnText: func(text string, thinking bool) {
+			received = append(received, text)
+		},
+		OnComplete: func(int, int) {
+			received = append(received, "complete")
+		},
+	}, nil, true, false, true)
+
+	wrapper.OnText("I will create the requested file now.", false)
+	if gate.hasActionableOutput() || len(received) != 0 {
+		t.Fatalf("inferred tool preamble committed before completion: %#v", received)
+	}
+	wrapper.OnComplete(10, 20)
+
+	want := []string{"I will create the requested file now.", "complete"}
+	if !reflect.DeepEqual(received, want) || !gate.hasActionableOutput() {
+		t.Fatalf("completed text response was not committed: got %#v want %#v", received, want)
+	}
+}
+
+func TestDeferredMeaningfulStreamKeepsPreambleRetryableUntilToolUse(t *testing.T) {
+	var received []string
+	wrapper, gate := wrapMeaningfulStreamCallback(&KiroStreamCallback{
+		OnText: func(text string, _ bool) {
+			received = append(received, "text:"+text)
+		},
+		OnToolUse: func(tool KiroToolUse) {
+			received = append(received, "tool:"+tool.Name)
+		},
+	}, nil, true, false, true)
+
+	wrapper.OnText("I will write the file.", false)
+	if gate.hasActionableOutput() || len(received) != 0 {
+		t.Fatalf("preamble should remain retryable before a complete tool call: %#v", received)
+	}
+	wrapper.OnToolUse(KiroToolUse{ToolUseID: "tool-1", Name: "Write", Input: map[string]interface{}{"file_path": "index.html"}})
+
+	want := []string{"text:I will write the file.", "tool:Write"}
+	if !reflect.DeepEqual(received, want) || !gate.hasActionableOutput() {
+		t.Fatalf("tool call did not commit buffered preamble: got %#v want %#v", received, want)
+	}
+}
+
 func TestStrictMeaningfulStreamCommitsCompleteToolUse(t *testing.T) {
 	var received []string
 	wrapper, gate := wrapMeaningfulStreamCallback(&KiroStreamCallback{
@@ -67,7 +113,7 @@ func TestStrictMeaningfulStreamCommitsCompleteToolUse(t *testing.T) {
 		OnToolUse: func(tool KiroToolUse) {
 			received = append(received, "tool:"+tool.Name)
 		},
-	}, nil, true, false)
+	}, nil, true, false, false)
 
 	wrapper.OnText("plan", true)
 	wrapper.OnToolUse(KiroToolUse{ToolUseID: "tool-1", Name: "write"})
@@ -87,7 +133,7 @@ func TestStrictMeaningfulStreamCommitsRecoveredToolUseWithoutStop(t *testing.T) 
 		OnToolUse: func(tool KiroToolUse) {
 			received = append(received, tool)
 		},
-	}, nil, true, true)
+	}, nil, true, true, false)
 	stream := bytes.NewReader(awsEventStreamFrame(t, "toolUseEvent", map[string]interface{}{
 		"toolUseId": "toolu_write",
 		"name":      "Write",
@@ -109,7 +155,7 @@ func TestStrictMeaningfulStreamRejectsMalformedToolArguments(t *testing.T) {
 	called := false
 	wrapper, gate := wrapMeaningfulStreamCallback(&KiroStreamCallback{
 		OnToolUse: func(KiroToolUse) { called = true },
-	}, nil, true, false)
+	}, nil, true, false, false)
 
 	wrapper.OnToolUse(KiroToolUse{
 		ToolUseID: "tool-1",
@@ -126,7 +172,7 @@ func TestStrictMeaningfulStreamRejectsUnclosedThinkingTag(t *testing.T) {
 	called := false
 	wrapper, gate := wrapMeaningfulStreamCallback(&KiroStreamCallback{
 		OnText: func(string, bool) { called = true },
-	}, nil, true, false)
+	}, nil, true, false, false)
 
 	wrapper.OnText("<thinking>plan the page\n<html><body>unfinished", false)
 
@@ -140,7 +186,7 @@ func TestStrictMeaningfulStreamRequiresToolWhenConfigured(t *testing.T) {
 	wrapper, gate := wrapMeaningfulStreamCallback(&KiroStreamCallback{
 		OnText:    func(text string, _ bool) { received = append(received, "text:"+text) },
 		OnToolUse: func(tool KiroToolUse) { received = append(received, "tool:"+tool.Name) },
-	}, nil, true, true)
+	}, nil, true, true, false)
 
 	wrapper.OnText("Here is the complete file contents", false)
 	if gate.hasActionableOutput() || len(received) != 0 {

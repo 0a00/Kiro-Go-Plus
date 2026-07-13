@@ -40,12 +40,13 @@ type pendingStreamEvent struct {
 // text or a complete tool call. This keeps hidden reasoning and malformed tails
 // such as a lone "}" from turning an unusable response into HTTP 200 success.
 type meaningfulStreamCallback struct {
-	target         *KiroStreamCallback
-	onActivity     func()
-	strict         bool
-	requireToolUse bool
-	activity       atomic.Bool
-	actionable     atomic.Bool
+	target                 *KiroStreamCallback
+	onActivity             func()
+	strict                 bool
+	requireToolUse         bool
+	deferTextUntilComplete bool
+	activity               atomic.Bool
+	actionable             atomic.Bool
 
 	mu           sync.Mutex
 	committed    bool
@@ -53,11 +54,17 @@ type meaningfulStreamCallback struct {
 	pending      []pendingStreamEvent
 }
 
-func wrapMeaningfulStreamCallback(target *KiroStreamCallback, onActivity func(), strict, requireToolUse bool) (*KiroStreamCallback, *meaningfulStreamCallback) {
+func wrapMeaningfulStreamCallback(target *KiroStreamCallback, onActivity func(), strict, requireToolUse, deferTextUntilComplete bool) (*KiroStreamCallback, *meaningfulStreamCallback) {
 	if target == nil {
 		target = &KiroStreamCallback{}
 	}
-	gate := &meaningfulStreamCallback{target: target, onActivity: onActivity, strict: strict, requireToolUse: requireToolUse}
+	gate := &meaningfulStreamCallback{
+		target:                 target,
+		onActivity:             onActivity,
+		strict:                 strict,
+		requireToolUse:         requireToolUse,
+		deferTextUntilComplete: deferTextUntilComplete,
+	}
 	wrapper := &KiroStreamCallback{
 		OnText: func(text string, isThinking bool) {
 			if strings.TrimSpace(text) == "" {
@@ -87,6 +94,12 @@ func wrapMeaningfulStreamCallback(target *KiroStreamCallback, onActivity func(),
 		},
 		OnContextUsage: func(percentage float64) {
 			gate.handleEvent(pendingStreamEvent{kind: pendingContextUsage, percentage: percentage})
+		},
+		OnProgress: func() {
+			gate.markActivity()
+			if target.OnProgress != nil {
+				target.OnProgress()
+			}
 		},
 	}
 	return wrapper, gate
@@ -134,6 +147,12 @@ func (g *meaningfulStreamCallback) handleEvent(event pendingStreamEvent) {
 				g.visibleProbe.WriteString(event.text)
 			}
 		}
+		if !g.deferTextUntilComplete {
+			visible, incompleteThinking := visibleTextOutsideThinking(g.visibleProbe.String())
+			commit = !incompleteThinking && hasSubstantiveAgentText(visible)
+		}
+	}
+	if event.kind == pendingComplete && g.deferTextUntilComplete && !g.requireToolUse {
 		visible, incompleteThinking := visibleTextOutsideThinking(g.visibleProbe.String())
 		commit = !incompleteThinking && hasSubstantiveAgentText(visible)
 	}

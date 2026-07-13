@@ -106,6 +106,13 @@ func asUpstreamError(err error) (*UpstreamError, bool) {
 	return nil, false
 }
 
+func upstreamErrorEndpoint(err error) string {
+	if upstreamErr, ok := asUpstreamError(err); ok {
+		return upstreamErr.Endpoint
+	}
+	return ""
+}
+
 type downstreamError struct {
 	Status     int
 	ClaudeType string

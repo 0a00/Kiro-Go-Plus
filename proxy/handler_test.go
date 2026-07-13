@@ -575,6 +575,84 @@ func TestClaudeToolStreamCommitsBeforeUpstreamCompletes(t *testing.T) {
 	}
 }
 
+func TestClaudeInferredToolStreamRetriesAfterPreambleTransportFailure(t *testing.T) {
+	t.Setenv("ALLOW_UNAUTHENTICATED_API", "true")
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	for _, account := range []config.Account{
+		{ID: "stream-retry-first", Enabled: true, AccessToken: "token-first", ProfileArn: "arn:aws:codewhisperer:profile/first"},
+		{ID: "stream-retry-second", Enabled: true, AccessToken: "token-second", ProfileArn: "arn:aws:codewhisperer:profile/second"},
+	} {
+		if err := config.AddAccount(account); err != nil {
+			t.Fatalf("add account %s: %v", account.ID, err)
+		}
+	}
+	if err := config.UpdatePreferredEndpoint("kiro"); err != nil {
+		t.Fatalf("set preferred endpoint: %v", err)
+	}
+	if err := config.UpdateEndpointFallback(false); err != nil {
+		t.Fatalf("disable endpoint fallback: %v", err)
+	}
+
+	upstreamCalls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalls++
+		w.WriteHeader(http.StatusOK)
+		if upstreamCalls == 1 {
+			_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{
+				"content": "I will create the requested file now.",
+			}))
+			_, _ = w.Write([]byte{0x00, 0x01, 0x02})
+			return
+		}
+		_, _ = w.Write(awsEventStreamFrame(t, "toolUseEvent", map[string]interface{}{
+			"toolUseId": "toolu_write",
+			"name":      "Write",
+			"input":     `{"file_path":"index.html","content":"complete"}`,
+			"stop":      true,
+		}))
+		_, _ = w.Write(awsEventStreamFrame(t, "contextUsageEvent", map[string]interface{}{
+			"contextUsagePercentage": 1.0,
+		}))
+	}))
+	defer upstream.Close()
+	defer swapKiroEndpointsForTest(t, upstream)()
+
+	p := accountpool.GetPool()
+	p.Reload()
+	h := &Handler{
+		pool:        p,
+		promptCache: newPromptCacheTracker(defaultPromptCacheTTL),
+		requestLog:  newRequestLog(defaultRequestLogLimit),
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{
+		"model":"claude-sonnet-4.5",
+		"stream":true,
+		"messages":[{"role":"user","content":"任务目标：请创建一个 HTML 文件并写入工作区。"}],
+		"tools":[{"name":"Write","description":"write a file","input_schema":{"type":"object","properties":{"file_path":{"type":"string"},"content":{"type":"string"}}}}]
+	}`))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if upstreamCalls != 2 {
+		t.Fatalf("upstream calls = %d, want 2", upstreamCalls)
+	}
+	if strings.Count(body, "event: message_start") != 1 {
+		t.Fatalf("expected one immediate message_start, body=%s", body)
+	}
+	if strings.Contains(body, "I will create the requested file now") {
+		t.Fatalf("failed-attempt preamble leaked downstream: %s", body)
+	}
+	if !strings.Contains(body, `"type":"tool_use"`) || !strings.Contains(body, "event: message_stop") {
+		t.Fatalf("retried tool stream is incomplete: %s", body)
+	}
+}
+
 func TestRemovedClaudeAliasesReturnNotFound(t *testing.T) {
 	h := &Handler{}
 	for _, path := range []string{

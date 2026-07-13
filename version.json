@@ -1,5 +1,5 @@
 {
-  "version": "1.2.16",
-  "changelog": "Consolidate Anthropic compatibility on the single standard /v1/messages endpoint. Remove /cc/v1/messages and legacy Claude path aliases, along with their Web UI entry. Standard Claude requests now cover chat, thinking, Claude Code, and agent tool streams with the same configurable pre-commit validation and live-streaming behavior.\nAnthropic 兼容接口统一为标准 /v1/messages。移除 /cc/v1/messages、旧 Claude 路径别名及对应 Web 展示；普通聊天、Thinking、Claude Code 和 Agent 工具流现在统一使用同一端点，并共享可配置的提交前校验与实时流式逻辑。",
+  "version": "1.2.17",
+  "changelog": "Improve long Claude tool streams on /v1/messages. Guarded streams now start immediately, send progress pings during lengthy upstream generation, and keep inferred workspace preambles retryable until a complete tool call or clean text-only completion. Transport failures also clear sticky endpoint affinity, while diagnostics retain request IDs and wrapped root causes.\n优化 /v1/messages 的长工具流。受保护流现在会立即建立并在长时上游生成期间发送进度 ping；工作区任务的简短前言在完整工具调用或纯文本正常完成前仍可安全重试。传输失败会清除粘性端点偏好，失败诊断也会保留请求 ID 和底层原因。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }
