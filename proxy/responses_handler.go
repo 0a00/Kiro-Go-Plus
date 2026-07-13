@@ -18,6 +18,7 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	startedAt := time.Now()
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		h.sendOpenAIError(w, requestBodyErrorStatus(err), "invalid_request_error", "Failed to read request body")
@@ -29,6 +30,15 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 		h.sendOpenAIError(w, 400, "invalid_request_error", "Invalid JSON")
 		return
 	}
+	r = h.attachRequestDetailTrace(r, "openai.responses", body)
+	w, detailStatus := wrapRequestDetailResponseWriter(w, r.Context())
+	defer func() {
+		protocol := "openai.responses"
+		if req.Stream {
+			protocol += ".stream"
+		}
+		h.finalizeUnrecordedRequestDetail(r.Context(), detailStatus, startedAt, protocol, req.Model)
+	}()
 
 	if strings.TrimSpace(req.Model) == "" {
 		req.Model = defaultResponsesModel

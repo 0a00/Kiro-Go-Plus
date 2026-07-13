@@ -253,6 +253,7 @@
                   <th data-i18n="requests.outcome"></th>
                   <th data-i18n="requests.duration"></th>
                   <th data-i18n="requests.error"></th>
+				  <th data-i18n="requests.detail"></th>
                 </tr>
               </thead>
               <tbody id="requestsTableBody"></tbody>
@@ -692,7 +693,28 @@
             <input type="number" id="requestLogMaxEntries" min="100" max="20000" step="100" />
             <small data-i18n="settings.requestLogHint"></small>
           </div>
-          <button class="btn btn-primary" id="saveRequestLogBtn" data-i18n="settings.saveRequestLog"></button>
+		  <div class="form-group">
+			<label class="flex items-center gap-2">
+			  <span class="switch"><input type="checkbox" id="detailedLogEnabled" /><span class="slider"></span></span>
+			  <span data-i18n="settings.detailedLogEnabled"></span>
+			</label>
+			<small data-i18n="settings.detailedLogHint"></small>
+		  </div>
+		  <div class="form-group">
+			<label data-i18n="settings.detailedLogLimits"></label>
+			<div class="input-row">
+			  <input type="number" id="detailedLogMaxEntries" min="1" max="1000" step="1" data-i18n-aria-label="settings.detailedLogMaxEntries" />
+			  <input type="number" id="maxRequestDetailKiB" min="16" max="1024" step="16" data-i18n-aria-label="settings.maxRequestDetailKiB" />
+			</div>
+			<small id="requestDetailStatus" aria-live="polite"></small>
+		  </div>
+		  <div class="flex gap-2 flex-wrap">
+			<button class="btn btn-primary" id="saveRequestLogBtn" data-i18n="settings.saveRequestLog"></button>
+			<button class="btn btn-outline" id="clearRequestDetailsBtn" type="button">
+			  <i class="fa-solid fa-trash-can" aria-hidden="true"></i>
+			  <span data-i18n="settings.clearRequestDetails"></span>
+			</button>
+		  </div>
         </div>
 
         <!-- Count tokens provider settings -->
@@ -786,11 +808,18 @@
             </div>
           </div>
           <div class="form-group">
-            <label class="flex items-center gap-2">
-              <span class="switch"><input type="checkbox" id="bufferToolStreams" /><span class="slider"></span></span>
-              <span data-i18n="settings.bufferToolStreams"></span>
-            </label>
-            <small data-i18n="settings.bufferToolStreamsHint"></small>
+            <label data-i18n="settings.toolStreamMode"></label>
+            <div class="segmented-control" role="radiogroup" data-i18n-aria-label="settings.toolStreamMode">
+              <label class="segmented-option">
+                <input type="radio" id="toolStreamModeLive" name="toolStreamMode" value="live" />
+                <span data-i18n="settings.toolStreamLive"></span>
+              </label>
+              <label class="segmented-option">
+                <input type="radio" id="toolStreamModeSafe" name="toolStreamMode" value="safe" />
+                <span data-i18n="settings.toolStreamSafe"></span>
+              </label>
+            </div>
+            <small data-i18n="settings.toolStreamModeHint"></small>
           </div>
           <div class="form-group">
             <label class="flex items-center gap-2">
@@ -1047,6 +1076,13 @@
           id="detailModalClose" type="button" aria-label="" data-i18n-aria-label="common.close">&times;</button></div>
       <div class="modal-body" id="detailBody"></div>
     </div>
+  </div>
+  <div id="requestDetailModal" class="modal">
+	<div class="modal-content request-detail-modal-content">
+	  <div class="modal-header"><span class="modal-title" data-i18n="requests.detailTitle"></span><button class="modal-close"
+		  id="requestDetailModalClose" type="button" aria-label="" data-i18n-aria-label="common.close">&times;</button></div>
+	  <div class="modal-body" id="requestDetailBody"></div>
+	</div>
   </div>
   <div id="exportModal" class="modal">
     <div class="modal-content">

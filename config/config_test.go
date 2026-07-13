@@ -32,22 +32,37 @@ func TestRequestLogConfigDefaultsAndPersistence(t *testing.T) {
 	if got := GetRequestLogConfig().MaxEntries; got != DefaultRequestLogMaxEntries {
 		t.Fatalf("default max entries = %d, want %d", got, DefaultRequestLogMaxEntries)
 	}
+	defaults := GetRequestLogConfig()
+	if defaults.DetailedLogEnabled || defaults.DetailedMaxEntries != DefaultRequestDetailMaxEntries || defaults.MaxDetailBytes != DefaultRequestDetailMaxBytes {
+		t.Fatalf("unexpected request detail defaults: %+v", defaults)
+	}
 
-	if err := UpdateRequestLogConfig(RequestLogConfig{MaxEntries: 5000}); err != nil {
+	if err := UpdateRequestLogConfig(RequestLogConfig{
+		MaxEntries:         5000,
+		DetailedLogEnabled: true,
+		DetailedMaxEntries: 250,
+		MaxDetailBytes:     512 << 10,
+	}); err != nil {
 		t.Fatalf("update request log config: %v", err)
 	}
 	if err := Init(path); err != nil {
 		t.Fatalf("reload config: %v", err)
 	}
-	if got := GetRequestLogConfig().MaxEntries; got != 5000 {
-		t.Fatalf("persisted max entries = %d, want 5000", got)
+	persisted := GetRequestLogConfig()
+	if persisted.MaxEntries != 5000 || !persisted.DetailedLogEnabled || persisted.DetailedMaxEntries != 250 || persisted.MaxDetailBytes != 512<<10 {
+		t.Fatalf("unexpected persisted request log config: %+v", persisted)
 	}
 
-	if err := UpdateRequestLogConfig(RequestLogConfig{MaxEntries: MaxRequestLogMaxEntries + 1}); err != nil {
+	if err := UpdateRequestLogConfig(RequestLogConfig{
+		MaxEntries:         MaxRequestLogMaxEntries + 1,
+		DetailedMaxEntries: MaxRequestDetailMaxEntries + 1,
+		MaxDetailBytes:     MaxRequestDetailMaxBytes + 1,
+	}); err != nil {
 		t.Fatalf("clamp request log config: %v", err)
 	}
-	if got := GetRequestLogConfig().MaxEntries; got != MaxRequestLogMaxEntries {
-		t.Fatalf("clamped max entries = %d, want %d", got, MaxRequestLogMaxEntries)
+	clamped := GetRequestLogConfig()
+	if clamped.MaxEntries != MaxRequestLogMaxEntries || clamped.DetailedMaxEntries != MaxRequestDetailMaxEntries || clamped.MaxDetailBytes != MaxRequestDetailMaxBytes {
+		t.Fatalf("unexpected clamped request log config: %+v", clamped)
 	}
 }
 

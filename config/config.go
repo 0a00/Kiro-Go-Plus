@@ -296,11 +296,21 @@ const (
 	DefaultRequestLogMaxEntries = 1000
 	MinRequestLogMaxEntries     = 100
 	MaxRequestLogMaxEntries     = 20000
+
+	DefaultRequestDetailMaxEntries = 100
+	MinRequestDetailMaxEntries     = 1
+	MaxRequestDetailMaxEntries     = 1000
+	DefaultRequestDetailMaxBytes   = 256 << 10
+	MinRequestDetailMaxBytes       = 16 << 10
+	MaxRequestDetailMaxBytes       = 1 << 20
 )
 
 // RequestLogConfig controls the bounded, persisted recent-request history.
 type RequestLogConfig struct {
-	MaxEntries int `json:"maxEntries"`
+	MaxEntries         int  `json:"maxEntries"`
+	DetailedLogEnabled bool `json:"detailedLogEnabled"`
+	DetailedMaxEntries int  `json:"detailedMaxEntries"`
+	MaxDetailBytes     int  `json:"maxDetailBytes"`
 }
 
 // WebSearchConfig controls the Anthropic web_search compatibility shim.
@@ -338,7 +348,7 @@ type Config struct {
 	ThinkingBudgetCapTokens     *int   `json:"thinkingBudgetCapTokens,omitempty"`     // Maximum proxy-derived fake-reasoning budget; 0 disables the cap
 	DefaultMaxOutputTokens      int    `json:"defaultMaxOutputTokens,omitempty"`      // Default max output tokens when the client omits a limit; 0 leaves it unset
 	DefaultContextWindowTokens  int    `json:"defaultContextWindowTokens,omitempty"`  // Default context window when the client/model omits one; 0 auto-detects
-	BufferToolStreams           *bool  `json:"bufferToolStreams,omitempty"`           // Delay tool-enabled Claude streams until actionable output, then stream live
+	BufferToolStreams           *bool  `json:"bufferToolStreams,omitempty"`           // Buffer complete Claude tool calls to preserve transparent retries; false streams deltas live
 	EnforceAgentToolUse         *bool  `json:"enforceAgentToolUse,omitempty"`         // Require tools for detected workspace mutation/execution requests
 
 	// Endpoint configuration: "auto", "kiro", "codewhisperer", or "amazonq"
@@ -462,7 +472,7 @@ type AccountInfo struct {
 }
 
 // Version current version
-const Version = "1.2.20"
+const Version = "1.2.22"
 
 var (
 	cfg           *Config
@@ -1228,7 +1238,12 @@ func normalizeDiagnosticLocked() {
 }
 
 func defaultRequestLogConfig() RequestLogConfig {
-	return RequestLogConfig{MaxEntries: DefaultRequestLogMaxEntries}
+	return RequestLogConfig{
+		MaxEntries:         DefaultRequestLogMaxEntries,
+		DetailedLogEnabled: false,
+		DetailedMaxEntries: DefaultRequestDetailMaxEntries,
+		MaxDetailBytes:     DefaultRequestDetailMaxBytes,
+	}
 }
 
 func normalizeRequestLogLocked() {
@@ -1239,6 +1254,22 @@ func normalizeRequestLogLocked() {
 	}
 	if cfg.RequestLog.MaxEntries > MaxRequestLogMaxEntries {
 		cfg.RequestLog.MaxEntries = MaxRequestLogMaxEntries
+	}
+	if cfg.RequestLog.DetailedMaxEntries <= 0 {
+		cfg.RequestLog.DetailedMaxEntries = DefaultRequestDetailMaxEntries
+	} else if cfg.RequestLog.DetailedMaxEntries < MinRequestDetailMaxEntries {
+		cfg.RequestLog.DetailedMaxEntries = MinRequestDetailMaxEntries
+	}
+	if cfg.RequestLog.DetailedMaxEntries > MaxRequestDetailMaxEntries {
+		cfg.RequestLog.DetailedMaxEntries = MaxRequestDetailMaxEntries
+	}
+	if cfg.RequestLog.MaxDetailBytes <= 0 {
+		cfg.RequestLog.MaxDetailBytes = DefaultRequestDetailMaxBytes
+	} else if cfg.RequestLog.MaxDetailBytes < MinRequestDetailMaxBytes {
+		cfg.RequestLog.MaxDetailBytes = MinRequestDetailMaxBytes
+	}
+	if cfg.RequestLog.MaxDetailBytes > MaxRequestDetailMaxBytes {
+		cfg.RequestLog.MaxDetailBytes = MaxRequestDetailMaxBytes
 	}
 }
 
@@ -1860,6 +1891,22 @@ func GetRequestLogConfig() RequestLogConfig {
 	}
 	if out.MaxEntries > MaxRequestLogMaxEntries {
 		out.MaxEntries = MaxRequestLogMaxEntries
+	}
+	if out.DetailedMaxEntries <= 0 {
+		out.DetailedMaxEntries = DefaultRequestDetailMaxEntries
+	} else if out.DetailedMaxEntries < MinRequestDetailMaxEntries {
+		out.DetailedMaxEntries = MinRequestDetailMaxEntries
+	}
+	if out.DetailedMaxEntries > MaxRequestDetailMaxEntries {
+		out.DetailedMaxEntries = MaxRequestDetailMaxEntries
+	}
+	if out.MaxDetailBytes <= 0 {
+		out.MaxDetailBytes = DefaultRequestDetailMaxBytes
+	} else if out.MaxDetailBytes < MinRequestDetailMaxBytes {
+		out.MaxDetailBytes = MinRequestDetailMaxBytes
+	}
+	if out.MaxDetailBytes > MaxRequestDetailMaxBytes {
+		out.MaxDetailBytes = MaxRequestDetailMaxBytes
 	}
 	return out
 }
@@ -2608,7 +2655,7 @@ type ThinkingConfig struct {
 	BudgetCapTokens            int    `json:"budgetCapTokens"`            // Maximum proxy-derived fake-reasoning budget; 0 disables the cap
 	DefaultMaxOutputTokens     int    `json:"defaultMaxOutputTokens"`     // Default max output tokens; 0 leaves it unset
 	DefaultContextWindowTokens int    `json:"defaultContextWindowTokens"` // Default context window; 0 auto-detects
-	BufferToolStreams          bool   `json:"bufferToolStreams"`          // Guard tool streams until actionable output, then stream live
+	BufferToolStreams          bool   `json:"bufferToolStreams"`          // Buffer complete Claude tool calls; false forwards tool deltas immediately
 	EnforceAgentToolUse        bool   `json:"enforceAgentToolUse"`        // Require tools for workspace actions
 }
 

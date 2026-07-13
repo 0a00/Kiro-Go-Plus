@@ -749,7 +749,7 @@
     const body = $('requestsTableBody');
     if (!body) return;
     if (!items.length) {
-	  body.innerHTML = '<tr><td colspan="13" class="request-empty">' + escapeHtml(t('requests.empty')) + '</td></tr>';
+	  body.innerHTML = '<tr><td colspan="14" class="request-empty">' + escapeHtml(t('requests.empty')) + '</td></tr>';
       return;
     }
     body.innerHTML = items.map(item => {
@@ -772,9 +772,14 @@
       }
       const outcome = outcomeParts.join(' · ') || '-';
       const outcomeTitle = outcome + (Array.isArray(item.requestToolNames) && item.requestToolNames.length ? ' · ' + item.requestToolNames.join(', ') : '');
+      const upstreamActivityDuration = formatRequestDuration(item.upstreamFirstActivityMs);
       const firstContentDuration = formatRequestDuration(item.firstContentMs);
+      const toolAssemblyDuration = formatRequestDuration(item.toolAssemblyMs);
       const totalDuration = formatRequestDuration(item.durationMs);
-      const durationTitle = t('requests.firstContent') + ': ' + firstContentDuration + ' · ' + t('requests.totalDuration') + ': ' + totalDuration;
+      const durationTitle = t('requests.upstreamActivity') + ': ' + upstreamActivityDuration + ' · ' + t('requests.firstContent') + ': ' + firstContentDuration + (item.toolAssemblyMs == null ? '' : ' · ' + t('requests.toolAssembly') + ': ' + toolAssemblyDuration) + ' · ' + t('requests.totalDuration') + ': ' + totalDuration;
+	  const detailButton = item.detailAvailable
+		? '<button class="btn btn-outline btn-xs icon-btn" type="button" data-request-detail="' + escapeAttr(requestId) + '" title="' + escapeAttr(t('requests.viewDetail')) + '" aria-label="' + escapeAttr(t('requests.viewDetail')) + '"><i class="fa-solid fa-magnifying-glass" aria-hidden="true"></i></button>'
+		: '-';
       return '<tr>' +
         '<td>' + escapeHtml(formatTime(item.timestamp)) + '</td>' +
         '<td>' + escapeHtml(item.protocol || '-') + '</td>' +
@@ -788,10 +793,13 @@
         '<td>' + escapeHtml(cache) + '</td>' +
         '<td title="' + escapeAttr(outcomeTitle) + '">' + escapeHtml(outcome) + '</td>' +
         '<td class="request-duration" title="' + escapeAttr(durationTitle) + '">' +
+          '<span class="request-duration-line"><span class="request-duration-label">' + escapeHtml(t('requests.upstreamActivity')) + '</span><strong>' + escapeHtml(upstreamActivityDuration) + '</strong></span>' +
           '<span class="request-duration-line"><span class="request-duration-label">' + escapeHtml(t('requests.firstContent')) + '</span><strong>' + escapeHtml(firstContentDuration) + '</strong></span>' +
+          (item.toolAssemblyMs == null ? '' : '<span class="request-duration-line"><span class="request-duration-label">' + escapeHtml(t('requests.toolAssembly')) + '</span><strong>' + escapeHtml(toolAssemblyDuration) + '</strong></span>') +
           '<span class="request-duration-line"><span class="request-duration-label">' + escapeHtml(t('requests.totalDuration')) + '</span><strong>' + escapeHtml(totalDuration) + '</strong></span>' +
         '</td>' +
         '<td class="request-error" title="' + escapeAttr(err) + '">' + escapeHtml(err) + '</td>' +
+		'<td class="request-detail-action">' + detailButton + '</td>' +
         '</tr>';
     }).join('');
   }
@@ -2014,7 +2022,8 @@
     $('thinkingBudgetCap').value = d.budgetCapTokens == null ? 10000 : d.budgetCapTokens;
     $('defaultMaxOutputTokens').value = d.defaultMaxOutputTokens || 0;
     $('defaultContextWindowTokens').value = d.defaultContextWindowTokens || 0;
-    $('bufferToolStreams').checked = d.bufferToolStreams !== false;
+    $('toolStreamModeSafe').checked = d.bufferToolStreams !== false;
+    $('toolStreamModeLive').checked = d.bufferToolStreams === false;
     $('enforceAgentToolUse').checked = d.enforceAgentToolUse !== false;
   }
   async function saveThinkingConfig() {
@@ -2039,7 +2048,7 @@
         budgetCapTokens,
         defaultMaxOutputTokens,
         defaultContextWindowTokens,
-        bufferToolStreams: $('bufferToolStreams').checked,
+        bufferToolStreams: $('toolStreamModeSafe').checked,
         enforceAgentToolUse: $('enforceAgentToolUse').checked
       })
     });
@@ -2307,16 +2316,31 @@
     const res = await api('/request-log');
     const d = await res.json();
     $('requestLogMaxEntries').value = d.maxEntries || 1000;
+	$('detailedLogEnabled').checked = d.detailedLogEnabled === true;
+	$('detailedLogMaxEntries').value = d.detailedMaxEntries || 100;
+	$('maxRequestDetailKiB').value = Math.round((d.maxDetailBytes || 262144) / 1024);
+	$('requestDetailStatus').textContent = t('settings.requestDetailStatus', d.detailCount || 0, ((d.detailBytes || 0) / 1048576).toFixed(2));
   }
   async function saveRequestLogConfig() {
     const maxEntries = Math.round(Number($('requestLogMaxEntries').value) || 0);
+	const detailedMaxEntries = Math.round(Number($('detailedLogMaxEntries').value) || 0);
+	const maxDetailKiB = Math.round(Number($('maxRequestDetailKiB').value) || 0);
     if (maxEntries < 100 || maxEntries > 20000) {
       toast(t('settings.requestLogInvalid'), 'warning');
       return;
     }
+	if (detailedMaxEntries < 1 || detailedMaxEntries > 1000 || maxDetailKiB < 16 || maxDetailKiB > 1024) {
+	  toast(t('settings.requestDetailInvalid'), 'warning');
+	  return;
+	}
     const res = await api('/request-log', {
       method: 'POST',
-      body: JSON.stringify({ maxEntries })
+	  body: JSON.stringify({
+		maxEntries,
+		detailedLogEnabled: $('detailedLogEnabled').checked,
+		detailedMaxEntries,
+		maxDetailBytes: maxDetailKiB * 1024
+	  })
     });
     const d = await res.json().catch(() => ({}));
     if (!res.ok || d.success === false) {
@@ -2325,6 +2349,58 @@
     }
     toast(t('settings.requestLogSaved'), 'success');
     loadRequestLogConfig();
+  }
+
+  async function clearRequestDetails() {
+	const ok = await confirmAction(t('settings.clearRequestDetailsConfirm'), {
+	  title: t('settings.clearRequestDetails'),
+	  confirmText: t('settings.clearRequestDetails'),
+	  variant: 'danger'
+	});
+	if (!ok) return;
+	const res = await api('/request-details', { method: 'DELETE' });
+	const d = await res.json().catch(() => ({}));
+	if (!res.ok || d.success === false) {
+	  toast(t('common.failed') + ': ' + (d.error || t('common.unknownError')), 'error');
+	  return;
+	}
+	toast(t('settings.requestDetailsCleared', d.deleted || 0), 'success');
+	loadRequestLogConfig();
+	loadRequests();
+  }
+
+  async function showRequestDetail(requestId) {
+	const body = $('requestDetailBody');
+	body.innerHTML = '<div class="request-detail-loading">' + escapeHtml(t('common.loading')) + '</div>';
+	openDialog('requestDetailModal');
+	const res = await api('/request-details?id=' + encodeURIComponent(requestId));
+	const d = await res.json().catch(() => ({}));
+	if (!res.ok) {
+	  body.innerHTML = '<div class="request-detail-error">' + escapeHtml(d.error || t('common.unknownError')) + '</div>';
+	  return;
+	}
+	const displayDetail = JSON.parse(JSON.stringify(d));
+	if (displayDetail.request && !displayDetail.request.bodyTruncated && typeof displayDetail.request.bodyJson === 'string') {
+	  try {
+		displayDetail.request.body = JSON.parse(displayDetail.request.bodyJson);
+		delete displayDetail.request.bodyJson;
+	  } catch (e) { }
+	}
+	const pretty = JSON.stringify(displayDetail, null, 2);
+	body.innerHTML =
+	  '<div class="request-detail-toolbar">' +
+	  '<button class="btn btn-outline btn-sm" type="button" id="copyRequestDetailBtn"><i class="fa-solid fa-copy" aria-hidden="true"></i><span>' + escapeHtml(t('common.copy')) + '</span></button>' +
+	  '<a class="btn btn-outline btn-sm" href="/admin/api/request-details/download?id=' + encodeURIComponent(requestId) + '"><i class="fa-solid fa-download" aria-hidden="true"></i><span>' + escapeHtml(t('requests.downloadDetail')) + '</span></a>' +
+	  '</div>' +
+	  '<pre class="request-detail-json" id="requestDetailJson"></pre>';
+	$('requestDetailJson').textContent = pretty;
+	$('copyRequestDetailBtn').addEventListener('click', async () => {
+	  if (await copyText(pretty)) toast(t('common.copied'), 'primary');
+	});
+  }
+
+  function closeRequestDetailModal() {
+	closeDialog('requestDetailModal');
   }
   async function loadCountTokensProviderConfig() {
     const res = await api('/count-tokens-provider');
@@ -3723,6 +3799,7 @@
     $('clearPromptCacheBtn').addEventListener('click', clearPromptCache);
     $('saveDiagnosticsBtn').addEventListener('click', saveDiagnosticsConfig);
     $('saveRequestLogBtn').addEventListener('click', saveRequestLogConfig);
+	$('clearRequestDetailsBtn').addEventListener('click', clearRequestDetails);
     $('saveCountTokensProviderBtn').addEventListener('click', saveCountTokensProviderConfig);
     $('saveWebSearchBtn').addEventListener('click', saveWebSearchConfig);
     $('saveThinkingBtn').addEventListener('click', saveThinkingConfig);
@@ -3737,6 +3814,10 @@
   function bindRequestEvents() {
     const btn = $('refreshRequestsBtn');
     if (btn) btn.addEventListener('click', loadRequests);
+	$('requestsTableBody').addEventListener('click', e => {
+	  const detail = e.target.closest('[data-request-detail]');
+	  if (detail) showRequestDetail(detail.dataset.requestDetail);
+	});
   }
 
   function bindPromptFilterEvents() {
@@ -3764,6 +3845,7 @@
   function bindModalEvents() {
     $('addModalClose').addEventListener('click', closeModal);
     $('detailModalClose').addEventListener('click', closeDetailModal);
+	$('requestDetailModalClose').addEventListener('click', closeRequestDetailModal);
     $('exportModalClose').addEventListener('click', closeExportModal);
     $('testModalClose').addEventListener('click', closeTestModal);
     $('updateModalClose').addEventListener('click', closeUpdateModal);
@@ -3773,6 +3855,7 @@
     [
       ['addModal', closeModal],
       ['detailModal', closeDetailModal],
+	  ['requestDetailModal', closeRequestDetailModal],
       ['exportModal', closeExportModal],
       ['testModal', closeTestModal],
       ['updateModal', closeUpdateModal],

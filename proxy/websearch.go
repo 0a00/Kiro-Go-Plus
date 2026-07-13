@@ -179,6 +179,9 @@ func (h *Handler) handleClaudeWebSearch(ctx context.Context, w http.ResponseWrit
 		if upstreamErr, ok := asUpstreamError(err); ok && upstreamErr.Kind == UpstreamErrorCanceled {
 			return
 		}
+		if trace := requestDetailTraceFromContext(ctx); trace != nil {
+			trace.recordError(err)
+		}
 		h.recordFailure()
 		h.recordDiagnosticFailure(diagnosticLogEntry{
 			RequestID:      requestIDFromContext(ctx),
@@ -189,16 +192,32 @@ func (h *Handler) handleClaudeWebSearch(ctx context.Context, w http.ResponseWrit
 			RequestSummary: query,
 		})
 		h.sendClaudeError(w, 502, "api_error", err.Error())
+		h.recordRequestLogForContext(ctx, requestLogEntry{
+			Timestamp:    time.Now().Unix(),
+			Protocol:     "claude.web_search",
+			Model:        req.Model,
+			Status:       "failed",
+			StatusCode:   http.StatusBadGateway,
+			DurationMs:   requestDurationMs(startedAt),
+			InputTokens:  estimatedInputTokens,
+			OutputTokens: 0,
+			Error:        err.Error(),
+		})
 		return
 	}
 
 	output := webSearchSummary(query, results)
+	if trace := requestDetailTraceFromContext(ctx); trace != nil {
+		trace.recordText(output, false)
+	}
 	firstContent.MarkText(output)
 	outputTokens := estimateApproxTokens(output)
+	if trace := requestDetailTraceFromContext(ctx); trace != nil {
+		trace.recordComplete(estimatedInputTokens, outputTokens)
+	}
 	h.recordSuccessForApiKey(ctx, apiKeyID, estimatedInputTokens, outputTokens, 0)
-	h.recordRequestLog(requestLogEntry{
+	h.recordRequestLogForContext(ctx, requestLogEntry{
 		Timestamp:      time.Now().Unix(),
-		RequestID:      requestIDFromContext(ctx),
 		Protocol:       "claude.web_search",
 		Model:          req.Model,
 		Status:         "success",
@@ -330,17 +349,32 @@ func callMCPWebSearchContext(ctx context.Context, account *config.Account, query
 	return nil, lastErr
 }
 
-func callMCPWebSearchURL(ctx context.Context, account *config.Account, rawURL string, body []byte, query string) (*webSearchResults, error) {
+func callMCPWebSearchURL(ctx context.Context, account *config.Account, rawURL string, body []byte, query string) (results *webSearchResults, err error) {
+	startedAt := time.Now()
+	statusCode := 0
+	host := ""
+	if parsed, parseErr := url.Parse(rawURL); parseErr == nil {
+		host = parsed.Host
+	}
+	defer func() {
+		status := "success"
+		if err != nil {
+			status = "error"
+		}
+		accountID := ""
+		accountEmail := ""
+		if account != nil {
+			accountID = account.ID
+			accountEmail = account.Email
+		}
+		requestDetailTraceFromContext(ctx).recordAttempt(accountID, accountEmail, "Kiro MCP WebSearch", host, startedAt, statusCode, status, err, requestDetailRetryReason(err))
+	}()
 	req, err := http.NewRequestWithContext(ctx, "POST", rawURL, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Connection", "close")
-	host := ""
-	if parsed, parseErr := url.Parse(rawURL); parseErr == nil {
-		host = parsed.Host
-	}
 	applyKiroBaseHeaders(req, account, buildRuntimeHeaderValues(account, host))
 	req.Header.Set("Amz-Sdk-Request", "attempt=1; max=3")
 	req.Header.Set("Amz-Sdk-Invocation-Id", uuid.New().String())
@@ -363,6 +397,7 @@ func callMCPWebSearchURL(ctx context.Context, account *config.Account, rawURL st
 		return nil, classifyTransportError("Kiro MCP WebSearch", err)
 	}
 	defer resp.Body.Close()
+	statusCode = resp.StatusCode
 	respBody, readErr := httpbody.ReadAll(resp.Body, httpbody.DefaultLimit)
 	if readErr != nil {
 		return nil, fmt.Errorf("web search response: %w", readErr)

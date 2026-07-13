@@ -19,13 +19,13 @@ Kiro-Go Plus preserves Kiro-Go's API and deployment compatibility while adding p
 - Upstream routing: Kiro Runtime as the primary path with legacy Kiro / CodeWhisperer / Amazon Q fallback
 - Multi-account scheduling: weighted, priority, and balanced modes; per-account concurrency, sticky routing, and failover
 - Refresh coordination: deduplication, bounded queues, timeouts, jitter, and adaptive batches for tens or hundreds of accounts
-- Failure protection: first-output timeout, actionable-output and required-tool validation, pre-commit tool-stream retries, live streaming after commit, truncation checks, endpoint circuits, cooldowns, and bounded retries
+- Failure protection: first-output timeout, actionable-output and required-tool validation, selectable live/safe-buffered tool streams, truncation checks, endpoint circuits, cooldowns, and bounded retries
 - Token controls: bounded enabled/adaptive thinking, configurable default thinking/output/context budgets, and client-value precedence
 - Streaming validation: AWS EventStream length and CRC validation, idle timeout, and truncated-response detection
 - Authentication: Builder ID, IAM Identity Center, Kiro hosted SSO, Microsoft 365 / Entra ID, SSO Token, API key, and JSON import
 - Prompt Cache accounting: configurable creation/read ranges, 5m/1h TTLs, sharded LRU, API-key isolation, and statistics
 - Extensions: dynamic model discovery, Web Search, external token counting, and Responses history
-- Operations: request logs, diagnostic events, webhook alerts, `/health`, `/ready`, and persisted runtime state
+- Operations: persisted request metadata, optional complete logs with sanitized request/output, retries and stream timing, diagnostic events, webhook alerts, `/health`, and `/ready`
 - Networking: global and per-account HTTP / SOCKS5 proxies
 
 Prompt Cache simulates and reports Anthropic cache usage. It does not cache model response bodies.
@@ -41,11 +41,13 @@ Open `/admin` to manage:
 - Load balancing, retries, timeouts, circuits, and upstream protection
 - Token/model refresh intervals, concurrency, and batch sizes
 - Prompt Cache creation/read ranges, TTL, capacity, and isolation
-- Web Search, token counting, Responses storage, diagnostics, and alerts
-- Claude Agent tool enforcement, thinking/output/context token defaults, response formats, and buffered validation
+- Web Search, token counting, Responses storage, diagnostics, complete request logging, and alerts
+- Claude Agent tool enforcement, thinking/output/context token defaults, response formats, and live/safe-buffered stream modes
 - API keys, quotas, admin password, listener settings, and client fingerprints
 
 Settings apply immediately unless the panel explicitly reports that a process restart is required.
+
+Complete request logging is disabled by default. When enabled, it captures inference routes only and writes bounded details to `data/request_details.json` with mode `0600` and a 64 MiB total cap. Authorization headers and credentials are excluded; image/document Base64 and tool arguments are represented only by type, byte count, and SHA-256. Prompts and model output are still sensitive, so enable this mode only while diagnosing issues and clear it afterward.
 
 ## Quick Start
 
@@ -140,7 +142,22 @@ KIRO_PROFILE_REGIONS=us-east-1,eu-central-1
 
 ## Updating an Existing Compose Deployment
 
-Run from the extracted new project directory:
+When the production directory is a clean GitHub checkout, run the self-updater from that directory:
+
+```bash
+cd /path/to/Kiro-Go-Plus
+bash scripts/update-sudo.sh
+```
+
+Git runs as the current user; only Docker/Compose commands use `sudo`. The script backs up `.env`, `data/config.json`, runtime state, and the master key, then fast-forwards the checkout, rebuilds, restarts, and checks `/health`. Build or health failures restore the previous commit and rebuild the previous container. Do not run the whole command through `sudo`, because the script deliberately rejects that mode to avoid root-owned Git files.
+
+Optional overrides:
+
+```bash
+bash scripts/update-sudo.sh --branch main --service kiro-go --health-timeout 180
+```
+
+For an extracted archive or a separate new-version directory, use the migration updater instead:
 
 ```bash
 ./scripts/update-docker-compose.sh --target /path/to/old/project --yes

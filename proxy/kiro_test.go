@@ -115,6 +115,44 @@ func TestParseEventStreamHandlesSeparateToolFramesAndStopEvent(t *testing.T) {
 	}
 }
 
+func TestParseEventStreamWaitsForRealToolIDBeforeStreaming(t *testing.T) {
+	stream := bytes.NewReader(bytes.Join([][]byte{
+		awsEventStreamFrame(t, "toolUseStartEvent", map[string]interface{}{
+			"name":  "Write",
+			"input": `{"content":"first`,
+		}),
+		awsEventStreamFrame(t, "toolUseEvent", map[string]interface{}{
+			"toolUseId": "toolu_upstream",
+			"name":      "Write",
+			"input":     ` second"}`,
+			"stop":      true,
+		}),
+	}, nil))
+
+	var callbackIDs []string
+	var toolUse KiroToolUse
+	err := parseEventStream(stream, &KiroStreamCallback{
+		OnToolUseStart: func(toolUseID, _ string) { callbackIDs = append(callbackIDs, toolUseID) },
+		OnToolUseDelta: func(toolUseID, _ string) { callbackIDs = append(callbackIDs, toolUseID) },
+		OnToolUseStop:  func(toolUseID string) { callbackIDs = append(callbackIDs, toolUseID) },
+		OnToolUse:      func(value KiroToolUse) { toolUse = value },
+	})
+	if err != nil {
+		t.Fatalf("parse generated tool id stream: %v", err)
+	}
+	if len(callbackIDs) != 4 {
+		t.Fatalf("callback id count = %d, want 4: %#v", len(callbackIDs), callbackIDs)
+	}
+	for _, id := range callbackIDs {
+		if id != "toolu_upstream" {
+			t.Fatalf("tool id changed during stream: %#v", callbackIDs)
+		}
+	}
+	if toolUse.ToolUseID != "toolu_upstream" || toolUse.Input["content"] != "first second" {
+		t.Fatalf("unexpected completed tool use: %#v callbackIDs=%#v", toolUse, callbackIDs)
+	}
+}
+
 func TestParseEventStreamRecoversCompleteToolOnCompletionSignal(t *testing.T) {
 	stream := bytes.NewReader(bytes.Join([][]byte{
 		awsEventStreamFrame(t, "toolUseEvent", map[string]interface{}{

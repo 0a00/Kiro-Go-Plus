@@ -47,4 +47,7 @@ func TestToolAssemblyMonitorStopsAfterCompleteTool(t *testing.T) {
 	if snapshot, ok := monitor.TimedOut(); ok {
 		t.Fatalf("completed tool retained timeout: %+v", snapshot)
 	}
+	if elapsed, ok := monitor.MaxElapsed(); !ok || elapsed <= 0 {
+		t.Fatalf("completed tool assembly duration was not retained: elapsed=%s ok=%v", elapsed, ok)
+	}
 }

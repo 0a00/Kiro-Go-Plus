@@ -212,11 +212,79 @@ type KiroPayload struct {
 	requireToolUse          bool
 	deferTextUntilComplete  bool
 	streamThinkingPrecommit bool
+	streamToolUseDeltas     bool
 	toolUsePolicy           string
 	tokenRefreshMu          sync.Mutex
 	tokenRefreshAttempts    map[string]int
+	streamMetricsMu         sync.Mutex
+	streamMetricsEnabled    bool
+	streamMetricsStartedAt  time.Time
+	firstUpstreamActivityMs int64
+	maxToolAssemblyMs       int64
 	runtimeMu               sync.RWMutex
 	selectedEndpoint        string
+}
+
+func (p *KiroPayload) beginStreamMetrics(startedAt time.Time) {
+	if p == nil {
+		return
+	}
+	p.streamMetricsMu.Lock()
+	p.streamMetricsEnabled = true
+	p.streamMetricsStartedAt = startedAt
+	p.firstUpstreamActivityMs = -1
+	p.maxToolAssemblyMs = -1
+	p.streamMetricsMu.Unlock()
+}
+
+func (p *KiroPayload) recordUpstreamActivity() {
+	if p == nil {
+		return
+	}
+	p.streamMetricsMu.Lock()
+	if p.streamMetricsEnabled && p.firstUpstreamActivityMs < 0 && !p.streamMetricsStartedAt.IsZero() {
+		elapsed := time.Since(p.streamMetricsStartedAt).Milliseconds()
+		if elapsed < 0 {
+			elapsed = 0
+		}
+		p.firstUpstreamActivityMs = elapsed
+	}
+	p.streamMetricsMu.Unlock()
+}
+
+func (p *KiroPayload) recordToolAssembly(elapsed time.Duration) {
+	if p == nil {
+		return
+	}
+	ms := elapsed.Milliseconds()
+	if ms < 0 {
+		ms = 0
+	}
+	p.streamMetricsMu.Lock()
+	if p.streamMetricsEnabled && ms > p.maxToolAssemblyMs {
+		p.maxToolAssemblyMs = ms
+	}
+	p.streamMetricsMu.Unlock()
+}
+
+func (p *KiroPayload) streamMetrics() (firstUpstreamActivityMs, maxToolAssemblyMs *int64) {
+	if p == nil {
+		return nil, nil
+	}
+	p.streamMetricsMu.Lock()
+	defer p.streamMetricsMu.Unlock()
+	if !p.streamMetricsEnabled {
+		return nil, nil
+	}
+	if p.firstUpstreamActivityMs >= 0 {
+		value := p.firstUpstreamActivityMs
+		firstUpstreamActivityMs = &value
+	}
+	if p.maxToolAssemblyMs >= 0 {
+		value := p.maxToolAssemblyMs
+		maxToolAssemblyMs = &value
+	}
+	return firstUpstreamActivityMs, maxToolAssemblyMs
 }
 
 func (p *KiroPayload) setSuccessfulEndpoint(endpoint string) {
@@ -330,18 +398,21 @@ type InferenceConfig struct {
 
 // KiroStreamCallback stream response callbacks
 type KiroStreamCallback struct {
-	OnText         func(text string, isThinking bool)
-	OnToolUse      func(toolUse KiroToolUse)
-	OnToolUseStart func(toolUseID, name string)
-	OnToolUseDelta func(toolUseID, input string)
-	OnToolUseStop  func(toolUseID string)
-	OnProgress     func()
-	OnComplete     func(inputTokens, outputTokens int)
-	OnUsage        func(usage KiroTokenUsage)
-	OnTruncated    func(reason string)
-	OnError        func(err error)
-	OnCredits      func(credits float64)
-	OnContextUsage func(percentage float64)
+	OnText            func(text string, isThinking bool)
+	OnToolUse         func(toolUse KiroToolUse)
+	OnToolUseActivity func()
+	OnToolUseStart    func(toolUseID, name string)
+	OnToolUseDelta    func(toolUseID, input string)
+	OnToolUseStop     func(toolUseID string)
+	OnProgress        func()
+	OnComplete        func(inputTokens, outputTokens int)
+	OnUsage           func(usage KiroTokenUsage)
+	OnTruncated       func(reason string)
+	OnError           func(err error)
+	OnCredits         func(credits float64)
+	OnContextUsage    func(percentage float64)
+	detailTrace       *requestDetailTrace
+	detailToolNameMap map[string]string
 }
 
 // KiroTokenUsage preserves upstream cache accounting when the event stream
@@ -426,6 +497,16 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 	if _, err := json.Marshal(payload); err != nil {
 		return err
 	}
+	detailTrace := requestDetailTraceFromContext(requestContext)
+	if detailTrace != nil {
+		if callback == nil {
+			callback = &KiroStreamCallback{}
+		}
+		observed := *callback
+		observed.detailTrace = detailTrace
+		observed.detailToolNameMap = payload.ToolNameMap
+		callback = &observed
+	}
 
 	// Keep request diagnostics useful without writing prompts, tool arguments or
 	// image content to logs.
@@ -469,8 +550,10 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 	preferredEndpoint := config.GetPreferredEndpoint()
 	endpoints := getSortedEndpoints(preferredEndpoint)
 	accountID := ""
+	accountEmail := ""
 	if account != nil {
 		accountID = account.ID
+		accountEmail = account.Email
 	}
 	modelKey := endpointRouteModel(payload)
 	var routeErr error
@@ -532,6 +615,7 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 	}
 
 	for _, ep := range endpoints {
+		attemptStartedAt := time.Now()
 		if err := requestContext.Err(); err != nil {
 			return classifyRequestCancellation(ep.Name, err)
 		}
@@ -543,6 +627,7 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 				RetryAcrossEndpoints: true,
 				RetryAcrossAccounts:  true,
 			}
+			detailTrace.recordAttempt(accountID, accountEmail, ep.Name, "", attemptStartedAt, 0, "skipped", lastErr, requestDetailRetryReason(lastErr))
 			continue
 		}
 		// Update the origin field for the selected endpoint.
@@ -564,12 +649,14 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 				RetryAcrossEndpoints: true,
 				RetryAcrossAccounts:  true,
 			}
+			detailTrace.recordAttempt(accountID, accountEmail, ep.Name, endpointHost, attemptStartedAt, 0, "skipped", lastErr, requestDetailRetryReason(lastErr))
 			continue
 		}
-		attemptStartedAt := time.Now()
 		if payload != nil && !payload.attemptBudget.take() {
 			sharedUpstreamHealth.releaseEndpoint(endpointCircuitKey)
-			return newRetryBudgetError(payload.attemptBudget)
+			lastErr = newRetryBudgetError(payload.attemptBudget)
+			detailTrace.recordAttempt(accountID, accountEmail, ep.Name, endpointHost, attemptStartedAt, 0, "rejected", lastErr, requestDetailRetryReason(lastErr))
+			return lastErr
 		}
 		upstreamContext := requestContext
 		var cancelRequest context.CancelFunc
@@ -589,6 +676,7 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 			if payload != nil {
 				payload.attemptBudget.recordFailure(ep.Name, lastErr)
 			}
+			detailTrace.recordAttempt(accountID, accountEmail, ep.Name, endpointHost, attemptStartedAt, 0, "error", lastErr, requestDetailRetryReason(lastErr))
 			continue
 		}
 
@@ -623,6 +711,9 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 			if firstTokenTimer != nil {
 				firstTokenTimer.Stop()
 			}
+			if payload != nil {
+				payload.recordUpstreamActivity()
+			}
 		}, payload != nil && payload.requireActionableOutput, payload != nil && payload.requireToolUse, payload != nil && payload.deferTextUntilComplete, payload != nil && payload.streamThinkingPrecommit)
 		toolAssemblyTimeout := time.Duration(config.GetRetryConfig().ToolAssemblyTimeoutSeconds) * time.Second
 		wrappedCallback, toolMonitor := wrapToolAssemblyMonitor(wrappedCallback, toolAssemblyTimeout, func(toolAssemblySnapshot) {
@@ -637,7 +728,7 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 
 		resp, err := client.Do(req)
 		if err != nil {
-			toolMonitor.Stop()
+			stopAndRecordToolAssembly(payload, toolMonitor)
 			if firstTokenTimer != nil {
 				firstTokenTimer.Stop()
 			}
@@ -645,9 +736,12 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 			if firstTokenTimedOut.Load() {
 				err = context.DeadlineExceeded
 			} else if requestContext.Err() != nil {
-				return classifyRequestCancellation(ep.Name, requestContext.Err())
+				lastErr = classifyRequestCancellation(ep.Name, requestContext.Err())
+				detailTrace.recordAttempt(accountID, accountEmail, ep.Name, endpointHost, attemptStartedAt, 0, "canceled", lastErr, requestDetailRetryReason(lastErr))
+				return lastErr
 			}
 			lastErr = classifyTransportError(ep.Name, err)
+			detailTrace.recordAttempt(accountID, accountEmail, ep.Name, endpointHost, attemptStartedAt, 0, "error", lastErr, requestDetailRetryReason(lastErr))
 			if payload != nil {
 				payload.attemptBudget.recordFailure(ep.Name, lastErr)
 			}
@@ -669,7 +763,7 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 		proxyTransportSucceeded = true
 
 		if resp.StatusCode != 200 {
-			toolMonitor.Stop()
+			stopAndRecordToolAssembly(payload, toolMonitor)
 			errBody := httpbody.ReadAllTruncated(resp.Body, httpbody.DefaultLimit)
 			resp.Body.Close()
 			if firstTokenTimer != nil {
@@ -679,6 +773,7 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 			classifiedErr := classifyUpstreamHTTPError(resp.StatusCode, ep.Name, errBody)
 			classifiedErr.RetryAfter = parseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
 			lastErr = classifiedErr
+			detailTrace.recordAttempt(accountID, accountEmail, ep.Name, endpointHost, attemptStartedAt, resp.StatusCode, "http_error", lastErr, requestDetailRetryReason(lastErr))
 			if payload != nil {
 				payload.attemptBudget.recordFailure(ep.Name, lastErr)
 			}
@@ -715,18 +810,26 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 		err = parseEventStream(idleReader, wrappedCallback)
 		idleReader.Stop()
 		resp.Body.Close()
-		toolMonitor.Stop()
+		stopAndRecordToolAssembly(payload, toolMonitor)
 		if firstTokenTimer != nil {
 			firstTokenTimer.Stop()
 		}
 		cancelRequest()
+		if err == nil && meaningfulGate.hasInvalidCommittedToolUse() {
+			err = &EventStreamError{
+				Kind:    EventStreamInvalidPayload,
+				Message: "tool use arguments are not valid JSON",
+			}
+		}
 		if err != nil {
 			if toolSnapshot, timedOut := toolMonitor.TimedOut(); timedOut {
 				err = newToolAssemblyTimeoutError(ep.Name, toolSnapshot.Name, toolSnapshot.ArgumentBytes, toolAssemblyTimeout)
 			}
 			if requestContext.Err() != nil && !firstTokenTimedOut.Load() {
 				sharedUpstreamHealth.releaseEndpoint(endpointCircuitKey)
-				return classifyRequestCancellation(ep.Name, requestContext.Err())
+				lastErr = classifyRequestCancellation(ep.Name, requestContext.Err())
+				detailTrace.recordAttempt(accountID, accountEmail, ep.Name, endpointHost, attemptStartedAt, http.StatusOK, "canceled", lastErr, requestDetailRetryReason(lastErr))
+				return lastErr
 			}
 			if streamIdleTimedOut.Load() {
 				err = classifyTransportError(ep.Name, context.DeadlineExceeded)
@@ -736,6 +839,11 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 				err = classifyTransportError(ep.Name, err)
 			}
 			lastErr = err
+			attemptStatus := "stream_error"
+			if meaningfulGate.hasActionableOutput() {
+				attemptStatus = "partial_stream_error"
+			}
+			detailTrace.recordAttempt(accountID, accountEmail, ep.Name, endpointHost, attemptStartedAt, http.StatusOK, attemptStatus, lastErr, requestDetailRetryReason(lastErr))
 			if payload != nil {
 				payload.attemptBudget.recordFailure(ep.Name, lastErr)
 			}
@@ -762,6 +870,7 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 			if payload != nil {
 				payload.attemptBudget.recordFailure(ep.Name, lastErr)
 			}
+			detailTrace.recordAttempt(accountID, accountEmail, ep.Name, endpointHost, attemptStartedAt, http.StatusOK, "empty_response", lastErr, requestDetailRetryReason(lastErr))
 			lastCircuitError = lastErr
 			sharedUpstreamHealth.endpointFailure(endpointCircuitKey, lastErr, time.Since(attemptStartedAt))
 			if retry {
@@ -772,6 +881,7 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 		sharedUpstreamHealth.endpointSuccess(endpointCircuitKey, time.Since(attemptStartedAt))
 		sharedAccountEndpointRoutes.recordSuccess(accountID, modelKey, ep)
 		payload.setSuccessfulEndpoint(ep.Name)
+		detailTrace.recordAttempt(accountID, accountEmail, ep.Name, endpointHost, attemptStartedAt, http.StatusOK, "success", nil, "")
 		return nil
 	}
 
@@ -1212,10 +1322,11 @@ func readTokenNumber(m map[string]interface{}, keys ...string) (int, bool) {
 // ==================== Tool Use Handling ====================
 
 type toolUseState struct {
-	ToolUseID   string
-	Name        string
-	InputBuffer strings.Builder
-	GeneratedID bool
+	ToolUseID     string
+	Name          string
+	InputBuffer   strings.Builder
+	GeneratedID   bool
+	StreamStarted bool
 }
 
 var toolUseEventTypeNormalizer = strings.NewReplacer("_", "", "-", "", ".", "")
@@ -1272,7 +1383,11 @@ func handleToolUseEvent(event map[string]interface{}, current *toolUseState, cal
 			Message: fmt.Sprintf("tool %q was replaced by %q before its stop marker", current.Name, name),
 		}
 	}
-	if current != nil && toolUseID != "" && current.ToolUseID != "" && current.ToolUseID != toolUseID {
+	if current != nil && toolUseID != "" && current.GeneratedID {
+		current.ToolUseID = toolUseID
+		current.GeneratedID = false
+	}
+	if current != nil && toolUseID != "" && !current.GeneratedID && current.ToolUseID != "" && current.ToolUseID != toolUseID {
 		return nil, &EventStreamError{
 			Kind:    EventStreamIncompleteToolUse,
 			Message: fmt.Sprintf("tool %q received input for unexpected id %q", current.Name, toolUseID),
@@ -1287,21 +1402,34 @@ func handleToolUseEvent(event map[string]interface{}, current *toolUseState, cal
 			Message: "toolUseEvent is missing a tool name",
 		}
 	}
-	if created && callback != nil && callback.OnToolUseStart != nil {
-		callback.OnToolUseStart(current.ToolUseID, current.Name)
+	if created && current.GeneratedID && callback != nil && callback.OnToolUseActivity != nil {
+		callback.OnToolUseActivity()
+	}
+	if (created || !current.StreamStarted) && !current.GeneratedID {
+		startToolUseStream(current, callback)
 	}
 
 	if input, ok := event["input"].(string); ok {
 		current.InputBuffer.WriteString(input)
 		if input != "" && callback != nil && callback.OnToolUseDelta != nil {
-			callback.OnToolUseDelta(current.ToolUseID, input)
+			if current.StreamStarted {
+				callback.OnToolUseDelta(current.ToolUseID, input)
+			}
+		}
+		if input != "" && !current.StreamStarted && callback != nil && callback.OnToolUseActivity != nil {
+			callback.OnToolUseActivity()
 		}
 	} else if inputObj, ok := event["input"].(map[string]interface{}); ok && len(inputObj) > 0 {
 		data, _ := json.Marshal(inputObj)
 		current.InputBuffer.Reset()
 		current.InputBuffer.Write(data)
 		if callback != nil && callback.OnToolUseDelta != nil {
-			callback.OnToolUseDelta(current.ToolUseID, string(data))
+			if current.StreamStarted {
+				callback.OnToolUseDelta(current.ToolUseID, string(data))
+			}
+		}
+		if !current.StreamStarted && callback != nil && callback.OnToolUseActivity != nil {
+			callback.OnToolUseActivity()
 		}
 	}
 
@@ -1315,6 +1443,19 @@ func handleToolUseEvent(event map[string]interface{}, current *toolUseState, cal
 	return current, nil
 }
 
+func startToolUseStream(state *toolUseState, callback *KiroStreamCallback) {
+	if state == nil || state.StreamStarted {
+		return
+	}
+	state.StreamStarted = true
+	if callback != nil && callback.OnToolUseStart != nil {
+		callback.OnToolUseStart(state.ToolUseID, state.Name)
+	}
+	if state.InputBuffer.Len() > 0 && callback != nil && callback.OnToolUseDelta != nil {
+		callback.OnToolUseDelta(state.ToolUseID, state.InputBuffer.String())
+	}
+}
+
 func finishToolUse(state *toolUseState, callback *KiroStreamCallback) error {
 	if state == nil || state.Name == "" {
 		return nil
@@ -1322,6 +1463,7 @@ func finishToolUse(state *toolUseState, callback *KiroStreamCallback) error {
 	if state.ToolUseID == "" {
 		state.ToolUseID = "toolu_" + uuid.New().String()
 	}
+	startToolUseStream(state, callback)
 	if callback != nil && callback.OnToolUseStop != nil {
 		callback.OnToolUseStop(state.ToolUseID)
 	}

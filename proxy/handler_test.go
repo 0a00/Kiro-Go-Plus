@@ -525,10 +525,13 @@ func TestClaudeStreamReportsRealInputTokensAtCompletion(t *testing.T) {
 	}
 }
 
-func TestClaudeToolStreamCommitsBeforeUpstreamCompletes(t *testing.T) {
+func TestClaudeLiveModeCommitsInferredTextBeforeUpstreamCompletes(t *testing.T) {
 	t.Setenv("ALLOW_UNAUTHENTICATED_API", "true")
 	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatalf("config.Init: %v", err)
+	}
+	if err := config.UpdateThinkingConfig("-thinking", "reasoning_content", "thinking", 4000, 10000, 0, 0, false, true); err != nil {
+		t.Fatalf("enable live tool streams: %v", err)
 	}
 	if err := config.AddAccount(config.Account{
 		ID:          "stream-account",
@@ -587,7 +590,7 @@ func TestClaudeToolStreamCommitsBeforeUpstreamCompletes(t *testing.T) {
 	req, err := http.NewRequest(http.MethodPost, server.URL+"/v1/messages", strings.NewReader(`{
 		"model":"claude-sonnet-4.5",
 		"stream":true,
-		"messages":[{"role":"user","content":"stream this"}],
+		"messages":[{"role":"user","content":"任务目标：请创建一个 HTML 文件并写入工作区。"}],
 		"tools":[{"name":"Write","description":"write a file","input_schema":{"type":"object","properties":{"content":{"type":"string"}}}}]
 	}`))
 	if err != nil {
@@ -624,6 +627,183 @@ func TestClaudeToolStreamCommitsBeforeUpstreamCompletes(t *testing.T) {
 	}
 	if !strings.Contains(string(rest), "second chunk") || !strings.Contains(string(rest), "message_stop") {
 		t.Fatalf("remaining stream is incomplete: %s", rest)
+	}
+}
+
+func TestClaudeLiveToolStreamEmitsArgumentDeltasBeforeCompletion(t *testing.T) {
+	t.Setenv("ALLOW_UNAUTHENTICATED_API", "true")
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	if err := config.UpdateThinkingConfig("-thinking", "reasoning_content", "thinking", 4000, 10000, 0, 0, false, true); err != nil {
+		t.Fatalf("enable live tool streams: %v", err)
+	}
+	if err := config.AddAccount(config.Account{
+		ID: "live-tool-account", Enabled: true, AccessToken: "token-live-tool", ProfileArn: "arn:aws:codewhisperer:profile/live-tool",
+	}); err != nil {
+		t.Fatalf("add account: %v", err)
+	}
+	if err := config.UpdatePreferredEndpoint("kiro"); err != nil {
+		t.Fatalf("set preferred endpoint: %v", err)
+	}
+	if err := config.UpdateEndpointFallback(false); err != nil {
+		t.Fatalf("disable endpoint fallback: %v", err)
+	}
+
+	releaseUpstream := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseUpstream) }) }
+	defer release()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(awsEventStreamFrame(t, "toolUseStartEvent", map[string]interface{}{
+			"toolUseId": "toolu_live",
+			"name":      "Write",
+		}))
+		_, _ = w.Write(awsEventStreamFrame(t, "toolUseInputEvent", map[string]interface{}{
+			"input": `{"file_path":"index.html","content":"first-live-fragment`,
+		}))
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		select {
+		case <-releaseUpstream:
+		case <-r.Context().Done():
+			return
+		}
+		_, _ = w.Write(awsEventStreamFrame(t, "toolUseInputEvent", map[string]interface{}{
+			"input": ` second-live-fragment"}`,
+		}))
+		_, _ = w.Write(awsEventStreamFrame(t, "toolUseStopEvent", map[string]interface{}{}))
+		_, _ = w.Write(awsEventStreamFrame(t, "contextUsageEvent", map[string]interface{}{
+			"contextUsagePercentage": 1.0,
+		}))
+	}))
+	defer upstream.Close()
+	defer swapKiroEndpointsForTest(t, upstream)()
+
+	p := accountpool.GetPool()
+	p.Reload()
+	h := &Handler{pool: p, promptCache: newPromptCacheTracker(defaultPromptCacheTTL), requestLog: newRequestLog(defaultRequestLogLimit)}
+	server := httptest.NewServer(h)
+	defer server.Close()
+
+	req, err := http.NewRequest(http.MethodPost, server.URL+"/v1/messages", strings.NewReader(`{
+		"model":"claude-sonnet-4.5",
+		"stream":true,
+		"messages":[{"role":"user","content":"任务目标：请创建一个 HTML 文件并写入工作区。"}],
+		"tools":[{"name":"Write","description":"write a file","input_schema":{"type":"object","properties":{"file_path":{"type":"string"},"content":{"type":"string"}}}}]
+	}`))
+	if err != nil {
+		t.Fatalf("create request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := (&http.Client{Timeout: 3 * time.Second}).Do(req)
+	if err != nil {
+		t.Fatalf("start streamed request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	reader := bufio.NewReader(resp.Body)
+	var first strings.Builder
+	for !strings.Contains(first.String(), "first-live-fragment") {
+		line, readErr := reader.ReadString('\n')
+		if readErr != nil {
+			t.Fatalf("read first tool delta: %v body=%s", readErr, first.String())
+		}
+		first.WriteString(line)
+	}
+	if strings.Contains(first.String(), "second-live-fragment") || strings.Contains(first.String(), "message_stop") {
+		t.Fatalf("tool stream completed before first argument delta was observed: %s", first.String())
+	}
+
+	time.Sleep(40 * time.Millisecond)
+	release()
+	rest, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("read remaining tool stream: %v", err)
+	}
+	full := first.String() + string(rest)
+	if !strings.Contains(full, "second-live-fragment") || !strings.Contains(full, "message_stop") {
+		t.Fatalf("remaining tool stream is incomplete: %s", full)
+	}
+	if strings.Count(full, "event: content_block_start") != 1 || strings.Count(full, `"type":"input_json_delta"`) != 2 || strings.Count(full, "event: content_block_stop") != 1 {
+		t.Fatalf("tool stream emitted duplicate or missing blocks: %s", full)
+	}
+	entries := h.requestLog.list(1)
+	if len(entries) != 1 || entries[0].FirstContentMs == nil || *entries[0].FirstContentMs >= entries[0].DurationMs {
+		t.Fatalf("live tool latency was not captured before completion: %+v", entries)
+	}
+	if entries[0].UpstreamFirstActivityMs == nil || *entries[0].UpstreamFirstActivityMs > *entries[0].FirstContentMs {
+		t.Fatalf("upstream activity latency is missing or later than downstream content: %+v", entries[0])
+	}
+	if entries[0].ToolAssemblyMs == nil || *entries[0].ToolAssemblyMs < 30 {
+		t.Fatalf("tool assembly duration was not captured: %+v", entries[0])
+	}
+}
+
+func TestClaudeLiveThinkingDoesNotRetryAfterDownstreamCommit(t *testing.T) {
+	t.Setenv("ALLOW_UNAUTHENTICATED_API", "true")
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	if err := config.UpdateThinkingConfig("-thinking", "reasoning_content", "thinking", 4000, 10000, 0, 0, false, true); err != nil {
+		t.Fatalf("enable live tool streams: %v", err)
+	}
+	for _, account := range []config.Account{
+		{ID: "live-failure-first", Enabled: true, AccessToken: "token-live-first", ProfileArn: "arn:aws:codewhisperer:profile/live-first"},
+		{ID: "live-failure-second", Enabled: true, AccessToken: "token-live-second", ProfileArn: "arn:aws:codewhisperer:profile/live-second"},
+	} {
+		if err := config.AddAccount(account); err != nil {
+			t.Fatalf("add account %s: %v", account.ID, err)
+		}
+	}
+	if err := config.UpdatePreferredEndpoint("kiro"); err != nil {
+		t.Fatalf("set preferred endpoint: %v", err)
+	}
+	if err := config.UpdateEndpointFallback(false); err != nil {
+		t.Fatalf("disable endpoint fallback: %v", err)
+	}
+
+	upstreamCalls := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalls++
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(awsEventStreamFrame(t, "reasoningContentEvent", map[string]interface{}{
+			"text": "committed-live-reasoning",
+		}))
+		_, _ = w.Write([]byte{0x00, 0x01, 0x02})
+	}))
+	defer upstream.Close()
+	defer swapKiroEndpointsForTest(t, upstream)()
+
+	p := accountpool.GetPool()
+	p.Reload()
+	h := &Handler{pool: p, promptCache: newPromptCacheTracker(defaultPromptCacheTTL), requestLog: newRequestLog(defaultRequestLogLimit)}
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{
+		"model":"claude-sonnet-4.5",
+		"stream":true,
+		"max_tokens":2048,
+		"thinking":{"type":"enabled","budget_tokens":1024},
+		"messages":[{"role":"user","content":"任务目标：请创建一个 HTML 文件并写入工作区。"}],
+		"tools":[{"name":"Write","description":"write a file","input_schema":{"type":"object","properties":{"content":{"type":"string"}}}}]
+	}`))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if upstreamCalls != 1 {
+		t.Fatalf("live stream retried after downstream commit: calls=%d body=%s", upstreamCalls, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "committed-live-reasoning") || !strings.Contains(body, "event: error") {
+		t.Fatalf("partial live stream did not end with an SSE error: %s", body)
+	}
+	if strings.Contains(body, "event: message_stop") {
+		t.Fatalf("failed live stream incorrectly reported normal completion: %s", body)
+	}
+	entries := h.requestLog.list(1)
+	if len(entries) != 1 || entries[0].Status != "failed" || entries[0].FirstContentMs == nil {
+		t.Fatalf("failed live stream diagnostics are incomplete: %+v", entries)
 	}
 }
 

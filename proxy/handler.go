@@ -101,6 +101,8 @@ type Handler struct {
 	modelsRefreshing     atomic.Bool
 	promptCache          *promptCacheTracker
 	requestLog           *requestLog
+	requestDetailsMu     sync.Mutex
+	requestDetails       *requestDetailStore
 	diagnosticLog        *diagnosticLog
 	alerts               *healthAlertManager
 	autoRefreshMu        sync.Mutex
@@ -338,6 +340,10 @@ func NewHandler() *Handler {
 	if requestLogErr != nil {
 		logger.Warnf("[RequestLog] Failed to restore persisted request log: %v", requestLogErr)
 	}
+	requestDetails, requestDetailsErr := newPersistentRequestDetailStore(requestLogCfg.DetailedMaxEntries, requestLogCfg.MaxDetailBytes, requestDetailPath())
+	if requestDetailsErr != nil {
+		logger.Warnf("[RequestDetail] Failed to restore persisted request details: %v", requestDetailsErr)
+	}
 	backgroundCtx, backgroundCancel := context.WithCancel(context.Background())
 	h := &Handler{
 		pool:             pool.GetPool(),
@@ -350,6 +356,7 @@ func NewHandler() *Handler {
 		promptCache:      promptCache,
 		modelsByAccount:  make(map[string][]ModelInfo),
 		requestLog:       requestLog,
+		requestDetails:   requestDetails,
 		diagnosticLog:    newDiagnosticLog(config.GetDiagnosticConfig().MaxEntries),
 		alerts:           newHealthAlertManager(),
 		autoRefreshFail:  pool.GetPool().RefreshFailureCooldowns(),
@@ -1701,6 +1708,7 @@ func (h *Handler) handleCountTokens(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	startedAt := time.Now()
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		h.sendClaudeError(w, requestBodyErrorStatus(err), "invalid_request_error", "Failed to read request body")
@@ -1712,6 +1720,9 @@ func (h *Handler) handleCountTokens(w http.ResponseWriter, r *http.Request) {
 		h.sendClaudeError(w, 400, "invalid_request_error", "Invalid JSON")
 		return
 	}
+	r = h.attachRequestDetailTrace(r, "claude.count_tokens", body)
+	w, detailStatus := wrapRequestDetailResponseWriter(w, r.Context())
+	defer h.finalizeUnrecordedRequestDetail(r.Context(), detailStatus, startedAt, "claude.count_tokens", req.Model)
 	thinkingCfg := config.GetThinkingConfig()
 	_ = applyClaudeTokenBudgetDefaults(&req)
 	if msg := validateClaudeThinkingConfig(req.Thinking, req.MaxTokens); msg != "" {
@@ -1734,7 +1745,22 @@ func (h *Handler) handleCountTokens(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	json.NewEncoder(w).Encode(map[string]int{"input_tokens": estimatedTokens})
+	if err := json.NewEncoder(w).Encode(map[string]int{"input_tokens": estimatedTokens}); err != nil {
+		return
+	}
+	if trace := requestDetailTraceFromContext(r.Context()); trace != nil {
+		trace.recordComplete(estimatedTokens, 0)
+	}
+	h.recordRequestLogForContext(r.Context(), requestLogEntry{
+		Timestamp:    time.Now().Unix(),
+		Protocol:     "claude.count_tokens",
+		Model:        req.Model,
+		Status:       "success",
+		StatusCode:   http.StatusOK,
+		DurationMs:   requestDurationMs(startedAt),
+		InputTokens:  estimatedTokens,
+		OutputTokens: 0,
+	})
 }
 
 // handleClaudeMessages Claude API 处理
@@ -1744,6 +1770,7 @@ func (h *Handler) handleClaudeMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	startedAt := time.Now()
 	// 读取请求
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -1756,6 +1783,15 @@ func (h *Handler) handleClaudeMessages(w http.ResponseWriter, r *http.Request) {
 		h.sendClaudeError(w, 400, "invalid_request_error", "Invalid JSON: "+err.Error())
 		return
 	}
+	r = h.attachRequestDetailTrace(r, "claude.messages", body)
+	w, detailStatus := wrapRequestDetailResponseWriter(w, r.Context())
+	defer func() {
+		protocol := "claude.messages"
+		if req.Stream {
+			protocol += ".stream"
+		}
+		h.finalizeUnrecordedRequestDetail(r.Context(), detailStatus, startedAt, protocol, req.Model)
+	}()
 	thinkingCfg := config.GetThinkingConfig()
 	contextWindowTokens := applyClaudeTokenBudgetDefaults(&req)
 	if msg := validateClaudeRequestShape(&req); msg != "" {
@@ -1794,12 +1830,14 @@ func (h *Handler) handleClaudeMessages(w http.ResponseWriter, r *http.Request) {
 	apiKeyID := apiKeyIDFromContext(r.Context())
 	namespaceConversationID(kiroPayload, requestConversationNamespace(r, apiKeyID))
 	routeKey := kiroPayload.ConversationState.ConversationID
-	guardToolStream := len(req.Tools) > 0 && (thinkingCfg.BufferToolStreams || req.RequireToolUse)
+	strictToolUse := requiresStrictClaudeToolUse(&req)
+	guardToolStream := len(req.Tools) > 0 && (thinkingCfg.BufferToolStreams || strictToolUse)
 	guardActionableStream := req.Stream && guardToolStream
 	kiroPayload.requireActionableOutput = (len(req.Tools) > 0 || thinking) && (!req.Stream || guardActionableStream)
 	kiroPayload.toolUsePolicy = req.ToolUsePolicy
-	kiroPayload.deferTextUntilComplete = guardActionableStream && req.ToolUsePolicy == toolUsePolicyInferred
+	kiroPayload.deferTextUntilComplete = guardActionableStream && thinkingCfg.BufferToolStreams && req.ToolUsePolicy == toolUsePolicyInferred
 	kiroPayload.streamThinkingPrecommit = guardActionableStream && thinking && !thinkingResponseOpts.OmitDisplay
+	kiroPayload.streamToolUseDeltas = req.Stream && len(req.Tools) > 0 && !thinkingCfg.BufferToolStreams
 	// Inferred workspace intent still adds strong tool guidance, but only an
 	// explicit client tool_choice may reject an otherwise valid text response.
 	kiroPayload.requireToolUse = requiresStrictClaudeToolUse(&req)
@@ -1813,6 +1851,7 @@ func (h *Handler) handleClaudeMessages(w http.ResponseWriter, r *http.Request) {
 // handleClaudeStream Claude 流式响应
 func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, thinkingOpts claudeThinkingResponseOptions, estimatedInputTokens int, cacheProfile *promptCacheProfile, apiKeyID, routeKey string) {
 	startedAt := time.Now()
+	payload.beginStreamMetrics(startedAt)
 	firstContent := newRequestFirstContentTimer(startedAt)
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -1911,6 +1950,11 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 		actionableCommitted := false
 		activeBlockIndex := -1
 		activeBlockType := ""
+		type streamedClaudeTool struct {
+			index   int
+			stopped bool
+		}
+		streamedTools := make(map[string]*streamedClaudeTool)
 
 		closeActiveBlock := func() {
 			if activeBlockIndex < 0 {
@@ -1982,6 +2026,9 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 
 			if !thinking {
 				return
+			}
+			if strings.TrimSpace(text) != "" && (!payload.streamThinkingPrecommit || payload.streamToolUseDeltas) {
+				actionableCommitted = true
 			}
 
 			switch thinkingFormat {
@@ -2154,6 +2201,62 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 			}
 		}
 
+		startToolUse := func(toolUseID, name string) {
+			if toolUseID == "" || streamedTools[toolUseID] != nil {
+				return
+			}
+			firstContent.Mark()
+			processClaudeText("", false, true)
+			ensureMessageStart()
+			actionableCommitted = true
+			closeActiveBlock()
+
+			idx := nextContentIndex
+			nextContentIndex++
+			streamedTools[toolUseID] = &streamedClaudeTool{index: idx}
+			h.sendSSE(w, flusher, "content_block_start", map[string]interface{}{
+				"type":  "content_block_start",
+				"index": idx,
+				"content_block": map[string]interface{}{
+					"type":  "tool_use",
+					"id":    toolUseID,
+					"name":  name,
+					"input": map[string]interface{}{},
+				},
+			})
+		}
+
+		sendToolUseDelta := func(toolUseID, input string) {
+			if input == "" {
+				return
+			}
+			tool := streamedTools[toolUseID]
+			if tool == nil || tool.stopped {
+				return
+			}
+			firstContent.Mark()
+			h.sendSSE(w, flusher, "content_block_delta", map[string]interface{}{
+				"type":  "content_block_delta",
+				"index": tool.index,
+				"delta": map[string]interface{}{
+					"type":         "input_json_delta",
+					"partial_json": input,
+				},
+			})
+		}
+
+		stopToolUse := func(toolUseID string) {
+			tool := streamedTools[toolUseID]
+			if tool == nil || tool.stopped {
+				return
+			}
+			tool.stopped = true
+			h.sendSSE(w, flusher, "content_block_stop", map[string]interface{}{
+				"type":  "content_block_stop",
+				"index": tool.index,
+			})
+		}
+
 		callback := &KiroStreamCallback{
 			OnText: func(text string, isThinking bool) {
 				firstContent.MarkText(text)
@@ -2176,38 +2279,17 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 				}
 
 				toolUses = append(toolUses, tu)
-				ensureMessageStart()
-				actionableCommitted = true
-				closeActiveBlock()
+				if streamedTools[tu.ToolUseID] != nil {
+					stopToolUse(tu.ToolUseID)
+					delete(streamedTools, tu.ToolUseID)
+					return
+				}
 
-				idx := nextContentIndex
-				nextContentIndex++
-
-				h.sendSSE(w, flusher, "content_block_start", map[string]interface{}{
-					"type":  "content_block_start",
-					"index": idx,
-					"content_block": map[string]interface{}{
-						"type":  "tool_use",
-						"id":    tu.ToolUseID,
-						"name":  tu.Name,
-						"input": map[string]interface{}{},
-					},
-				})
-
+				startToolUse(tu.ToolUseID, tu.Name)
 				inputJSON, _ := json.Marshal(tu.Input)
-				h.sendSSE(w, flusher, "content_block_delta", map[string]interface{}{
-					"type":  "content_block_delta",
-					"index": idx,
-					"delta": map[string]interface{}{
-						"type":         "input_json_delta",
-						"partial_json": string(inputJSON),
-					},
-				})
-
-				h.sendSSE(w, flusher, "content_block_stop", map[string]interface{}{
-					"type":  "content_block_stop",
-					"index": idx,
-				})
+				sendToolUseDelta(tu.ToolUseID, string(inputJSON))
+				stopToolUse(tu.ToolUseID)
+				delete(streamedTools, tu.ToolUseID)
 			},
 			OnComplete: func(inTok, outTok int) {
 				inputTokens = inTok
@@ -2246,6 +2328,11 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 			OnContextUsage: func(pct float64) {
 				realInputTokens = int(pct * float64(getPayloadContextWindowSize(payload, model)) / 100.0)
 			},
+		}
+		if payload.streamToolUseDeltas {
+			callback.OnToolUseStart = startToolUse
+			callback.OnToolUseDelta = sendToolUseDelta
+			callback.OnToolUseStop = stopToolUse
 		}
 
 		err := CallKiroAPI(account, payload, callback)
@@ -2485,6 +2572,11 @@ func (h *Handler) Close() {
 		if h.requestLog != nil {
 			if err := h.requestLog.Flush(); err != nil {
 				logger.Warnf("[RequestLog] Failed to flush request log: %v", err)
+			}
+		}
+		if h.requestDetails != nil {
+			if err := h.requestDetails.Flush(); err != nil {
+				logger.Warnf("[RequestDetail] Failed to flush request details: %v", err)
 			}
 		}
 		if h.alerts != nil {
@@ -2784,6 +2876,7 @@ func (h *Handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	startedAt := time.Now()
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		h.sendOpenAIError(w, requestBodyErrorStatus(err), "invalid_request_error", "Failed to read request body")
@@ -2795,6 +2888,15 @@ func (h *Handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 		h.sendOpenAIError(w, 400, "invalid_request_error", "Invalid JSON")
 		return
 	}
+	r = h.attachRequestDetailTrace(r, "openai.chat", body)
+	w, detailStatus := wrapRequestDetailResponseWriter(w, r.Context())
+	defer func() {
+		protocol := "openai.chat"
+		if req.Stream {
+			protocol += ".stream"
+		}
+		h.finalizeUnrecordedRequestDetail(r.Context(), detailStatus, startedAt, protocol, req.Model)
+	}()
 	contextWindowTokens := applyOpenAITokenBudgetDefaults(&req)
 	if msg := validateOpenAIRequestShape(&req); msg != "" {
 		h.sendOpenAIError(w, 400, "invalid_request_error", msg)
@@ -3519,7 +3621,20 @@ func (h *Handler) ensureValidTokenContext(ctx context.Context, account *config.A
 	if tokenStillValid(account, tokenRefreshSkewSeconds) {
 		return nil
 	}
-	return sharedTokenRefreshCoordinator.RefreshContext(ctx, account, false)
+	startedAt := time.Now()
+	err := sharedTokenRefreshCoordinator.RefreshContext(ctx, account, false)
+	status := "success"
+	if err != nil {
+		status = "error"
+	}
+	accountID := ""
+	accountEmail := ""
+	if account != nil {
+		accountID = account.ID
+		accountEmail = account.Email
+	}
+	requestDetailTraceFromContext(ctx).recordAttempt(accountID, accountEmail, "token_refresh", "", startedAt, 0, status, err, requestDetailRetryReason(err))
+	return err
 }
 
 // ==================== 管理 API ====================
@@ -3671,6 +3786,12 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 		h.apiGetRequestLogConfig(w, r)
 	case path == "/request-log" && r.Method == "POST":
 		h.apiUpdateRequestLogConfig(w, r)
+	case path == "/request-details" && r.Method == "GET":
+		h.apiGetRequestDetail(w, r, false)
+	case path == "/request-details/download" && r.Method == "GET":
+		h.apiGetRequestDetail(w, r, true)
+	case path == "/request-details" && r.Method == "DELETE":
+		h.apiClearRequestDetails(w, r)
 	case path == "/web-search" && r.Method == "GET":
 		h.apiGetWebSearch(w, r)
 	case path == "/web-search" && r.Method == "POST":
@@ -5533,7 +5654,16 @@ func (h *Handler) apiGetDiagnosticEvents(w http.ResponseWriter, r *http.Request)
 }
 
 func (h *Handler) apiGetRequestLogConfig(w http.ResponseWriter, r *http.Request) {
-	json.NewEncoder(w).Encode(config.GetRequestLogConfig())
+	cfg := config.GetRequestLogConfig()
+	count, bytes := h.ensureRequestDetailStore().stats()
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"maxEntries":         cfg.MaxEntries,
+		"detailedLogEnabled": cfg.DetailedLogEnabled,
+		"detailedMaxEntries": cfg.DetailedMaxEntries,
+		"maxDetailBytes":     cfg.MaxDetailBytes,
+		"detailCount":        count,
+		"detailBytes":        bytes,
+	})
 }
 
 func (h *Handler) apiUpdateRequestLogConfig(w http.ResponseWriter, r *http.Request) {
@@ -5543,9 +5673,26 @@ func (h *Handler) apiUpdateRequestLogConfig(w http.ResponseWriter, r *http.Reque
 		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON"})
 		return
 	}
+	existing := config.GetRequestLogConfig()
+	if req.DetailedMaxEntries == 0 {
+		req.DetailedMaxEntries = existing.DetailedMaxEntries
+	}
+	if req.MaxDetailBytes == 0 {
+		req.MaxDetailBytes = existing.MaxDetailBytes
+	}
 	if req.MaxEntries < config.MinRequestLogMaxEntries || req.MaxEntries > config.MaxRequestLogMaxEntries {
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]string{"error": "maxEntries must be between 100 and 20000"})
+		return
+	}
+	if req.DetailedMaxEntries < config.MinRequestDetailMaxEntries || req.DetailedMaxEntries > config.MaxRequestDetailMaxEntries {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "detailedMaxEntries must be between 1 and 1000"})
+		return
+	}
+	if req.MaxDetailBytes < config.MinRequestDetailMaxBytes || req.MaxDetailBytes > config.MaxRequestDetailMaxBytes {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "maxDetailBytes must be between 16384 and 1048576"})
 		return
 	}
 	if err := config.UpdateRequestLogConfig(req); err != nil {
@@ -5558,7 +5705,39 @@ func (h *Handler) apiUpdateRequestLogConfig(w http.ResponseWriter, r *http.Reque
 	} else {
 		h.requestLog.configure(req.MaxEntries)
 	}
+	h.ensureRequestDetailStore().configure(req.DetailedMaxEntries, req.MaxDetailBytes)
 	json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "config": config.GetRequestLogConfig()})
+}
+
+func (h *Handler) apiGetRequestDetail(w http.ResponseWriter, r *http.Request, download bool) {
+	requestID := strings.TrimSpace(r.URL.Query().Get("id"))
+	if requestID == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "id is required"})
+		return
+	}
+	raw, ok := h.ensureRequestDetailStore().get(requestID)
+	if !ok {
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]string{"error": "request detail not found"})
+		return
+	}
+	if download {
+		w.Header().Set("Content-Disposition", `attachment; filename="request-detail.json"`)
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	_, _ = w.Write(raw)
+}
+
+func (h *Handler) apiClearRequestDetails(w http.ResponseWriter, r *http.Request) {
+	store := h.ensureRequestDetailStore()
+	deleted := store.clear()
+	if err := store.Flush(); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "deleted": deleted})
 }
 
 func (h *Handler) apiGetWebSearch(w http.ResponseWriter, r *http.Request) {
@@ -5650,8 +5829,13 @@ func (h *Handler) apiGetRequests(w http.ResponseWriter, r *http.Request) {
 	if h.requestLog == nil {
 		h.requestLog = newRequestLog(requestLogCfg.MaxEntries)
 	}
+	requests := h.requestLog.list(limit)
+	details := h.ensureRequestDetailStore()
+	for i := range requests {
+		requests[i].DetailAvailable = details.has(requests[i].RequestID)
+	}
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"requests":   h.requestLog.list(limit),
+		"requests":   requests,
 		"limit":      limit,
 		"maxEntries": requestLogCfg.MaxEntries,
 	})

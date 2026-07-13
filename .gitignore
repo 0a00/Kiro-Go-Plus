@@ -39,4 +39,5 @@ Thumbs.db
 
 # Local backups / scratch
 backup*/
+.update-backups/
 PR-*.md

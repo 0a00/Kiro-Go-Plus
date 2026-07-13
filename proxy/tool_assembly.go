@@ -24,6 +24,8 @@ type toolAssemblyMonitor struct {
 	name       string
 	bytes      int
 	timedOut   *toolAssemblySnapshot
+	maxElapsed time.Duration
+	hasElapsed bool
 }
 
 func wrapToolAssemblyMonitor(target *KiroStreamCallback, timeout time.Duration, onTimeout func(toolAssemblySnapshot)) (*KiroStreamCallback, *toolAssemblyMonitor) {
@@ -35,6 +37,14 @@ func wrapToolAssemblyMonitor(target *KiroStreamCallback, timeout time.Duration, 
 	originalStart := target.OnToolUseStart
 	originalDelta := target.OnToolUseDelta
 	originalStop := target.OnToolUseStop
+	originalActivity := target.OnToolUseActivity
+
+	wrapped.OnToolUseActivity = func() {
+		monitor.activity()
+		if originalActivity != nil {
+			originalActivity()
+		}
+	}
 
 	wrapped.OnToolUseStart = func(toolUseID, name string) {
 		monitor.start(toolUseID, name)
@@ -63,6 +73,16 @@ func (m *toolAssemblyMonitor) start(toolUseID, name string) {
 	}
 	now := time.Now()
 	m.mu.Lock()
+	if m.active && m.toolUseID == "" {
+		m.toolUseID = toolUseID
+		m.name = name
+		m.bytes = 0
+		m.mu.Unlock()
+		return
+	}
+	if m.active {
+		m.recordElapsedLocked(now)
+	}
 	m.stopTimerLocked()
 	m.generation++
 	generation := m.generation
@@ -94,12 +114,39 @@ func (m *toolAssemblyMonitor) add(toolUseID, input string) {
 	m.mu.Unlock()
 }
 
+func (m *toolAssemblyMonitor) activity() {
+	if m == nil {
+		return
+	}
+	now := time.Now()
+	m.mu.Lock()
+	if m.active {
+		m.mu.Unlock()
+		return
+	}
+	m.generation++
+	generation := m.generation
+	m.active = true
+	m.startedAt = now
+	m.toolUseID = ""
+	m.name = ""
+	m.bytes = 0
+	m.timedOut = nil
+	if m.timeout > 0 {
+		m.timer = time.AfterFunc(m.timeout, func() {
+			m.fire(generation)
+		})
+	}
+	m.mu.Unlock()
+}
+
 func (m *toolAssemblyMonitor) stop(toolUseID string) {
 	if m == nil {
 		return
 	}
 	m.mu.Lock()
 	if m.active && (m.toolUseID == "" || toolUseID == "" || m.toolUseID == toolUseID) {
+		m.recordElapsedLocked(time.Now())
 		m.active = false
 		m.generation++
 		m.stopTimerLocked()
@@ -112,10 +159,22 @@ func (m *toolAssemblyMonitor) Stop() {
 		return
 	}
 	m.mu.Lock()
+	if m.active {
+		m.recordElapsedLocked(time.Now())
+	}
 	m.active = false
 	m.generation++
 	m.stopTimerLocked()
 	m.mu.Unlock()
+}
+
+func (m *toolAssemblyMonitor) MaxElapsed() (time.Duration, bool) {
+	if m == nil {
+		return 0, false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.maxElapsed, m.hasElapsed
 }
 
 func (m *toolAssemblyMonitor) TimedOut() (toolAssemblySnapshot, bool) {
@@ -142,6 +201,7 @@ func (m *toolAssemblyMonitor) fire(generation uint64) {
 		ArgumentBytes: m.bytes,
 		Elapsed:       time.Since(m.startedAt),
 	}
+	m.recordDurationLocked(snapshot.Elapsed)
 	m.active = false
 	m.timedOut = &snapshot
 	m.timer = nil
@@ -149,6 +209,33 @@ func (m *toolAssemblyMonitor) fire(generation uint64) {
 	m.mu.Unlock()
 	if onTimeout != nil {
 		onTimeout(snapshot)
+	}
+}
+
+func (m *toolAssemblyMonitor) recordElapsedLocked(now time.Time) {
+	if m.startedAt.IsZero() {
+		return
+	}
+	m.recordDurationLocked(now.Sub(m.startedAt))
+}
+
+func (m *toolAssemblyMonitor) recordDurationLocked(elapsed time.Duration) {
+	if elapsed < 0 {
+		elapsed = 0
+	}
+	if !m.hasElapsed || elapsed > m.maxElapsed {
+		m.maxElapsed = elapsed
+		m.hasElapsed = true
+	}
+}
+
+func stopAndRecordToolAssembly(payload *KiroPayload, monitor *toolAssemblyMonitor) {
+	if monitor == nil {
+		return
+	}
+	monitor.Stop()
+	if elapsed, ok := monitor.MaxElapsed(); ok && payload != nil {
+		payload.recordToolAssembly(elapsed)
 	}
 }
 

@@ -16,14 +16,22 @@ import (
 
 func TestRequestLogPersistenceRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "request_log.json")
+	upstreamActivityMs := int64(45)
 	firstContentMs := int64(123)
+	toolAssemblyMs := int64(78)
 	log, err := newPersistentRequestLog(2, path)
 	if err != nil {
 		t.Fatalf("create persistent log: %v", err)
 	}
 	log.add(requestLogEntry{Protocol: "one", Timestamp: 1, RequestToolNames: []string{"Read"}})
 	log.add(requestLogEntry{Protocol: "two", Timestamp: 2})
-	log.add(requestLogEntry{Protocol: "three", Timestamp: 3, FirstContentMs: &firstContentMs})
+	log.add(requestLogEntry{
+		Protocol:                "three",
+		Timestamp:               3,
+		UpstreamFirstActivityMs: &upstreamActivityMs,
+		FirstContentMs:          &firstContentMs,
+		ToolAssemblyMs:          &toolAssemblyMs,
+	})
 	if err := log.Flush(); err != nil {
 		t.Fatalf("flush request log: %v", err)
 	}
@@ -49,6 +57,9 @@ func TestRequestLogPersistenceRoundTrip(t *testing.T) {
 	}
 	if got[0].FirstContentMs == nil || *got[0].FirstContentMs != firstContentMs {
 		t.Fatalf("first-content latency was not restored: %+v", got[0])
+	}
+	if got[0].UpstreamFirstActivityMs == nil || *got[0].UpstreamFirstActivityMs != upstreamActivityMs || got[0].ToolAssemblyMs == nil || *got[0].ToolAssemblyMs != toolAssemblyMs {
+		t.Fatalf("stream diagnostics were not restored: %+v", got[0])
 	}
 	if got[1].FirstContentMs != nil {
 		t.Fatalf("legacy entry should not gain first-content latency: %+v", got[1])
@@ -171,6 +182,13 @@ func TestApiRequestLogConfigUpdatesRuntimeLimit(t *testing.T) {
 	h.apiUpdateRequestLogConfig(badRec, badReq)
 	if badRec.Code != http.StatusBadRequest {
 		t.Fatalf("expected invalid limit to return 400, got %d", badRec.Code)
+	}
+
+	badDetailReq := httptest.NewRequest(http.MethodPost, "/request-log", strings.NewReader(`{"maxEntries":100,"detailedMaxEntries":1001,"maxDetailBytes":262144}`))
+	badDetailRec := httptest.NewRecorder()
+	h.apiUpdateRequestLogConfig(badDetailRec, badDetailReq)
+	if badDetailRec.Code != http.StatusBadRequest {
+		t.Fatalf("expected invalid detail limit to return 400, got %d", badDetailRec.Code)
 	}
 }
 

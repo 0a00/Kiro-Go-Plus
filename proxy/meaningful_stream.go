@@ -14,6 +14,9 @@ type pendingStreamEventKind uint8
 const (
 	pendingText pendingStreamEventKind = iota
 	pendingToolUse
+	pendingToolUseStart
+	pendingToolUseDelta
+	pendingToolUseStop
 	pendingComplete
 	pendingUsage
 	pendingTruncated
@@ -27,6 +30,8 @@ type pendingStreamEvent struct {
 	text       string
 	isThinking bool
 	toolUse    KiroToolUse
+	toolUseID  string
+	toolName   string
 	input      int
 	output     int
 	usage      KiroTokenUsage
@@ -46,8 +51,10 @@ type meaningfulStreamCallback struct {
 	requireToolUse          bool
 	deferTextUntilComplete  bool
 	streamThinkingPrecommit bool
+	streamToolFrames        bool
 	activity                atomic.Bool
 	actionable              atomic.Bool
+	invalidCommittedTool    atomic.Bool
 
 	mu           sync.Mutex
 	committed    bool
@@ -66,6 +73,7 @@ func wrapMeaningfulStreamCallback(target *KiroStreamCallback, onActivity func(),
 		requireToolUse:          requireToolUse,
 		deferTextUntilComplete:  deferTextUntilComplete,
 		streamThinkingPrecommit: streamThinkingPrecommit,
+		streamToolFrames:        target.OnToolUseStart != nil || target.OnToolUseDelta != nil || target.OnToolUseStop != nil,
 	}
 	wrapper := &KiroStreamCallback{
 		OnText: func(text string, isThinking bool) {
@@ -76,24 +84,47 @@ func wrapMeaningfulStreamCallback(target *KiroStreamCallback, onActivity func(),
 			gate.handleEvent(pendingStreamEvent{kind: pendingText, text: text, isThinking: isThinking})
 		},
 		OnToolUse: func(toolUse KiroToolUse) {
+			if target.detailTrace != nil {
+				detailToolUse := toolUse
+				if original, ok := target.detailToolNameMap[detailToolUse.Name]; ok {
+					detailToolUse.Name = original
+				}
+				target.detailTrace.recordToolUse(detailToolUse)
+			}
 			gate.markActivity()
 			gate.handleEvent(pendingStreamEvent{kind: pendingToolUse, toolUse: toolUse})
 		},
-		OnToolUseStart: func(toolUseID, name string) {
+		OnToolUseActivity: func() {
 			gate.markActivity()
-			if target.OnToolUseStart != nil {
-				target.OnToolUseStart(toolUseID, name)
+		},
+		OnToolUseStart: func(toolUseID, name string) {
+			if target.detailTrace != nil {
+				detailName := name
+				if original, ok := target.detailToolNameMap[detailName]; ok {
+					detailName = original
+				}
+				target.detailTrace.recordToolUseStart(toolUseID, detailName)
+			}
+			gate.markActivity()
+			if gate.streamToolFrames {
+				gate.handleEvent(pendingStreamEvent{kind: pendingToolUseStart, toolUseID: toolUseID, toolName: name})
 			}
 		},
 		OnToolUseDelta: func(toolUseID, input string) {
+			if target.detailTrace != nil {
+				target.detailTrace.recordToolUseDelta(toolUseID, input)
+			}
 			gate.markActivity()
-			if target.OnToolUseDelta != nil {
-				target.OnToolUseDelta(toolUseID, input)
+			if gate.streamToolFrames && toolUseID != "" {
+				gate.handleEvent(pendingStreamEvent{kind: pendingToolUseDelta, toolUseID: toolUseID, text: input})
 			}
 		},
 		OnToolUseStop: func(toolUseID string) {
-			if target.OnToolUseStop != nil {
-				target.OnToolUseStop(toolUseID)
+			if target.detailTrace != nil {
+				target.detailTrace.recordToolUseStop(toolUseID)
+			}
+			if gate.streamToolFrames {
+				gate.handleEvent(pendingStreamEvent{kind: pendingToolUseStop, toolUseID: toolUseID})
 			}
 		},
 		OnComplete: func(input, output int) {
@@ -115,6 +146,9 @@ func wrapMeaningfulStreamCallback(target *KiroStreamCallback, onActivity func(),
 			gate.handleEvent(pendingStreamEvent{kind: pendingContextUsage, percentage: percentage})
 		},
 		OnProgress: func() {
+			if target.detailTrace != nil {
+				target.detailTrace.recordProgress()
+			}
 			if target.OnProgress != nil {
 				target.OnProgress()
 			}
@@ -136,17 +170,19 @@ func (g *meaningfulStreamCallback) handleEvent(event pendingStreamEvent) {
 	if g == nil {
 		return
 	}
+	if event.kind == pendingToolUse && !isActionableToolUse(event.toolUse) {
+		if g.actionable.Load() {
+			g.invalidCommittedTool.Store(true)
+		}
+		return
+	}
 	if !g.strict {
-		if event.kind == pendingText || event.kind == pendingToolUse {
+		if event.kind == pendingText || event.kind == pendingToolUse || event.kind == pendingToolUseStart || event.kind == pendingToolUseDelta {
 			g.actionable.Store(true)
 		}
 		g.dispatch(event)
 		return
 	}
-	if event.kind == pendingToolUse && !isActionableToolUse(event.toolUse) {
-		return
-	}
-
 	g.mu.Lock()
 	if g.committed {
 		g.mu.Unlock()
@@ -160,7 +196,7 @@ func (g *meaningfulStreamCallback) handleEvent(event pendingStreamEvent) {
 	}
 	g.appendPendingLocked(event)
 
-	commit := event.kind == pendingToolUse
+	commit := event.kind == pendingToolUse || event.kind == pendingToolUseStart || event.kind == pendingToolUseDelta
 	if event.kind == pendingText && !event.isThinking && !g.requireToolUse {
 		if g.visibleProbe.Len() < maxActionableProbeBytes {
 			remaining := maxActionableProbeBytes - g.visibleProbe.Len()
@@ -225,6 +261,7 @@ func (g *meaningfulStreamCallback) dispatch(event pendingStreamEvent) {
 	if g == nil || g.target == nil {
 		return
 	}
+	g.recordDetailEvent(event)
 	switch event.kind {
 	case pendingText:
 		if g.target.OnText != nil {
@@ -233,6 +270,18 @@ func (g *meaningfulStreamCallback) dispatch(event pendingStreamEvent) {
 	case pendingToolUse:
 		if g.target.OnToolUse != nil {
 			g.target.OnToolUse(event.toolUse)
+		}
+	case pendingToolUseStart:
+		if g.target.OnToolUseStart != nil {
+			g.target.OnToolUseStart(event.toolUseID, event.toolName)
+		}
+	case pendingToolUseDelta:
+		if g.target.OnToolUseDelta != nil {
+			g.target.OnToolUseDelta(event.toolUseID, event.text)
+		}
+	case pendingToolUseStop:
+		if g.target.OnToolUseStop != nil {
+			g.target.OnToolUseStop(event.toolUseID)
 		}
 	case pendingComplete:
 		if g.target.OnComplete != nil {
@@ -261,12 +310,39 @@ func (g *meaningfulStreamCallback) dispatch(event pendingStreamEvent) {
 	}
 }
 
+func (g *meaningfulStreamCallback) recordDetailEvent(event pendingStreamEvent) {
+	trace := g.target.detailTrace
+	if trace == nil {
+		return
+	}
+	switch event.kind {
+	case pendingText:
+		trace.recordText(event.text, event.isThinking)
+	case pendingComplete:
+		trace.recordComplete(event.input, event.output)
+	case pendingUsage:
+		trace.recordUsage(event.usage)
+	case pendingTruncated:
+		trace.recordTruncated(event.text)
+	case pendingError:
+		trace.recordError(event.err)
+	case pendingCredits:
+		trace.recordCredits(event.credits)
+	case pendingContextUsage:
+		trace.recordContextUsage(event.percentage)
+	}
+}
+
 func (g *meaningfulStreamCallback) hasActivity() bool {
 	return g != nil && g.activity.Load()
 }
 
 func (g *meaningfulStreamCallback) hasActionableOutput() bool {
 	return g != nil && g.actionable.Load()
+}
+
+func (g *meaningfulStreamCallback) hasInvalidCommittedToolUse() bool {
+	return g != nil && g.invalidCommittedTool.Load()
 }
 
 func hasSubstantiveAgentText(text string) bool {

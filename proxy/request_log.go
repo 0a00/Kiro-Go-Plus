@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -36,7 +37,9 @@ type requestLogEntry struct {
 	Endpoint                 string   `json:"endpoint,omitempty"`
 	Status                   string   `json:"status"`
 	StatusCode               int      `json:"statusCode"`
+	UpstreamFirstActivityMs  *int64   `json:"upstreamFirstActivityMs,omitempty"`
 	FirstContentMs           *int64   `json:"firstContentMs,omitempty"`
+	ToolAssemblyMs           *int64   `json:"toolAssemblyMs,omitempty"`
 	DurationMs               int64    `json:"durationMs"`
 	InputTokens              int      `json:"inputTokens,omitempty"`
 	OutputTokens             int      `json:"outputTokens,omitempty"`
@@ -52,6 +55,7 @@ type requestLogEntry struct {
 	StopReason               string   `json:"stopReason,omitempty"`
 	Credits                  float64  `json:"credits,omitempty"`
 	Error                    string   `json:"error,omitempty"`
+	DetailAvailable          bool     `json:"detailAvailable,omitempty"`
 }
 
 type requestLog struct {
@@ -323,7 +327,25 @@ func (h *Handler) recordRequestLogForPayload(payload *KiroPayload, entry request
 		}
 		entry.ToolUseRequired = payload.requireToolUse
 		entry.ToolUsePolicy = payload.toolUsePolicy
+		upstreamActivityMs, toolAssemblyMs := payload.streamMetrics()
+		if entry.UpstreamFirstActivityMs == nil {
+			entry.UpstreamFirstActivityMs = upstreamActivityMs
+		}
+		if entry.ToolAssemblyMs == nil {
+			entry.ToolAssemblyMs = toolAssemblyMs
+		}
+		entry.DetailAvailable = h.recordRequestDetailForContext(payload.requestContext, entry)
 	}
+	h.recordRequestLog(entry)
+}
+
+func (h *Handler) recordRequestLogForContext(ctx context.Context, entry requestLogEntry) {
+	entry.RequestID = requestIDFromContext(ctx)
+	entry.APIKeyID = apiKeyIDFromContext(ctx)
+	if apiKey := config.GetApiKeyEntry(entry.APIKeyID); apiKey != nil {
+		entry.APIKeyName = apiKey.Name
+	}
+	entry.DetailAvailable = h.recordRequestDetailForContext(ctx, entry)
 	h.recordRequestLog(entry)
 }
 

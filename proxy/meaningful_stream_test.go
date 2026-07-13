@@ -83,6 +83,61 @@ func TestMeaningfulStreamToolFramesCountAsActivity(t *testing.T) {
 	}
 }
 
+func TestMeaningfulStreamLiveToolFramesCommitImmediately(t *testing.T) {
+	var received []string
+	wrapper, gate := wrapMeaningfulStreamCallback(&KiroStreamCallback{
+		OnToolUseStart: func(toolUseID, name string) {
+			received = append(received, "start:"+toolUseID+":"+name)
+		},
+		OnToolUseDelta: func(toolUseID, input string) {
+			received = append(received, "delta:"+toolUseID+":"+input)
+		},
+		OnToolUseStop: func(toolUseID string) {
+			received = append(received, "stop:"+toolUseID)
+		},
+		OnToolUse: func(toolUse KiroToolUse) {
+			received = append(received, "tool:"+toolUse.Name)
+		},
+	}, nil, true, false, true, false)
+
+	wrapper.OnToolUseStart("toolu_write", "Write")
+	if !gate.hasActionableOutput() || !reflect.DeepEqual(received, []string{"start:toolu_write:Write"}) {
+		t.Fatalf("tool start did not commit live stream: actionable=%v received=%#v", gate.hasActionableOutput(), received)
+	}
+	wrapper.OnToolUseDelta("toolu_write", `{"content":"partial`)
+	wrapper.OnToolUseStop("toolu_write")
+	wrapper.OnToolUse(KiroToolUse{ToolUseID: "toolu_write", Name: "Write", Input: map[string]interface{}{"content": "partial"}})
+
+	want := []string{
+		"start:toolu_write:Write",
+		`delta:toolu_write:{"content":"partial`,
+		"stop:toolu_write",
+		"tool:Write",
+	}
+	if !reflect.DeepEqual(received, want) {
+		t.Fatalf("unexpected live tool callback order: got %#v want %#v", received, want)
+	}
+}
+
+func TestMeaningfulStreamFlagsMalformedToolAfterLiveCommit(t *testing.T) {
+	toolCalls := 0
+	wrapper, gate := wrapMeaningfulStreamCallback(&KiroStreamCallback{
+		OnToolUseStart: func(string, string) {},
+		OnToolUse:      func(KiroToolUse) { toolCalls++ },
+	}, nil, false, false, false, false)
+
+	wrapper.OnToolUseStart("toolu_bad", "Write")
+	wrapper.OnToolUse(KiroToolUse{
+		ToolUseID: "toolu_bad",
+		Name:      "Write",
+		Input:     map[string]interface{}{"_raw_arguments": `{"content":`},
+	})
+
+	if toolCalls != 0 || !gate.hasActionableOutput() || !gate.hasInvalidCommittedToolUse() {
+		t.Fatalf("malformed live tool state: calls=%d actionable=%v invalid=%v", toolCalls, gate.hasActionableOutput(), gate.hasInvalidCommittedToolUse())
+	}
+}
+
 func TestStrictMeaningfulStreamFlushesAfterSubstantiveText(t *testing.T) {
 	var received []string
 	wrapper, gate := wrapMeaningfulStreamCallback(&KiroStreamCallback{
