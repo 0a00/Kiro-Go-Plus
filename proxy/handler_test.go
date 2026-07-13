@@ -1,9 +1,11 @@
 package proxy
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"kiro-go/config"
 	"kiro-go/logger"
 	accountpool "kiro-go/pool"
@@ -11,6 +13,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -405,7 +408,7 @@ func TestApiRuntimeConfigUpdatesConfigAndLogger(t *testing.T) {
 	}
 }
 
-func TestClaudeCodeBufferedEndpointUsesRealInputTokens(t *testing.T) {
+func TestClaudeCodeStreamReportsRealInputTokensAtCompletion(t *testing.T) {
 	t.Setenv("ALLOW_UNAUTHENTICATED_API", "true")
 	cfgFile := t.TempDir() + "/config.json"
 	if err := config.Init(cfgFile); err != nil {
@@ -429,7 +432,7 @@ func TestClaudeCodeBufferedEndpointUsesRealInputTokens(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{
-			"content": "buffered ok",
+			"content": "streamed ok",
 		}))
 		_, _ = w.Write(awsEventStreamFrame(t, "contextUsageEvent", map[string]interface{}{
 			"contextUsagePercentage": 1.23,
@@ -458,14 +461,117 @@ func TestClaudeCodeBufferedEndpointUsesRealInputTokens(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
 	}
 	body := rec.Body.String()
-	if !strings.Contains(body, "buffered ok") {
-		t.Fatalf("expected buffered content, got:\n%s", body)
+	if !strings.Contains(body, "streamed ok") {
+		t.Fatalf("expected streamed content, got:\n%s", body)
 	}
 	if !strings.Contains(body, `"input_tokens":2460`) {
-		t.Fatalf("expected real input_tokens 2460 in message_start, got:\n%s", body)
+		t.Fatalf("expected final usage to report real input_tokens 2460, got:\n%s", body)
 	}
-	if strings.Contains(body, fmt.Sprintf(`"input_tokens":%d`, estimateApproxTokens("hi"))) {
-		t.Fatalf("expected buffered endpoint not to use approximate tokens, got:\n%s", body)
+	entries := h.requestLog.list(1)
+	if len(entries) != 1 || entries[0].Protocol != "claude.messages.cc.stream" {
+		t.Fatalf("unexpected request log protocol: %+v", entries)
+	}
+}
+
+func TestClaudeToolStreamCommitsBeforeUpstreamCompletes(t *testing.T) {
+	t.Setenv("ALLOW_UNAUTHENTICATED_API", "true")
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	if err := config.AddAccount(config.Account{
+		ID:          "stream-account",
+		Enabled:     true,
+		AccessToken: "token-stream",
+		ProfileArn:  "arn:aws:codewhisperer:profile/stream",
+	}); err != nil {
+		t.Fatalf("add account: %v", err)
+	}
+	if err := config.UpdatePreferredEndpoint("kiro"); err != nil {
+		t.Fatalf("set preferred endpoint: %v", err)
+	}
+	if err := config.UpdateEndpointFallback(false); err != nil {
+		t.Fatalf("disable endpoint fallback: %v", err)
+	}
+
+	releaseUpstream := make(chan struct{})
+	firstChunk := "first streamed chunk with enough substantive text to pass the downstream thinking tag safety buffer"
+	secondChunk := firstChunk + " and second chunk"
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseUpstream) }) }
+	defer release()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{
+			"content": firstChunk,
+		}))
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		select {
+		case <-releaseUpstream:
+		case <-r.Context().Done():
+			return
+		}
+		_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{
+			"content": secondChunk,
+		}))
+		_, _ = w.Write(awsEventStreamFrame(t, "contextUsageEvent", map[string]interface{}{
+			"contextUsagePercentage": 1.0,
+		}))
+	}))
+	defer upstream.Close()
+	defer swapKiroEndpointsForTest(t, upstream)()
+
+	p := accountpool.GetPool()
+	p.Reload()
+	h := &Handler{
+		pool:        p,
+		promptCache: newPromptCacheTracker(defaultPromptCacheTTL),
+		requestLog:  newRequestLog(defaultRequestLogLimit),
+	}
+	server := httptest.NewServer(h)
+	defer server.Close()
+
+	req, err := http.NewRequest(http.MethodPost, server.URL+"/cc/v1/messages", strings.NewReader(`{
+		"model":"claude-sonnet-4.5",
+		"stream":true,
+		"messages":[{"role":"user","content":"stream this"}],
+		"tools":[{"name":"Write","description":"write a file","input_schema":{"type":"object","properties":{"content":{"type":"string"}}}}]
+	}`))
+	if err != nil {
+		t.Fatalf("create request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := (&http.Client{Timeout: 3 * time.Second}).Do(req)
+	if err != nil {
+		t.Fatalf("start streamed request: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, body = %s", resp.StatusCode, body)
+	}
+
+	reader := bufio.NewReader(resp.Body)
+	var first strings.Builder
+	for !strings.Contains(first.String(), "first streamed chunk") {
+		line, readErr := reader.ReadString('\n')
+		if readErr != nil {
+			t.Fatalf("read first streamed chunk: %v body=%s", readErr, first.String())
+		}
+		first.WriteString(line)
+	}
+	if strings.Contains(first.String(), "second chunk") {
+		t.Fatalf("upstream completed before first chunk was observed: %s", first.String())
+	}
+
+	release()
+	rest, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("read remaining stream: %v", err)
+	}
+	if !strings.Contains(string(rest), "second chunk") || !strings.Contains(string(rest), "message_stop") {
+		t.Fatalf("remaining stream is incomplete: %s", rest)
 	}
 }
 

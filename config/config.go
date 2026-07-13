@@ -336,7 +336,7 @@ type Config struct {
 	ThinkingBudgetCapTokens     *int   `json:"thinkingBudgetCapTokens,omitempty"`     // Maximum proxy-derived fake-reasoning budget; 0 disables the cap
 	DefaultMaxOutputTokens      int    `json:"defaultMaxOutputTokens,omitempty"`      // Default max output tokens when the client omits a limit; 0 leaves it unset
 	DefaultContextWindowTokens  int    `json:"defaultContextWindowTokens,omitempty"`  // Default context window when the client/model omits one; 0 auto-detects
-	BufferToolStreams           *bool  `json:"bufferToolStreams,omitempty"`           // Buffer tool-enabled Claude streams until an actionable response is complete
+	BufferToolStreams           *bool  `json:"bufferToolStreams,omitempty"`           // Delay tool-enabled Claude streams until actionable output, then stream live
 	EnforceAgentToolUse         *bool  `json:"enforceAgentToolUse,omitempty"`         // Require tools for detected workspace mutation/execution requests
 
 	// Endpoint configuration: "auto", "kiro", "codewhisperer", or "amazonq"
@@ -460,7 +460,7 @@ type AccountInfo struct {
 }
 
 // Version current version
-const Version = "1.2.14"
+const Version = "1.2.15"
 
 var (
 	cfg           *Config
@@ -2577,7 +2577,7 @@ type ThinkingConfig struct {
 	BudgetCapTokens            int    `json:"budgetCapTokens"`            // Maximum proxy-derived fake-reasoning budget; 0 disables the cap
 	DefaultMaxOutputTokens     int    `json:"defaultMaxOutputTokens"`     // Default max output tokens; 0 leaves it unset
 	DefaultContextWindowTokens int    `json:"defaultContextWindowTokens"` // Default context window; 0 auto-detects
-	BufferToolStreams          bool   `json:"bufferToolStreams"`          // Buffer tool-enabled Claude streams for reliable retries
+	BufferToolStreams          bool   `json:"bufferToolStreams"`          // Guard tool streams until actionable output, then stream live
 	EnforceAgentToolUse        bool   `json:"enforceAgentToolUse"`        // Require tools for workspace actions
 }
 

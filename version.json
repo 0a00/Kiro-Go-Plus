@@ -1,5 +1,5 @@
 {
-  "version": "1.2.14",
-  "changelog": "Expose persisted per-account success and failure counters in the account list and detail views while retaining the legacy requestCount/errorCount API fields. Global cards now clearly label total successful and failed client requests. Reset Statistics now clears both global and every account's cumulative counters.\n账号列表和详情现在明确显示每个账号的成功次数与失败次数，并继续保留旧的 requestCount/errorCount API 字段兼容。顶部统计明确显示总成功次数和总失败次数；重置统计会同时清空全局及所有账号累计计数。",
+  "version": "1.2.15",
+  "changelog": "Replace full-response buffering for Claude streams with guarded live streaming. Tool and Claude Code streams may still retry accounts and endpoints before the first actionable text or complete tool call; once committed, buffered events are flushed immediately and subsequent chunks stream live. This preserves malformed-tool protection while substantially reducing time to first visible output.\nClaude 流式响应不再等待整段生成完成后一次性返回。工具流和 Claude Code 流在首个有效正文或完整工具调用前仍可重试账号与端点；确认有效后立即释放已缓存事件并实时转发后续分块，在保留残缺工具调用保护的同时显著降低首字时间。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }

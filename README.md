@@ -19,7 +19,7 @@ Kiro-Go Plus preserves Kiro-Go's API and deployment compatibility while adding p
 - Upstream routing: Kiro Runtime as the primary path with legacy Kiro / CodeWhisperer / Amazon Q fallback
 - Multi-account scheduling: weighted, priority, and balanced modes; per-account concurrency, sticky routing, and failover
 - Refresh coordination: deduplication, bounded queues, timeouts, jitter, and adaptive batches for tens or hundreds of accounts
-- Failure protection: first-output timeout, actionable-output and required-tool validation, buffered tool streams, stream truncation checks, endpoint circuits, cooldowns, and bounded retries
+- Failure protection: first-output timeout, actionable-output and required-tool validation, pre-commit tool-stream retries, live streaming after commit, truncation checks, endpoint circuits, cooldowns, and bounded retries
 - Token controls: bounded enabled/adaptive thinking, configurable default thinking/output/context budgets, and client-value precedence
 - Streaming validation: AWS EventStream length and CRC validation, idle timeout, and truncated-response detection
 - Authentication: Builder ID, IAM Identity Center, Kiro hosted SSO, Microsoft 365 / Entra ID, SSO Token, API key, and JSON import
