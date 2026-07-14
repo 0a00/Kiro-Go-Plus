@@ -19,7 +19,7 @@ Kiro-Go Plus preserves Kiro-Go's API and deployment compatibility while adding p
 - Upstream routing: Kiro Runtime as the primary path with legacy Kiro / CodeWhisperer / Amazon Q fallback
 - Multi-account scheduling: weighted, priority, and balanced modes; per-account concurrency, sticky routing, and failover
 - Refresh coordination: deduplication, bounded queues, timeouts, jitter, and adaptive batches for tens or hundreds of accounts
-- Failure protection: first-output timeout, actionable-output and required-tool validation, selectable live/safe-buffered tool streams, truncation checks, endpoint circuits, cooldowns, and bounded retries
+- Failure protection: first-output timeout, actionable-output and required-tool validation, selectable safe/balanced/live tool streams, truncation checks, endpoint circuits, cooldowns, and bounded retries
 - Token controls: bounded enabled/adaptive thinking, configurable default thinking/output/context budgets, and client-value precedence
 - Streaming validation: AWS EventStream length and CRC validation, idle timeout, and truncated-response detection
 - Authentication: Builder ID, IAM Identity Center, Kiro hosted SSO, Microsoft 365 / Entra ID, SSO Token, API key, and JSON import
@@ -42,10 +42,12 @@ Open `/admin` to manage:
 - Token/model refresh intervals, concurrency, and batch sizes
 - Prompt Cache creation/read ranges, TTL, capacity, and isolation
 - Web Search, token counting, Responses storage, diagnostics, complete request logging, and alerts
-- Claude Agent tool enforcement, thinking/output/context token defaults, response formats, and live/safe-buffered stream modes
+- Claude Agent tool enforcement, thinking/output/context token defaults, response formats, and safe/balanced/live stream modes
 - API keys, quotas, admin password, listener settings, and client fingerprints
 
 Settings apply immediately unless the panel explicitly reports that a process restart is required.
+
+Tool stream modes trade retry coverage for latency: **Live** forwards text, thinking, and tool argument deltas immediately; **Balanced** streams text and thinking while waiting for complete tool JSON; **Safe** buffers guarded output until it can be validated and retried transparently. Explicit `tool_choice` requests remain strictly validated in every mode.
 
 Complete request logging is disabled by default. When enabled, it captures inference routes only and writes bounded details to `data/request_details.json` with mode `0600` and a 64 MiB total cap. Authorization headers and credentials are excluded; image/document Base64 and tool arguments are represented only by type, byte count, and SHA-256. Prompts and model output are still sensitive, so enable this mode only while diagnosing issues and clear it afterward.
 

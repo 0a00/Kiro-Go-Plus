@@ -2022,8 +2022,12 @@
     $('thinkingBudgetCap').value = d.budgetCapTokens == null ? 10000 : d.budgetCapTokens;
     $('defaultMaxOutputTokens').value = d.defaultMaxOutputTokens || 0;
     $('defaultContextWindowTokens').value = d.defaultContextWindowTokens || 0;
-    $('toolStreamModeSafe').checked = d.bufferToolStreams !== false;
-    $('toolStreamModeLive').checked = d.bufferToolStreams === false;
+    const toolStreamMode = ['safe', 'balanced', 'live'].includes(d.toolStreamMode)
+      ? d.toolStreamMode
+      : (d.bufferToolStreams === false ? 'live' : 'safe');
+    $('toolStreamModeSafe').checked = toolStreamMode === 'safe';
+    $('toolStreamModeBalanced').checked = toolStreamMode === 'balanced';
+    $('toolStreamModeLive').checked = toolStreamMode === 'live';
     $('enforceAgentToolUse').checked = d.enforceAgentToolUse !== false;
   }
   async function saveThinkingConfig() {
@@ -2039,6 +2043,8 @@
       toast(t('settings.tokenBudgetInvalid'), 'warning');
       return;
     }
+    const selectedToolStreamMode = document.querySelector('input[name="toolStreamMode"]:checked');
+    const toolStreamMode = selectedToolStreamMode ? selectedToolStreamMode.value : 'safe';
     const res = await api('/thinking', {
       method: 'POST', body: JSON.stringify({
         suffix: $('thinkingSuffix').value || '-thinking',
@@ -2048,7 +2054,8 @@
         budgetCapTokens,
         defaultMaxOutputTokens,
         defaultContextWindowTokens,
-        bufferToolStreams: $('toolStreamModeSafe').checked,
+        toolStreamMode,
+        bufferToolStreams: toolStreamMode !== 'live',
         enforceAgentToolUse: $('enforceAgentToolUse').checked
       })
     });

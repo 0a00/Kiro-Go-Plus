@@ -348,7 +348,8 @@ type Config struct {
 	ThinkingBudgetCapTokens     *int   `json:"thinkingBudgetCapTokens,omitempty"`     // Maximum proxy-derived fake-reasoning budget; 0 disables the cap
 	DefaultMaxOutputTokens      int    `json:"defaultMaxOutputTokens,omitempty"`      // Default max output tokens when the client omits a limit; 0 leaves it unset
 	DefaultContextWindowTokens  int    `json:"defaultContextWindowTokens,omitempty"`  // Default context window when the client/model omits one; 0 auto-detects
-	BufferToolStreams           *bool  `json:"bufferToolStreams,omitempty"`           // Buffer complete Claude tool calls to preserve transparent retries; false streams deltas live
+	ToolStreamMode              string `json:"toolStreamMode,omitempty"`              // Claude tool stream mode: safe, balanced, or live
+	BufferToolStreams           *bool  `json:"bufferToolStreams,omitempty"`           // Deprecated compatibility field: true maps to buffered/safe, false maps to live
 	EnforceAgentToolUse         *bool  `json:"enforceAgentToolUse,omitempty"`         // Require tools for detected workspace mutation/execution requests
 
 	// Endpoint configuration: "auto", "kiro", "codewhisperer", or "amazonq"
@@ -471,8 +472,14 @@ type AccountInfo struct {
 	TrialExpiresAt    int64
 }
 
+const (
+	ToolStreamModeSafe     = "safe"
+	ToolStreamModeBalanced = "balanced"
+	ToolStreamModeLive     = "live"
+)
+
 // Version current version
-const Version = "1.2.22"
+const Version = "1.2.23"
 
 var (
 	cfg           *Config
@@ -533,6 +540,7 @@ func loadLocked() error {
 				RequestLog:                defaultRequestLogConfig(),
 				WebSearch:                 defaultWebSearchConfig(),
 				CountTokensProvider:       defaultCountTokensProviderConfig(),
+				ToolStreamMode:            ToolStreamModeSafe,
 			}
 			return saveLocked()
 		}
@@ -2655,8 +2663,33 @@ type ThinkingConfig struct {
 	BudgetCapTokens            int    `json:"budgetCapTokens"`            // Maximum proxy-derived fake-reasoning budget; 0 disables the cap
 	DefaultMaxOutputTokens     int    `json:"defaultMaxOutputTokens"`     // Default max output tokens; 0 leaves it unset
 	DefaultContextWindowTokens int    `json:"defaultContextWindowTokens"` // Default context window; 0 auto-detects
-	BufferToolStreams          bool   `json:"bufferToolStreams"`          // Buffer complete Claude tool calls; false forwards tool deltas immediately
+	ToolStreamMode             string `json:"toolStreamMode"`             // Claude tool stream mode: safe, balanced, or live
+	BufferToolStreams          bool   `json:"bufferToolStreams"`          // Deprecated compatibility mirror; false only for live mode
 	EnforceAgentToolUse        bool   `json:"enforceAgentToolUse"`        // Require tools for workspace actions
+}
+
+// NormalizeToolStreamMode validates and canonicalizes a Claude tool stream mode.
+func NormalizeToolStreamMode(mode string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case ToolStreamModeSafe:
+		return ToolStreamModeSafe, true
+	case ToolStreamModeBalanced:
+		return ToolStreamModeBalanced, true
+	case ToolStreamModeLive:
+		return ToolStreamModeLive, true
+	default:
+		return "", false
+	}
+}
+
+func resolveToolStreamMode(mode string, legacyBuffer *bool) string {
+	if normalized, ok := NormalizeToolStreamMode(mode); ok {
+		return normalized
+	}
+	if legacyBuffer != nil && !*legacyBuffer {
+		return ToolStreamModeLive
+	}
+	return ToolStreamModeSafe
 }
 
 // GetThinkingConfig 获取 thinking 配置
@@ -2673,6 +2706,7 @@ func GetThinkingConfig() ThinkingConfig {
 			BudgetCapTokens:            10000,
 			DefaultMaxOutputTokens:     0,
 			DefaultContextWindowTokens: 0,
+			ToolStreamMode:             ToolStreamModeSafe,
 			BufferToolStreams:          true,
 			EnforceAgentToolUse:        true,
 		}
@@ -2700,10 +2734,7 @@ func GetThinkingConfig() ThinkingConfig {
 	}
 	defaultMaxOutputTokens := max(0, cfg.DefaultMaxOutputTokens)
 	defaultContextWindowTokens := max(0, cfg.DefaultContextWindowTokens)
-	bufferToolStreams := true
-	if cfg.BufferToolStreams != nil {
-		bufferToolStreams = *cfg.BufferToolStreams
-	}
+	toolStreamMode := resolveToolStreamMode(cfg.ToolStreamMode, cfg.BufferToolStreams)
 	enforceAgentToolUse := true
 	if cfg.EnforceAgentToolUse != nil {
 		enforceAgentToolUse = *cfg.EnforceAgentToolUse
@@ -2717,13 +2748,29 @@ func GetThinkingConfig() ThinkingConfig {
 		BudgetCapTokens:            budgetCapTokens,
 		DefaultMaxOutputTokens:     defaultMaxOutputTokens,
 		DefaultContextWindowTokens: defaultContextWindowTokens,
-		BufferToolStreams:          bufferToolStreams,
+		ToolStreamMode:             toolStreamMode,
+		BufferToolStreams:          toolStreamMode != ToolStreamModeLive,
 		EnforceAgentToolUse:        enforceAgentToolUse,
 	}
 }
 
 // UpdateThinkingConfig 更新 thinking 配置
 func UpdateThinkingConfig(suffix, openaiFormat, claudeFormat string, defaultBudgetTokens, budgetCapTokens, defaultMaxOutputTokens, defaultContextWindowTokens int, bufferToolStreams, enforceAgentToolUse bool) error {
+	toolStreamMode := ToolStreamModeLive
+	if bufferToolStreams {
+		toolStreamMode = ToolStreamModeSafe
+	}
+	return UpdateThinkingConfigWithToolStreamMode(suffix, openaiFormat, claudeFormat, defaultBudgetTokens, budgetCapTokens, defaultMaxOutputTokens, defaultContextWindowTokens, toolStreamMode, enforceAgentToolUse)
+}
+
+// UpdateThinkingConfigWithToolStreamMode persists thinking settings using the
+// three-state Claude tool stream policy. The legacy boolean is also written so
+// rolling back to an older binary preserves buffered/live behavior.
+func UpdateThinkingConfigWithToolStreamMode(suffix, openaiFormat, claudeFormat string, defaultBudgetTokens, budgetCapTokens, defaultMaxOutputTokens, defaultContextWindowTokens int, toolStreamMode string, enforceAgentToolUse bool) error {
+	normalizedMode, ok := NormalizeToolStreamMode(toolStreamMode)
+	if !ok {
+		return fmt.Errorf("invalid tool stream mode %q", toolStreamMode)
+	}
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
 	cfg.ThinkingSuffix = suffix
@@ -2734,7 +2781,8 @@ func UpdateThinkingConfig(suffix, openaiFormat, claudeFormat string, defaultBudg
 	cfg.ThinkingBudgetCapTokens = &budgetCap
 	cfg.DefaultMaxOutputTokens = max(0, defaultMaxOutputTokens)
 	cfg.DefaultContextWindowTokens = max(0, defaultContextWindowTokens)
-	bufferEnabled := bufferToolStreams
+	cfg.ToolStreamMode = normalizedMode
+	bufferEnabled := normalizedMode != ToolStreamModeLive
 	cfg.BufferToolStreams = &bufferEnabled
 	enforceTools := enforceAgentToolUse
 	cfg.EnforceAgentToolUse = &enforceTools

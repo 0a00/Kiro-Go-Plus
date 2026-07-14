@@ -1763,6 +1763,26 @@ func (h *Handler) handleCountTokens(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func configureClaudeToolStreaming(payload *KiroPayload, req *ClaudeRequest, thinking bool, thinkingOpts claudeThinkingResponseOptions, thinkingCfg config.ThinkingConfig) {
+	if payload == nil || req == nil {
+		return
+	}
+	safeMode := thinkingCfg.ToolStreamMode == config.ToolStreamModeSafe
+	liveMode := thinkingCfg.ToolStreamMode == config.ToolStreamModeLive
+	strictToolUse := requiresStrictClaudeToolUse(req)
+	guardToolStream := len(req.Tools) > 0 && (safeMode || strictToolUse)
+	guardActionableStream := req.Stream && guardToolStream
+
+	payload.requireActionableOutput = (len(req.Tools) > 0 || thinking) && (!req.Stream || guardActionableStream)
+	payload.toolUsePolicy = req.ToolUsePolicy
+	payload.deferTextUntilComplete = guardActionableStream && safeMode && req.ToolUsePolicy == toolUsePolicyInferred
+	payload.streamThinkingPrecommit = guardActionableStream && thinking && !thinkingOpts.OmitDisplay
+	payload.streamToolUseDeltas = req.Stream && len(req.Tools) > 0 && liveMode
+	// Inferred workspace intent adds strong tool guidance, but only an explicit
+	// client tool_choice may reject an otherwise valid text response.
+	payload.requireToolUse = strictToolUse
+}
+
 // handleClaudeMessages Claude API 处理
 func (h *Handler) handleClaudeMessages(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
@@ -1830,17 +1850,7 @@ func (h *Handler) handleClaudeMessages(w http.ResponseWriter, r *http.Request) {
 	apiKeyID := apiKeyIDFromContext(r.Context())
 	namespaceConversationID(kiroPayload, requestConversationNamespace(r, apiKeyID))
 	routeKey := kiroPayload.ConversationState.ConversationID
-	strictToolUse := requiresStrictClaudeToolUse(&req)
-	guardToolStream := len(req.Tools) > 0 && (thinkingCfg.BufferToolStreams || strictToolUse)
-	guardActionableStream := req.Stream && guardToolStream
-	kiroPayload.requireActionableOutput = (len(req.Tools) > 0 || thinking) && (!req.Stream || guardActionableStream)
-	kiroPayload.toolUsePolicy = req.ToolUsePolicy
-	kiroPayload.deferTextUntilComplete = guardActionableStream && thinkingCfg.BufferToolStreams && req.ToolUsePolicy == toolUsePolicyInferred
-	kiroPayload.streamThinkingPrecommit = guardActionableStream && thinking && !thinkingResponseOpts.OmitDisplay
-	kiroPayload.streamToolUseDeltas = req.Stream && len(req.Tools) > 0 && !thinkingCfg.BufferToolStreams
-	// Inferred workspace intent still adds strong tool guidance, but only an
-	// explicit client tool_choice may reject an otherwise valid text response.
-	kiroPayload.requireToolUse = requiresStrictClaudeToolUse(&req)
+	configureClaudeToolStreaming(kiroPayload, &req, thinking, thinkingResponseOpts, thinkingCfg)
 	if req.Stream {
 		h.handleClaudeStream(w, kiroPayload, req.Model, thinking, thinkingResponseOpts, estimatedInputTokens, cacheProfile, apiKeyID, routeKey)
 	} else {
@@ -6410,6 +6420,7 @@ func (h *Handler) apiGetThinkingConfig(w http.ResponseWriter, r *http.Request) {
 		"budgetCapTokens":            cfg.BudgetCapTokens,
 		"defaultMaxOutputTokens":     cfg.DefaultMaxOutputTokens,
 		"defaultContextWindowTokens": cfg.DefaultContextWindowTokens,
+		"toolStreamMode":             cfg.ToolStreamMode,
 		"bufferToolStreams":          cfg.BufferToolStreams,
 		"enforceAgentToolUse":        cfg.EnforceAgentToolUse,
 	})
@@ -6418,15 +6429,16 @@ func (h *Handler) apiGetThinkingConfig(w http.ResponseWriter, r *http.Request) {
 // apiUpdateThinkingConfig 更新 thinking 配置
 func (h *Handler) apiUpdateThinkingConfig(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Suffix                     string `json:"suffix"`
-		OpenAIFormat               string `json:"openaiFormat"`
-		ClaudeFormat               string `json:"claudeFormat"`
-		DefaultBudgetTokens        *int   `json:"defaultBudgetTokens"`
-		BudgetCapTokens            *int   `json:"budgetCapTokens"`
-		DefaultMaxOutputTokens     *int   `json:"defaultMaxOutputTokens"`
-		DefaultContextWindowTokens *int   `json:"defaultContextWindowTokens"`
-		BufferToolStreams          *bool  `json:"bufferToolStreams"`
-		EnforceAgentToolUse        *bool  `json:"enforceAgentToolUse"`
+		Suffix                     string  `json:"suffix"`
+		OpenAIFormat               string  `json:"openaiFormat"`
+		ClaudeFormat               string  `json:"claudeFormat"`
+		DefaultBudgetTokens        *int    `json:"defaultBudgetTokens"`
+		BudgetCapTokens            *int    `json:"budgetCapTokens"`
+		DefaultMaxOutputTokens     *int    `json:"defaultMaxOutputTokens"`
+		DefaultContextWindowTokens *int    `json:"defaultContextWindowTokens"`
+		ToolStreamMode             *string `json:"toolStreamMode"`
+		BufferToolStreams          *bool   `json:"bufferToolStreams"`
+		EnforceAgentToolUse        *bool   `json:"enforceAgentToolUse"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(400)
@@ -6464,9 +6476,20 @@ func (h *Handler) apiUpdateThinkingConfig(w http.ResponseWriter, r *http.Request
 	if req.DefaultContextWindowTokens != nil {
 		defaultContextWindowTokens = *req.DefaultContextWindowTokens
 	}
-	bufferToolStreams := current.BufferToolStreams
-	if req.BufferToolStreams != nil {
-		bufferToolStreams = *req.BufferToolStreams
+	toolStreamMode := current.ToolStreamMode
+	if req.ToolStreamMode != nil {
+		normalized, ok := config.NormalizeToolStreamMode(*req.ToolStreamMode)
+		if !ok {
+			w.WriteHeader(400)
+			json.NewEncoder(w).Encode(map[string]string{"error": "toolStreamMode must be: safe, balanced, or live"})
+			return
+		}
+		toolStreamMode = normalized
+	} else if req.BufferToolStreams != nil {
+		toolStreamMode = config.ToolStreamModeLive
+		if *req.BufferToolStreams {
+			toolStreamMode = config.ToolStreamModeSafe
+		}
 	}
 	enforceAgentToolUse := current.EnforceAgentToolUse
 	if req.EnforceAgentToolUse != nil {
@@ -6498,7 +6521,7 @@ func (h *Handler) apiUpdateThinkingConfig(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	if err := config.UpdateThinkingConfig(req.Suffix, req.OpenAIFormat, req.ClaudeFormat, defaultBudgetTokens, budgetCapTokens, defaultMaxOutputTokens, defaultContextWindowTokens, bufferToolStreams, enforceAgentToolUse); err != nil {
+	if err := config.UpdateThinkingConfigWithToolStreamMode(req.Suffix, req.OpenAIFormat, req.ClaudeFormat, defaultBudgetTokens, budgetCapTokens, defaultMaxOutputTokens, defaultContextWindowTokens, toolStreamMode, enforceAgentToolUse); err != nil {
 		w.WriteHeader(500)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return

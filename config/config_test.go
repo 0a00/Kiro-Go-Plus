@@ -108,7 +108,7 @@ func TestThinkingConfigDefaultsAndPersistence(t *testing.T) {
 		t.Fatalf("init config: %v", err)
 	}
 	defaults := GetThinkingConfig()
-	if defaults.DefaultBudgetTokens != 4000 || defaults.BudgetCapTokens != 10000 || defaults.DefaultMaxOutputTokens != 0 || defaults.DefaultContextWindowTokens != 0 || !defaults.BufferToolStreams || !defaults.EnforceAgentToolUse {
+	if defaults.DefaultBudgetTokens != 4000 || defaults.BudgetCapTokens != 10000 || defaults.DefaultMaxOutputTokens != 0 || defaults.DefaultContextWindowTokens != 0 || defaults.ToolStreamMode != ToolStreamModeSafe || !defaults.BufferToolStreams || !defaults.EnforceAgentToolUse {
 		t.Fatalf("unexpected defaults: %+v", defaults)
 	}
 
@@ -119,8 +119,52 @@ func TestThinkingConfigDefaultsAndPersistence(t *testing.T) {
 		t.Fatalf("reload config: %v", err)
 	}
 	got := GetThinkingConfig()
-	if got.Suffix != "-reason" || got.DefaultBudgetTokens != 5000 || got.BudgetCapTokens != 0 || got.DefaultMaxOutputTokens != 64000 || got.DefaultContextWindowTokens != 1000000 || got.BufferToolStreams || got.EnforceAgentToolUse {
+	if got.Suffix != "-reason" || got.DefaultBudgetTokens != 5000 || got.BudgetCapTokens != 0 || got.DefaultMaxOutputTokens != 64000 || got.DefaultContextWindowTokens != 1000000 || got.ToolStreamMode != ToolStreamModeLive || got.BufferToolStreams || got.EnforceAgentToolUse {
 		t.Fatalf("unexpected persisted thinking config: %+v", got)
+	}
+
+	if err := UpdateThinkingConfigWithToolStreamMode("-reason", "reasoning_content", "thinking", 5000, 0, 64000, 1000000, ToolStreamModeBalanced, false); err != nil {
+		t.Fatalf("update balanced thinking config: %v", err)
+	}
+	if err := Init(path); err != nil {
+		t.Fatalf("reload balanced config: %v", err)
+	}
+	got = GetThinkingConfig()
+	if got.ToolStreamMode != ToolStreamModeBalanced || !got.BufferToolStreams {
+		t.Fatalf("unexpected balanced thinking config: %+v", got)
+	}
+	if err := UpdateThinkingConfigWithToolStreamMode("-reason", "reasoning_content", "thinking", 5000, 0, 64000, 1000000, "invalid", false); err == nil {
+		t.Fatal("expected invalid tool stream mode to be rejected")
+	}
+}
+
+func TestThinkingConfigLoadsLegacyBufferToolStreams(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := Init(path); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	var stored map[string]interface{}
+	if err := json.Unmarshal(raw, &stored); err != nil {
+		t.Fatalf("decode config: %v", err)
+	}
+	delete(stored, "toolStreamMode")
+	stored["bufferToolStreams"] = false
+	raw, err = json.MarshalIndent(stored, "", "  ")
+	if err != nil {
+		t.Fatalf("encode legacy config: %v", err)
+	}
+	if err := os.WriteFile(path, raw, 0600); err != nil {
+		t.Fatalf("write legacy config: %v", err)
+	}
+	if err := Init(path); err != nil {
+		t.Fatalf("reload legacy config: %v", err)
+	}
+	if got := GetThinkingConfig(); got.ToolStreamMode != ToolStreamModeLive || got.BufferToolStreams {
+		t.Fatalf("legacy buffer setting did not migrate to live mode: %+v", got)
 	}
 }
 

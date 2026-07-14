@@ -32,6 +32,45 @@ func TestThinkingSourceReasoningFirst(t *testing.T) {
 	}
 }
 
+func TestConfigureClaudeToolStreamingModes(t *testing.T) {
+	tests := []struct {
+		name                string
+		mode                string
+		policy              string
+		requireActionable   bool
+		deferText           bool
+		streamThinking      bool
+		streamToolDeltas    bool
+		requireExplicitTool bool
+	}{
+		{name: "safe inferred", mode: config.ToolStreamModeSafe, policy: toolUsePolicyInferred, requireActionable: true, deferText: true, streamThinking: true},
+		{name: "balanced inferred", mode: config.ToolStreamModeBalanced, policy: toolUsePolicyInferred},
+		{name: "live inferred", mode: config.ToolStreamModeLive, policy: toolUsePolicyInferred, streamToolDeltas: true},
+		{name: "balanced explicit", mode: config.ToolStreamModeBalanced, policy: toolUsePolicyExplicit, requireActionable: true, streamThinking: true, requireExplicitTool: true},
+		{name: "live explicit", mode: config.ToolStreamModeLive, policy: toolUsePolicyExplicit, requireActionable: true, streamThinking: true, streamToolDeltas: true, requireExplicitTool: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := &ClaudeRequest{
+				Stream:        true,
+				Tools:         []ClaudeTool{{Name: "Write"}},
+				ToolUsePolicy: tc.policy,
+			}
+			payload := &KiroPayload{}
+			configureClaudeToolStreaming(payload, req, true, claudeThinkingResponseOptions{}, config.ThinkingConfig{ToolStreamMode: tc.mode})
+
+			if payload.requireActionableOutput != tc.requireActionable ||
+				payload.deferTextUntilComplete != tc.deferText ||
+				payload.streamThinkingPrecommit != tc.streamThinking ||
+				payload.streamToolUseDeltas != tc.streamToolDeltas ||
+				payload.requireToolUse != tc.requireExplicitTool {
+				t.Fatalf("unexpected stream policy: %+v", payload)
+			}
+		})
+	}
+}
+
 func TestApiGetAccountsExposesExplicitOutcomeCounts(t *testing.T) {
 	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatalf("config.Init: %v", err)
@@ -85,6 +124,7 @@ func TestThinkingConfigAPIUpdatesTokenDefaults(t *testing.T) {
 		"budgetCapTokens":10000,
 		"defaultMaxOutputTokens":64000,
 		"defaultContextWindowTokens":1000000,
+		"toolStreamMode":"balanced",
 		"bufferToolStreams":true,
 		"enforceAgentToolUse":true
 	}`))
@@ -93,8 +133,33 @@ func TestThinkingConfigAPIUpdatesTokenDefaults(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
 	}
 	got := config.GetThinkingConfig()
-	if got.DefaultMaxOutputTokens != 64000 || got.DefaultContextWindowTokens != 1000000 {
+	if got.DefaultMaxOutputTokens != 64000 || got.DefaultContextWindowTokens != 1000000 || got.ToolStreamMode != config.ToolStreamModeBalanced || !got.BufferToolStreams {
 		t.Fatalf("unexpected persisted token defaults: %+v", got)
+	}
+
+	getRec := httptest.NewRecorder()
+	(&Handler{}).apiGetThinkingConfig(getRec, httptest.NewRequest(http.MethodGet, "/admin/api/thinking", nil))
+	var response struct {
+		ToolStreamMode    string `json:"toolStreamMode"`
+		BufferToolStreams bool   `json:"bufferToolStreams"`
+	}
+	if err := json.Unmarshal(getRec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode thinking config response: %v", err)
+	}
+	if response.ToolStreamMode != config.ToolStreamModeBalanced || !response.BufferToolStreams {
+		t.Fatalf("unexpected thinking config response: %+v", response)
+	}
+
+	legacy := httptest.NewRecorder()
+	(&Handler{}).apiUpdateThinkingConfig(legacy, httptest.NewRequest(http.MethodPost, "/admin/api/thinking", strings.NewReader(`{"bufferToolStreams":false}`)))
+	if legacy.Code != http.StatusOK || config.GetThinkingConfig().ToolStreamMode != config.ToolStreamModeLive {
+		t.Fatalf("legacy buffer setting did not select live mode: status=%d body=%s config=%+v", legacy.Code, legacy.Body.String(), config.GetThinkingConfig())
+	}
+
+	invalidMode := httptest.NewRecorder()
+	(&Handler{}).apiUpdateThinkingConfig(invalidMode, httptest.NewRequest(http.MethodPost, "/admin/api/thinking", strings.NewReader(`{"toolStreamMode":"fast"}`)))
+	if invalidMode.Code != http.StatusBadRequest {
+		t.Fatalf("expected invalid tool stream mode to return 400, got %d", invalidMode.Code)
 	}
 
 	invalid := httptest.NewRecorder()
@@ -627,6 +692,115 @@ func TestClaudeLiveModeCommitsInferredTextBeforeUpstreamCompletes(t *testing.T) 
 	}
 	if !strings.Contains(string(rest), "second chunk") || !strings.Contains(string(rest), "message_stop") {
 		t.Fatalf("remaining stream is incomplete: %s", rest)
+	}
+}
+
+func TestClaudeBalancedModeStreamsTextButBuffersToolArguments(t *testing.T) {
+	t.Setenv("ALLOW_UNAUTHENTICATED_API", "true")
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	if err := config.UpdateThinkingConfigWithToolStreamMode("-thinking", "reasoning_content", "thinking", 4000, 10000, 0, 0, config.ToolStreamModeBalanced, true); err != nil {
+		t.Fatalf("enable balanced tool streams: %v", err)
+	}
+	if err := config.AddAccount(config.Account{
+		ID: "balanced-tool-account", Enabled: true, AccessToken: "token-balanced-tool", ProfileArn: "arn:aws:codewhisperer:profile/balanced-tool",
+	}); err != nil {
+		t.Fatalf("add account: %v", err)
+	}
+	if err := config.UpdatePreferredEndpoint("kiro"); err != nil {
+		t.Fatalf("set preferred endpoint: %v", err)
+	}
+	if err := config.UpdateEndpointFallback(false); err != nil {
+		t.Fatalf("disable endpoint fallback: %v", err)
+	}
+
+	releaseUpstream := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseUpstream) }) }
+	defer release()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{
+			"content": "balanced-visible-text arrives before the complete tool arguments and should be streamed immediately",
+		}))
+		_, _ = w.Write(awsEventStreamFrame(t, "toolUseStartEvent", map[string]interface{}{
+			"toolUseId": "toolu_balanced",
+			"name":      "Write",
+		}))
+		_, _ = w.Write(awsEventStreamFrame(t, "toolUseInputEvent", map[string]interface{}{
+			"input": `{"file_path":"index.html","content":"first-balanced-fragment`,
+		}))
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		select {
+		case <-releaseUpstream:
+		case <-r.Context().Done():
+			return
+		}
+		_, _ = w.Write(awsEventStreamFrame(t, "toolUseInputEvent", map[string]interface{}{
+			"input": ` second-balanced-fragment"}`,
+		}))
+		_, _ = w.Write(awsEventStreamFrame(t, "toolUseStopEvent", map[string]interface{}{}))
+		_, _ = w.Write(awsEventStreamFrame(t, "contextUsageEvent", map[string]interface{}{
+			"contextUsagePercentage": 1.0,
+		}))
+	}))
+	defer upstream.Close()
+	defer swapKiroEndpointsForTest(t, upstream)()
+
+	p := accountpool.GetPool()
+	p.Reload()
+	h := &Handler{pool: p, promptCache: newPromptCacheTracker(defaultPromptCacheTTL), requestLog: newRequestLog(defaultRequestLogLimit)}
+	server := httptest.NewServer(h)
+	defer server.Close()
+
+	req, err := http.NewRequest(http.MethodPost, server.URL+"/v1/messages", strings.NewReader(`{
+		"model":"claude-sonnet-4.5",
+		"stream":true,
+		"messages":[{"role":"user","content":"任务目标：请创建一个 HTML 文件并写入工作区。"}],
+		"tools":[{"name":"Write","description":"write a file","input_schema":{"type":"object","properties":{"file_path":{"type":"string"},"content":{"type":"string"}}}}]
+	}`))
+	if err != nil {
+		t.Fatalf("create request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := (&http.Client{Timeout: 3 * time.Second}).Do(req)
+	if err != nil {
+		t.Fatalf("start streamed request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	reader := bufio.NewReader(resp.Body)
+	var first strings.Builder
+	for !strings.Contains(first.String(), "balanced-visible-text") {
+		line, readErr := reader.ReadString('\n')
+		if readErr != nil {
+			t.Fatalf("read balanced text: %v body=%s", readErr, first.String())
+		}
+		first.WriteString(line)
+	}
+	if strings.Contains(first.String(), "first-balanced-fragment") || strings.Contains(first.String(), "input_json_delta") || strings.Contains(first.String(), "message_stop") {
+		t.Fatalf("balanced mode leaked incomplete tool arguments: %s", first.String())
+	}
+
+	time.Sleep(40 * time.Millisecond)
+	release()
+	rest, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("read remaining balanced stream: %v", err)
+	}
+	full := first.String() + string(rest)
+	if !strings.Contains(full, "first-balanced-fragment") || !strings.Contains(full, "second-balanced-fragment") || !strings.Contains(full, "message_stop") {
+		t.Fatalf("balanced stream is incomplete: %s", full)
+	}
+	if strings.Count(full, `"type":"input_json_delta"`) != 1 {
+		t.Fatalf("balanced mode should emit one complete tool argument delta: %s", full)
+	}
+	entries := h.requestLog.list(1)
+	if len(entries) != 1 || entries[0].FirstContentMs == nil || *entries[0].FirstContentMs >= entries[0].DurationMs {
+		t.Fatalf("balanced text latency was not captured before completion: %+v", entries)
 	}
 }
 

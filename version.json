@@ -1,5 +1,5 @@
 {
-  "version": "1.2.22",
-  "changelog": "Add an optional complete request logging mode for inference debugging. The Web panel can configure retention and per-detail size, inspect/copy/download individual request details, and clear the detail store. Details include sanitized request JSON, visible and thinking output, token/cache metadata, account and endpoint attempts, and bounded stream timing. Credentials, authorization headers, image/document Base64, and raw tool arguments are never persisted. A new sudo-aware self-updater fast-forwards clean Git deployments, rebuilds Compose, verifies health, and automatically rolls back failures.\n新增可选的完整日志模式，用于推理请求测试和故障分析。可在 Web 中设置保留数量和单条大小，查看、复制、下载单条详情并清空详情存储。详情包含脱敏请求 JSON、可见/思考输出、Token/缓存数据、账号与端点尝试以及有界流事件时间线；不会持久化认证凭据、Authorization 请求头、图片/文档 Base64 原文或工具参数原文。新增带 sudo 的 Git 原目录一键更新脚本，可自动构建 Compose、健康检查并在失败时回滚。",
+  "version": "1.2.23",
+  "changelog": "Add safe, balanced, and live Claude tool stream modes. Balanced mode streams text and thinking immediately while buffering tool arguments until valid complete JSON is available. Legacy bufferToolStreams configuration remains compatible.\n新增 Claude 工具流安全、平衡、实时三档模式。平衡模式会立即转发正文和思考，同时等待工具参数形成合法完整 JSON 后再发送；旧版 bufferToolStreams 配置继续兼容。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }
