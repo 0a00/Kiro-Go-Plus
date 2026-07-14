@@ -5,6 +5,8 @@ import (
 	"kiro-go/config"
 	"strings"
 	"unicode"
+
+	"github.com/google/uuid"
 )
 
 const (
@@ -62,6 +64,26 @@ func openAIToolNames(tools []OpenAITool) []string {
 
 func hasHighRiskToolNames(names []string) bool {
 	for _, name := range names {
+		if isHighRiskToolName(name) {
+			return true
+		}
+	}
+	return false
+}
+
+func payloadHasHighRiskTools(payload *KiroPayload) bool {
+	if payload == nil {
+		return false
+	}
+	ctx := payload.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext
+	if ctx == nil {
+		return false
+	}
+	for _, wrapper := range ctx.Tools {
+		name := wrapper.ToolSpecification.Name
+		if original, ok := payload.ToolNameMap[name]; ok {
+			name = original
+		}
 		if isHighRiskToolName(name) {
 			return true
 		}
@@ -152,6 +174,7 @@ func (p *KiroPayload) recordToolTruncation(argumentBytes, fragmentCount int, ret
 	allowRetry := retryable && settings.Enabled && p.toolTruncationCount <= settings.TruncationRetries
 	if allowRetry {
 		p.toolRecoveryAttempts++
+		p.ConversationState.AgentContinuationId = uuid.New().String()
 		if !p.toolRecoveryHintApplied {
 			p.applyToolRecoveryHintLocked()
 			p.toolRecoveryHintApplied = true

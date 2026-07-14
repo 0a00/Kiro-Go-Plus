@@ -1203,6 +1203,7 @@ func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request) {
 		buildModelInfo("gpt-4o", "kiro-proxy", true),
 		buildModelInfo("gpt-4", "kiro-proxy", true),
 	)
+	models = dedupeModelResponse(models)
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -1829,6 +1830,10 @@ func (h *Handler) handleClaudeMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	actualModel, thinking := resolveClaudeThinkingMode(req.Model, req.Thinking, thinkingCfg.Suffix)
+	if !h.requestedModelAvailable(req.Model, actualModel) {
+		h.sendClaudeError(w, http.StatusBadRequest, "invalid_request_error", "The requested model is not available")
+		return
+	}
 	if fallbackModel, changed := maybeLongToolFallback(actualModel, req.MaxTokens, claudeToolNames(req.Tools)); changed {
 		actualModel = fallbackModel
 		contextWindowTokens = resolveContextWindowTokens(actualModel, req.ContextWindow, req.MaxInputTokens)
@@ -1890,13 +1895,27 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 	excluded := attempts.excluded
 	var lastErr error
 	var busyErr error
+	var sseMu sync.Mutex
 	messageStarted := false
+	streamFinished := false
 	var messageStartUsage promptCacheUsage
-	lastPingAt := startedAt
+	lastThinkingHeartbeatAt := startedAt
 	nextContentIndex := 0
 	var rawThinkingBuilder strings.Builder
+	sendSSE := func(event string, data interface{}) {
+		sseMu.Lock()
+		h.sendSSE(w, flusher, event, data)
+		sseMu.Unlock()
+	}
+	isMessageStarted := func() bool {
+		sseMu.Lock()
+		defer sseMu.Unlock()
+		return messageStarted
+	}
 
 	ensureMessageStart := func() {
+		sseMu.Lock()
+		defer sseMu.Unlock()
 		if messageStarted {
 			return
 		}
@@ -1916,13 +1935,17 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 		messageStarted = true
 	}
 	sendStreamError := func(status int, errorType, message string) {
+		sseMu.Lock()
 		if messageStarted {
+			streamFinished = true
 			h.sendSSE(w, flusher, "error", map[string]interface{}{
 				"type":  "error",
 				"error": map[string]string{"type": errorType, "message": message},
 			})
+			sseMu.Unlock()
 			return
 		}
+		sseMu.Unlock()
 		h.sendClaudeError(w, status, errorType, message)
 	}
 	if payload.requireActionableOutput {
@@ -1931,6 +1954,30 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 		// account and endpoint retries safe until actual content is committed.
 		ensureMessageStart()
 	}
+	heartbeatDone := make(chan struct{})
+	var heartbeatWG sync.WaitGroup
+	heartbeatWG.Add(1)
+	go func() {
+		defer heartbeatWG.Done()
+		ticker := time.NewTicker(claudeStreamHeartbeatInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				sseMu.Lock()
+				if messageStarted && !streamFinished {
+					h.sendSSE(w, flusher, "ping", map[string]string{"type": "ping"})
+				}
+				sseMu.Unlock()
+			case <-heartbeatDone:
+				return
+			}
+		}
+	}()
+	defer func() {
+		close(heartbeatDone)
+		heartbeatWG.Wait()
+	}()
 
 	for {
 		account, guard, busy := h.acquireNextAccountForRequest(attempts, model, routeKey)
@@ -1978,7 +2025,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 			if activeBlockIndex < 0 {
 				return
 			}
-			h.sendSSE(w, flusher, "content_block_stop", map[string]interface{}{
+			sendSSE("content_block_stop", map[string]interface{}{
 				"type":  "content_block_stop",
 				"index": activeBlockIndex,
 			})
@@ -1997,7 +2044,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 			nextContentIndex++
 
 			if blockType == "thinking" {
-				h.sendSSE(w, flusher, "content_block_start", map[string]interface{}{
+				sendSSE("content_block_start", map[string]interface{}{
 					"type":  "content_block_start",
 					"index": idx,
 					"content_block": map[string]string{
@@ -2006,7 +2053,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 					},
 				})
 			} else {
-				h.sendSSE(w, flusher, "content_block_start", map[string]interface{}{
+				sendSSE("content_block_start", map[string]interface{}{
 					"type":  "content_block_start",
 					"index": idx,
 					"content_block": map[string]string{
@@ -2034,7 +2081,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 				}
 				actionableCommitted = true
 				startContentBlock("text")
-				h.sendSSE(w, flusher, "content_block_delta", map[string]interface{}{
+				sendSSE("content_block_delta", map[string]interface{}{
 					"type":  "content_block_delta",
 					"index": activeBlockIndex,
 					"delta": map[string]string{"type": "text_delta", "text": text},
@@ -2064,7 +2111,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 					return
 				}
 				startContentBlock("text")
-				h.sendSSE(w, flusher, "content_block_delta", map[string]interface{}{
+				sendSSE("content_block_delta", map[string]interface{}{
 					"type":  "content_block_delta",
 					"index": activeBlockIndex,
 					"delta": map[string]string{"type": "text_delta", "text": outputText},
@@ -2074,7 +2121,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 					return
 				}
 				startContentBlock("text")
-				h.sendSSE(w, flusher, "content_block_delta", map[string]interface{}{
+				sendSSE("content_block_delta", map[string]interface{}{
 					"type":  "content_block_delta",
 					"index": activeBlockIndex,
 					"delta": map[string]string{"type": "text_delta", "text": text},
@@ -2101,7 +2148,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 				}
 				if text != "" {
 					startContentBlock("thinking")
-					h.sendSSE(w, flusher, "content_block_delta", map[string]interface{}{
+					sendSSE("content_block_delta", map[string]interface{}{
 						"type":  "content_block_delta",
 						"index": activeBlockIndex,
 						"delta": map[string]string{"type": "thinking_delta", "thinking": text},
@@ -2232,7 +2279,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 			idx := nextContentIndex
 			nextContentIndex++
 			streamedTools[toolUseID] = &streamedClaudeTool{index: idx}
-			h.sendSSE(w, flusher, "content_block_start", map[string]interface{}{
+			sendSSE("content_block_start", map[string]interface{}{
 				"type":  "content_block_start",
 				"index": idx,
 				"content_block": map[string]interface{}{
@@ -2253,7 +2300,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 				return
 			}
 			firstContent.Mark()
-			h.sendSSE(w, flusher, "content_block_delta", map[string]interface{}{
+			sendSSE("content_block_delta", map[string]interface{}{
 				"type":  "content_block_delta",
 				"index": tool.index,
 				"delta": map[string]interface{}{
@@ -2269,13 +2316,14 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 				return
 			}
 			tool.stopped = true
-			h.sendSSE(w, flusher, "content_block_stop", map[string]interface{}{
+			sendSSE("content_block_stop", map[string]interface{}{
 				"type":  "content_block_stop",
 				"index": tool.index,
 			})
 		}
 
 		callback := &KiroStreamCallback{
+			OnResponseStart: ensureMessageStart,
 			OnText: func(text string, isThinking bool) {
 				firstContent.MarkText(text)
 				if text == "" {
@@ -2314,26 +2362,24 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 				outputTokens = outTok
 			},
 			OnProgress: func() {
-				if !messageStarted || time.Since(lastPingAt) < claudeStreamHeartbeatInterval {
+				if !isMessageStarted() || time.Since(lastThinkingHeartbeatAt) < claudeStreamHeartbeatInterval {
 					return
 				}
-				lastPingAt = time.Now()
+				lastThinkingHeartbeatAt = time.Now()
 				if payload.streamThinkingPrecommit && !actionableCommitted && thinkingFormat == "thinking" {
 					startContentBlock("thinking")
-					h.sendSSE(w, flusher, "content_block_delta", map[string]interface{}{
+					sendSSE("content_block_delta", map[string]interface{}{
 						"type":  "content_block_delta",
 						"index": activeBlockIndex,
 						"delta": map[string]string{"type": "thinking_delta", "thinking": " "},
 					})
 					thinkingStarted = true
 					eventThinkingOpen = true
-					return
 				}
-				h.sendSSE(w, flusher, "ping", map[string]string{"type": "ping"})
 			},
 			OnUsage: func(usage KiroTokenUsage) {
 				upstreamUsage = usage
-				if !messageStarted && usage.HasCacheBreakdown {
+				if !isMessageStarted() && usage.HasCacheBreakdown {
 					messageStartUsage, startInputTokens = resolvePromptCacheUsage(cacheUsage, usage, startInputTokens, cacheProfile)
 				}
 			},
@@ -2453,6 +2499,8 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 		})
 
 		ensureMessageStart()
+		sseMu.Lock()
+		streamFinished = true
 		h.sendSSE(w, flusher, "message_delta", map[string]interface{}{
 			"type": "message_delta",
 			"delta": map[string]interface{}{
@@ -2464,6 +2512,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 		h.sendSSE(w, flusher, "message_stop", map[string]interface{}{
 			"type": "message_stop",
 		})
+		sseMu.Unlock()
 		return
 	}
 
@@ -2929,6 +2978,10 @@ func (h *Handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 	// 解析模型和 thinking 模式
 	thinkingCfg := config.GetThinkingConfig()
 	actualModel, thinking := ParseModelAndThinking(req.Model, thinkingCfg.Suffix)
+	if !h.requestedModelAvailable(req.Model, actualModel) {
+		h.sendOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "The requested model is not available")
+		return
+	}
 	if fallbackModel, changed := maybeLongToolFallback(actualModel, req.MaxTokens, openAIToolNames(req.Tools)); changed {
 		actualModel = fallbackModel
 		contextWindowTokens = resolveContextWindowTokens(actualModel, req.ContextWindow, req.MaxInputTokens)

@@ -131,6 +131,10 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 	thinkingCfg := config.GetThinkingConfig()
 	contextWindowTokens := applyOpenAITokenBudgetDefaults(openaiReq)
 	actualModel, thinking := ParseModelAndThinking(req.Model, thinkingCfg.Suffix)
+	if !h.requestedModelAvailable(req.Model, actualModel) {
+		h.sendOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "The requested model is not available")
+		return
+	}
 	if fallbackModel, changed := maybeLongToolFallback(actualModel, openaiReq.MaxTokens, openAIToolNames(openaiReq.Tools)); changed {
 		actualModel = fallbackModel
 		contextWindowTokens = resolveContextWindowTokens(actualModel, openaiReq.ContextWindow, openaiReq.MaxInputTokens)

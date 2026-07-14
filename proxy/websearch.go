@@ -232,7 +232,7 @@ func (h *Handler) handleClaudeWebSearch(ctx context.Context, w http.ResponseWrit
 		h.sendWebSearchSSE(w, req.Model, query, results, estimatedInputTokens, outputTokens)
 		return
 	}
-	resp := KiroToClaudeResponse(output, "", false, nil, estimatedInputTokens, outputTokens, req.Model)
+	resp := buildWebSearchClaudeResponse(req.Model, query, output, results, estimatedInputTokens, outputTokens)
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	json.NewEncoder(w).Encode(resp)
 }
@@ -455,6 +455,29 @@ func webSearchSummary(query string, results *webSearchResults) string {
 	return strings.Join(lines, "\n")
 }
 
+func buildWebSearchClaudeResponse(model, query, summary string, results *webSearchResults, inputTokens, outputTokens int) *ClaudeResponse {
+	toolUseID := "srvtoolu_" + uuid.New().String()
+	return &ClaudeResponse{
+		ID:   "msg_" + uuid.New().String(),
+		Type: "message",
+		Role: "assistant",
+		Content: []ClaudeContentBlock{
+			{Type: "server_tool_use", ID: toolUseID, Name: "web_search", Input: map[string]string{"query": query}},
+			{Type: "web_search_tool_result", ToolUseID: toolUseID, Content: webSearchResultBlocks(results)},
+			{Type: "text", Text: summary},
+		},
+		Model:      model,
+		StopReason: "end_turn",
+		Usage: ClaudeUsage{
+			InputTokens:  inputTokens,
+			OutputTokens: outputTokens,
+			ServerToolUse: &ClaudeServerToolUsage{
+				WebSearchRequests: 1,
+			},
+		},
+	}
+}
+
 func (h *Handler) sendWebSearchSSE(w http.ResponseWriter, model, query string, results *webSearchResults, inputTokens, outputTokens int) {
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -465,7 +488,8 @@ func (h *Handler) sendWebSearchSSE(w http.ResponseWriter, model, query string, r
 		return
 	}
 	msgID := "msg_" + uuid.New().String()
-	toolUseID := "web_search_tooluse_" + uuid.New().String()
+	toolUseID := "srvtoolu_" + uuid.New().String()
+	summary := webSearchSummary(query, results)
 	h.sendSSE(w, flusher, "message_start", map[string]interface{}{
 		"type": "message_start",
 		"message": map[string]interface{}{
@@ -483,7 +507,7 @@ func (h *Handler) sendWebSearchSSE(w http.ResponseWriter, model, query string, r
 		"type":  "content_block_start",
 		"index": 0,
 		"content_block": map[string]interface{}{
-			"type":  "tool_use",
+			"type":  "server_tool_use",
 			"id":    toolUseID,
 			"name":  "web_search",
 			"input": map[string]string{"query": query},
@@ -500,10 +524,32 @@ func (h *Handler) sendWebSearchSSE(w http.ResponseWriter, model, query string, r
 		},
 	})
 	h.sendSSE(w, flusher, "content_block_stop", map[string]interface{}{"type": "content_block_stop", "index": 1})
+	h.sendSSE(w, flusher, "content_block_start", map[string]interface{}{
+		"type":  "content_block_start",
+		"index": 2,
+		"content_block": map[string]interface{}{
+			"type": "text",
+			"text": "",
+		},
+	})
+	h.sendSSE(w, flusher, "content_block_delta", map[string]interface{}{
+		"type":  "content_block_delta",
+		"index": 2,
+		"delta": map[string]string{
+			"type": "text_delta",
+			"text": summary,
+		},
+	})
+	h.sendSSE(w, flusher, "content_block_stop", map[string]interface{}{"type": "content_block_stop", "index": 2})
 	h.sendSSE(w, flusher, "message_delta", map[string]interface{}{
 		"type":  "message_delta",
 		"delta": map[string]interface{}{"stop_reason": "end_turn"},
-		"usage": map[string]int{"output_tokens": outputTokens},
+		"usage": map[string]interface{}{
+			"output_tokens": outputTokens,
+			"server_tool_use": map[string]int{
+				"web_search_requests": 1,
+			},
+		},
 	})
 	h.sendSSE(w, flusher, "message_stop", map[string]interface{}{"type": "message_stop"})
 }
@@ -515,15 +561,13 @@ func webSearchResultBlocks(results *webSearchResults) []map[string]interface{} {
 	}
 	for _, item := range results.Results {
 		block := map[string]interface{}{
-			"type":  "web_search_result",
-			"title": item.Title,
-			"url":   item.URL,
-		}
-		if item.Snippet != "" {
-			block["snippet"] = item.Snippet
+			"type":              "web_search_result",
+			"title":             item.Title,
+			"url":               item.URL,
+			"encrypted_content": item.Snippet,
 		}
 		if item.PublishedAt > 0 {
-			block["published_date"] = item.PublishedAt
+			block["page_age"] = time.UnixMilli(item.PublishedAt).UTC().Format("January 2, 2006")
 		}
 		out = append(out, block)
 	}

@@ -1133,6 +1133,95 @@ func TestClaudeInferredToolStreamEmitsThinkingHeartbeatBeforeToolCompletes(t *te
 	}
 }
 
+func TestClaudePlainStreamEmitsIndependentHeartbeatBeforeContent(t *testing.T) {
+	t.Setenv("ALLOW_UNAUTHENTICATED_API", "true")
+	oldHeartbeatInterval := claudeStreamHeartbeatInterval
+	claudeStreamHeartbeatInterval = 10 * time.Millisecond
+	defer func() { claudeStreamHeartbeatInterval = oldHeartbeatInterval }()
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	if err := config.AddAccount(config.Account{
+		ID: "plain-heartbeat-account", Enabled: true, AccessToken: "token-heartbeat", ProfileArn: "arn:aws:codewhisperer:profile/heartbeat",
+	}); err != nil {
+		t.Fatalf("add account: %v", err)
+	}
+	if err := config.UpdatePreferredEndpoint("kiro"); err != nil {
+		t.Fatalf("set preferred endpoint: %v", err)
+	}
+	if err := config.UpdateEndpointFallback(false); err != nil {
+		t.Fatalf("disable endpoint fallback: %v", err)
+	}
+
+	releaseUpstream := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseUpstream) }) }
+	defer release()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		select {
+		case <-releaseUpstream:
+		case <-r.Context().Done():
+			return
+		}
+		_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "heartbeat-complete"}))
+		_, _ = w.Write(awsEventStreamFrame(t, "contextUsageEvent", map[string]interface{}{"contextUsagePercentage": 1.0}))
+	}))
+	defer upstream.Close()
+	defer swapKiroEndpointsForTest(t, upstream)()
+
+	p := accountpool.GetPool()
+	p.Reload()
+	h := &Handler{pool: p, promptCache: newPromptCacheTracker(defaultPromptCacheTTL), requestLog: newRequestLog(defaultRequestLogLimit)}
+	server := httptest.NewServer(h)
+	defer server.Close()
+
+	req, err := http.NewRequest(http.MethodPost, server.URL+"/v1/messages", strings.NewReader(`{
+		"model":"claude-sonnet-5",
+		"stream":true,
+		"max_tokens":256,
+		"messages":[{"role":"user","content":"wait before replying"}]
+	}`))
+	if err != nil {
+		t.Fatalf("create request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := (&http.Client{Timeout: 3 * time.Second}).Do(req)
+	if err != nil {
+		t.Fatalf("start streamed request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	reader := bufio.NewReader(resp.Body)
+	var preamble strings.Builder
+	for !strings.Contains(preamble.String(), "event: ping") {
+		line, readErr := reader.ReadString('\n')
+		if readErr != nil {
+			t.Fatalf("read heartbeat: %v body=%s", readErr, preamble.String())
+		}
+		preamble.WriteString(line)
+	}
+	if !strings.Contains(preamble.String(), "event: message_start") || strings.Contains(preamble.String(), "heartbeat-complete") {
+		t.Fatalf("unexpected pre-content stream: %s", preamble.String())
+	}
+
+	release()
+	rest, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("read remaining stream: %v", err)
+	}
+	if !strings.Contains(string(rest), "heartbeat-complete") || !strings.Contains(string(rest), "event: message_stop") {
+		t.Fatalf("remaining stream is incomplete: %s", rest)
+	}
+	entries := h.requestLog.list(1)
+	if len(entries) != 1 || entries[0].FirstContentMs == nil || *entries[0].FirstContentMs < 10 {
+		t.Fatalf("heartbeat was counted as first content: %+v", entries)
+	}
+}
+
 func TestClaudeInferredToolStreamRetriesAfterPreambleTransportFailure(t *testing.T) {
 	t.Setenv("ALLOW_UNAUTHENTICATED_API", "true")
 	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {

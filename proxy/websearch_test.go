@@ -55,6 +55,37 @@ func TestExtractWebSearchQueryPrefersToolChoiceInput(t *testing.T) {
 	}
 }
 
+func TestBuildWebSearchClaudeResponseUsesServerToolBlocks(t *testing.T) {
+	results := &webSearchResults{Results: []webSearchResult{{Title: "OpenAI", URL: "https://openai.com/", Snippet: "Official site", PublishedAt: 1783987200000}}}
+	resp := buildWebSearchClaudeResponse("claude-sonnet-5", "openai", "summary", results, 10, 2)
+	if len(resp.Content) != 3 || resp.Content[0].Type != "server_tool_use" || resp.Content[1].Type != "web_search_tool_result" || resp.Content[2].Type != "text" {
+		t.Fatalf("unexpected web search response blocks: %+v", resp.Content)
+	}
+	if resp.Content[0].ID == "" || resp.Content[1].ToolUseID != resp.Content[0].ID || resp.Content[2].Text != "summary" {
+		t.Fatalf("web search response blocks are not linked: %+v", resp.Content)
+	}
+	if resp.Usage.ServerToolUse == nil || resp.Usage.ServerToolUse.WebSearchRequests != 1 {
+		t.Fatalf("web search usage is missing: %+v", resp.Usage)
+	}
+	blocks, ok := resp.Content[1].Content.([]map[string]interface{})
+	if !ok || len(blocks) != 1 || blocks[0]["encrypted_content"] != "Official site" || blocks[0]["page_age"] != "July 14, 2026" {
+		t.Fatalf("unexpected web search result schema: %#v", resp.Content[1].Content)
+	}
+}
+
+func TestSendWebSearchSSEIncludesServerToolResultAndText(t *testing.T) {
+	results := &webSearchResults{Results: []webSearchResult{{Title: "OpenAI", URL: "https://openai.com/", Snippet: "Official site"}}}
+	rec := httptest.NewRecorder()
+	(&Handler{}).sendWebSearchSSE(rec, "claude-sonnet-5", "openai", results, 10, 2)
+	body := rec.Body.String()
+	serverTool := strings.Index(body, `"type":"server_tool_use"`)
+	toolResult := strings.Index(body, `"type":"web_search_tool_result"`)
+	textDelta := strings.Index(body, `"type":"text_delta"`)
+	if serverTool < 0 || toolResult <= serverTool || textDelta <= toolResult || !strings.Contains(body, "Web search results for: openai") || !strings.Contains(body, `"web_search_requests":1`) {
+		t.Fatalf("unexpected web search SSE: %s", body)
+	}
+}
+
 func TestExtractWebSearchQueryUsesLastUserMessage(t *testing.T) {
 	req := &ClaudeRequest{
 		Messages: []ClaudeMessage{

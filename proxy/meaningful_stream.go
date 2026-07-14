@@ -76,6 +76,7 @@ func wrapMeaningfulStreamCallback(target *KiroStreamCallback, onActivity func(),
 		streamToolFrames:        target.OnToolUseStart != nil || target.OnToolUseDelta != nil || target.OnToolUseStop != nil,
 	}
 	wrapper := &KiroStreamCallback{
+		OnResponseStart: target.OnResponseStart,
 		OnText: func(text string, isThinking bool) {
 			if strings.TrimSpace(text) == "" {
 				return

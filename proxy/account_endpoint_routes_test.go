@@ -42,6 +42,34 @@ func TestAccountEndpointRoutePrefersRecentAutoSuccess(t *testing.T) {
 	}
 }
 
+func TestLongToolRequestPrefersKiroAndUsesSeparateRouteKey(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	payload := &KiroPayload{}
+	payload.ConversationState.CurrentMessage.UserInputMessage.ModelID = "claude-sonnet-5"
+	var tool KiroToolWrapper
+	tool.ToolSpecification.Name = "Write"
+	payload.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext = &UserInputMessageContext{Tools: []KiroToolWrapper{tool}}
+
+	endpoints := getRequestEndpoints("auto", payload)
+	if len(endpoints) == 0 || endpoints[0].Key != "kiro" {
+		t.Fatalf("long tool endpoint order = %+v", endpoints)
+	}
+	explicit := getRequestEndpoints("runtime", payload)
+	if len(explicit) == 0 || explicit[0].Key != "runtime" {
+		t.Fatalf("explicit endpoint preference was not honored: %+v", explicit)
+	}
+	if got := endpointRouteModel(payload); got != "claude-sonnet-5"+longToolEndpointRouteSuffix {
+		t.Fatalf("long tool route key = %q", got)
+	}
+
+	err := newToolOutputTruncatedError("Kiro Runtime", &EventStreamError{Kind: EventStreamIncompleteToolUse})
+	if _, eligible := endpointRouteFailure(err); !eligible {
+		t.Fatal("tool truncation did not cool the long-tool endpoint route")
+	}
+}
+
 func TestAccountEndpointRouteSkipsCoolingRateLimitedEndpoint(t *testing.T) {
 	registry, _ := newAccountEndpointRouteTestRegistry(t)
 	err := classifyUpstreamHTTPError(http.StatusTooManyRequests, "Kiro Runtime", []byte(`{"message":"too many requests"}`))

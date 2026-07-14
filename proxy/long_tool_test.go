@@ -68,12 +68,16 @@ func TestToolTruncationRecoveryIsBoundedAndAddsHint(t *testing.T) {
 		t.Fatalf("config.Init: %v", err)
 	}
 	payload := &KiroPayload{}
+	payload.ConversationState.AgentContinuationId = "original-attempt"
 	payload.ConversationState.CurrentMessage.UserInputMessage.ModelID = "claude-sonnet-4.6"
 	payload.ConversationState.CurrentMessage.UserInputMessage.Content = "Create the file."
 	payload.beginStreamMetrics(time.Now())
 
 	if !payload.recordToolTruncation(12000, 20, true) {
 		t.Fatal("first truncation should receive one recovery attempt")
+	}
+	if payload.ConversationState.AgentContinuationId == "" || payload.ConversationState.AgentContinuationId == "original-attempt" {
+		t.Fatalf("recovery did not rotate agent continuation id: %q", payload.ConversationState.AgentContinuationId)
 	}
 	if payload.recordToolTruncation(16000, 30, true) {
 		t.Fatal("second truncation exceeded the configured recovery limit")
@@ -98,14 +102,14 @@ func TestToolTruncationRecoveryIsBoundedAndAddsHint(t *testing.T) {
 	}
 }
 
-func TestToolOutputTruncationDoesNotPenalizeAccountOrEndpoint(t *testing.T) {
+func TestToolOutputTruncationOnlyPenalizesWorkloadRoute(t *testing.T) {
 	streamErr := &EventStreamError{Kind: EventStreamIncompleteToolUse, ToolName: "Write", ArgumentBytes: 12000, FragmentCount: 20}
 	err := newToolOutputTruncatedError("Kiro Runtime", streamErr)
 	if circuitEligibleFailure(err) {
 		t.Fatal("tool truncation must not open the shared endpoint circuit")
 	}
-	if _, eligible := endpointRouteFailure(err); eligible {
-		t.Fatal("tool truncation must not cool the account/model endpoint route")
+	if _, eligible := endpointRouteFailure(err); !eligible {
+		t.Fatal("tool truncation must cool the isolated long-tool endpoint route")
 	}
 	(&Handler{}).handleAccountFailure(&config.Account{ID: "account"}, err)
 	if !errors.Is(err, streamErr) {

@@ -1,5 +1,5 @@
 {
-  "version": "1.2.24",
-  "changelog": "Protect oversized tool calls with adaptive high-risk buffering, bounded truncation recovery, request diagnostics, optional model fallback, and per-model maxToolTokens. Unlimited account polling now remains bounded by the total upstream attempt budget.\n新增长工具调用保护：高风险工具自适应缓冲、有界截断恢复、请求诊断、可选模型回退及模型级 maxToolTokens；无限账号轮询仍受单请求上游总尝试数约束。",
+  "version": "1.2.25",
+  "changelog": "Keep Claude streams alive with independent heartbeats, reject unknown models before account polling, isolate long-tool endpoint routing and retries, and return protocol-complete WebSearch blocks and usage.\n新增 Claude 流独立心跳、账号轮询前的未知模型校验、长工具端点路由与重试隔离，并完善 WebSearch 协议块及用量统计。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }

@@ -409,6 +409,7 @@ type InferenceConfig struct {
 
 // KiroStreamCallback stream response callbacks
 type KiroStreamCallback struct {
+	OnResponseStart   func()
 	OnText            func(text string, isThinking bool)
 	OnToolUse         func(toolUse KiroToolUse)
 	OnToolUseActivity func()
@@ -487,6 +488,15 @@ func getSortedEndpoints(preferred string) []kiroEndpoint {
 	return result
 }
 
+func getRequestEndpoints(preferred string, payload *KiroPayload) []kiroEndpoint {
+	endpoints := getSortedEndpoints(preferred)
+	preferred = strings.ToLower(strings.TrimSpace(preferred))
+	if (preferred == "" || preferred == "auto") && payloadHasHighRiskTools(payload) {
+		endpoints = moveEndpointFirst(endpoints, "kiro")
+	}
+	return endpoints
+}
+
 // CallKiroAPI calls the Kiro streaming API, trying each configured endpoint with automatic fallback.
 func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroStreamCallback) error {
 	requestContext := context.Background()
@@ -559,7 +569,7 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 	// Build endpoint list before profile lookup. Legacy/custom endpoints that do
 	// not require a profile must not pay for a potentially slow profile probe.
 	preferredEndpoint := config.GetPreferredEndpoint()
-	endpoints := getSortedEndpoints(preferredEndpoint)
+	endpoints := getRequestEndpoints(preferredEndpoint, payload)
 	accountID := ""
 	accountEmail := ""
 	if account != nil {
@@ -810,6 +820,9 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 				continue
 			}
 			return lastErr
+		}
+		if wrappedCallback != nil && wrappedCallback.OnResponseStart != nil {
+			wrappedCallback.OnResponseStart()
 		}
 
 		var streamIdleTimedOut atomic.Bool

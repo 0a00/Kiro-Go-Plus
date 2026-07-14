@@ -214,12 +214,17 @@ type ClaudeCacheCreationUsage struct {
 	Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens,omitempty"`
 }
 
+type ClaudeServerToolUsage struct {
+	WebSearchRequests int `json:"web_search_requests,omitempty"`
+}
+
 type ClaudeUsage struct {
 	InputTokens              int                       `json:"input_tokens"`
 	OutputTokens             int                       `json:"output_tokens"`
 	CacheCreationInputTokens int                       `json:"cache_creation_input_tokens,omitempty"`
 	CacheReadInputTokens     int                       `json:"cache_read_input_tokens,omitempty"`
 	CacheCreation            *ClaudeCacheCreationUsage `json:"cache_creation,omitempty"`
+	ServerToolUse            *ClaudeServerToolUsage    `json:"server_tool_use,omitempty"`
 }
 
 // ==================== Claude -> Kiro 转换 ====================

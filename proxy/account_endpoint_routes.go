@@ -46,6 +46,7 @@ type accountEndpointRouteRegistry struct {
 type accountEndpointRouteSnapshot struct {
 	AccountID           string `json:"accountId"`
 	Model               string `json:"model"`
+	Workload            string `json:"workload"`
 	Endpoint            string `json:"endpoint"`
 	ConsecutiveFailures int    `json:"consecutiveFailures"`
 	CooldownSeconds     int64  `json:"cooldownSeconds"`
@@ -57,9 +58,12 @@ type accountEndpointRouteSnapshot struct {
 type accountEndpointPreferenceSnapshot struct {
 	AccountID     string `json:"accountId"`
 	Model         string `json:"model"`
+	Workload      string `json:"workload"`
 	Endpoint      string `json:"endpoint"`
 	ExpiresInSecs int64  `json:"expiresInSeconds"`
 }
+
+const longToolEndpointRouteSuffix = "|long-tool"
 
 var sharedAccountEndpointRoutes = newAccountEndpointRouteRegistry()
 
@@ -75,7 +79,18 @@ func endpointRouteModel(payload *KiroPayload) string {
 	if payload == nil {
 		return ""
 	}
-	return strings.ToLower(strings.TrimSpace(payload.ConversationState.CurrentMessage.UserInputMessage.ModelID))
+	model := strings.ToLower(strings.TrimSpace(payload.ConversationState.CurrentMessage.UserInputMessage.ModelID))
+	if model != "" && payloadHasHighRiskTools(payload) {
+		model += longToolEndpointRouteSuffix
+	}
+	return model
+}
+
+func endpointRouteDisplayModel(model string) (string, string) {
+	if strings.HasSuffix(model, longToolEndpointRouteSuffix) {
+		return strings.TrimSuffix(model, longToolEndpointRouteSuffix), "long-tool"
+	}
+	return model, "default"
 }
 
 func normalizeEndpointRoutePart(value string) string {
@@ -157,7 +172,7 @@ func endpointRouteFailure(err error) (*UpstreamError, bool) {
 	switch upstreamErr.Kind {
 	case UpstreamErrorQuota, UpstreamErrorRateLimit, UpstreamErrorTransient,
 		UpstreamErrorFirstTokenTimeout, UpstreamErrorToolAssemblyTimeout,
-		UpstreamErrorEndpointUnavailable, UpstreamErrorEmptyResponse:
+		UpstreamErrorToolOutputTruncated, UpstreamErrorEndpointUnavailable, UpstreamErrorEmptyResponse:
 		return upstreamErr, true
 	default:
 		return upstreamErr, false
@@ -304,9 +319,11 @@ func (r *accountEndpointRouteRegistry) snapshot() map[string]interface{} {
 		if !state.cooldownUntil.After(now) {
 			continue
 		}
+		model, workload := endpointRouteDisplayModel(key.model)
 		cooldowns = append(cooldowns, accountEndpointRouteSnapshot{
 			AccountID:           key.accountID,
-			Model:               key.model,
+			Model:               model,
+			Workload:            workload,
 			Endpoint:            state.endpoint,
 			ConsecutiveFailures: state.consecutiveFailures,
 			CooldownSeconds:     ceilDurationSeconds(state.cooldownUntil.Sub(now)),
@@ -317,9 +334,11 @@ func (r *accountEndpointRouteRegistry) snapshot() map[string]interface{} {
 	}
 	affinities := make([]accountEndpointPreferenceSnapshot, 0, len(r.preferences))
 	for key, preference := range r.preferences {
+		model, workload := endpointRouteDisplayModel(key.model)
 		affinities = append(affinities, accountEndpointPreferenceSnapshot{
 			AccountID:     key.accountID,
-			Model:         key.model,
+			Model:         model,
+			Workload:      workload,
 			Endpoint:      preference.endpoint,
 			ExpiresInSecs: ceilDurationSeconds(preference.expiresAt.Sub(now)),
 		})
