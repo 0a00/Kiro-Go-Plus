@@ -790,7 +790,7 @@ label:has(> .switch) > span {
 
 .segmented-control {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   width: min(100%, 32rem);
   padding: 0.1875rem;
   border: 1px solid var(--border);

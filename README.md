@@ -19,7 +19,7 @@ Kiro-Go Plus preserves Kiro-Go's API and deployment compatibility while adding p
 - Upstream routing: Kiro Runtime as the primary path with legacy Kiro / CodeWhisperer / Amazon Q fallback
 - Multi-account scheduling: weighted, priority, and balanced modes; per-account concurrency, sticky routing, and failover
 - Refresh coordination: deduplication, bounded queues, timeouts, jitter, and adaptive batches for tens or hundreds of accounts
-- Failure protection: first-output timeout, actionable-output and required-tool validation, selectable safe/balanced/live tool streams, truncation checks, endpoint circuits, cooldowns, and bounded retries
+- Failure protection: first-output timeout, actionable-output and required-tool validation, selectable safe/adaptive/balanced/live tool streams, long-tool truncation recovery, endpoint circuits, cooldowns, and bounded retries
 - Token controls: bounded enabled/adaptive thinking, configurable default thinking/output/context budgets, and client-value precedence
 - Streaming validation: AWS EventStream length and CRC validation, idle timeout, and truncated-response detection
 - Authentication: Builder ID, IAM Identity Center, Kiro hosted SSO, Microsoft 365 / Entra ID, SSO Token, API key, and JSON import
@@ -30,7 +30,7 @@ Kiro-Go Plus preserves Kiro-Go's API and deployment compatibility while adding p
 
 Prompt Cache simulates and reports Anthropic cache usage. It does not cache model response bodies.
 
-Token-budget precedence is: explicit request values, per-model registry values, global Web defaults, then automatic model detection. Supported request overrides include `max_tokens`, `max_completion_tokens`, `max_output_tokens`, `context_window`, and `max_input_tokens` where applicable.
+Token-budget precedence is: explicit request values, per-model registry values, global Web defaults, then automatic model detection. Supported request overrides include `max_tokens`, `max_completion_tokens`, `max_output_tokens`, `context_window`, and `max_input_tokens` where applicable. Dynamic model entries may also set `maxToolTokens` for long-tool guidance and fallback decisions.
 
 ## Web Administration
 
@@ -42,12 +42,14 @@ Open `/admin` to manage:
 - Token/model refresh intervals, concurrency, and batch sizes
 - Prompt Cache creation/read ranges, TTL, capacity, and isolation
 - Web Search, token counting, Responses storage, diagnostics, complete request logging, and alerts
-- Claude Agent tool enforcement, thinking/output/context token defaults, response formats, and safe/balanced/live stream modes
+- Claude Agent tool enforcement, thinking/output/context token defaults, response formats, long-tool protection, and safe/adaptive/balanced/live stream modes
 - API keys, quotas, admin password, listener settings, and client fingerprints
 
 Settings apply immediately unless the panel explicitly reports that a process restart is required.
 
-Tool stream modes trade retry coverage for latency: **Live** forwards text, thinking, and tool argument deltas immediately; **Balanced** streams text and thinking while waiting for complete tool JSON; **Safe** buffers guarded output until it can be validated and retried transparently. Explicit `tool_choice` requests remain strictly validated in every mode.
+Tool stream modes trade retry coverage for latency: **Adaptive** keeps ordinary tools live but buffers high-risk `Write`/`Edit`/`Bash`-style calls so an incomplete JSON tail can be retried; **Live** forwards every tool argument delta immediately; **Balanced** buffers all tool arguments; **Safe** also defers guarded text for maximum retry coverage. Explicit `tool_choice` requests remain strictly validated in every mode.
+
+Long-tool protection is enabled by default with one recovery retry and an 8192-token guidance limit. Optional preflight model fallback is disabled by default because model availability differs between accounts.
 
 Complete request logging is disabled by default. When enabled, it captures inference routes only and writes bounded details to `data/request_details.json` with mode `0600` and a 64 MiB total cap. Authorization headers and credentials are excluded; image/document Base64 and tool arguments are represented only by type, byte count, and SHA-256. Prompts and model output are still sensitive, so enable this mode only while diagnosing issues and clear it afterward.
 

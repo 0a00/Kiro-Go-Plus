@@ -532,6 +532,10 @@ func TestOperationalConfigDefaults(t *testing.T) {
 	if models.NegativeCacheTTLSeconds != 3600 || len(models.Models) != 0 {
 		t.Fatalf("unexpected model registry defaults: %+v", models)
 	}
+	longTool := GetLongToolConfig()
+	if !longTool.Enabled || longTool.DefaultMaxToolTokens != 8192 || longTool.TruncationRetries != 1 || longTool.FallbackEnabled || longTool.FallbackModel != "claude-sonnet-5" {
+		t.Fatalf("unexpected long-tool defaults: %+v", longTool)
+	}
 	health := GetHealthConfig()
 	if health.MinReadyAccounts != 1 || health.MinReadyRatio != 0 || health.WebhookCooldownSeconds != 300 {
 		t.Fatalf("unexpected health defaults: %+v", health)
@@ -629,7 +633,7 @@ func TestConfiguredModelResolutionUsesExactThenLongestKeyword(t *testing.T) {
 		NegativeCacheTTLSeconds: 600,
 		Models: []ModelEntry{
 			{ID: "fast", KiroModelID: "claude-haiku-4.5", ContextWindow: 200000, MaxTokens: 8192, MatchKeywords: []string{"claude"}},
-			{ID: "sonnet-custom", KiroModelID: "claude-sonnet-4.6", ContextWindow: 1000000, MaxTokens: 64000, MatchKeywords: []string{"sonnet-custom", "sonnet"}},
+			{ID: "sonnet-custom", KiroModelID: "claude-sonnet-4.6", ContextWindow: 1000000, MaxTokens: 64000, MaxToolTokens: 12288, MatchKeywords: []string{"sonnet-custom", "sonnet"}},
 		},
 	}
 	if err := UpdateModelRegistryConfig(registry); err != nil {
@@ -642,7 +646,7 @@ func TestConfiguredModelResolutionUsesExactThenLongestKeyword(t *testing.T) {
 	if got, ok := ResolveConfiguredModel("vendor-sonnet-custom-preview"); !ok || got.ID != "sonnet-custom" {
 		t.Fatalf("expected longest keyword match, got %+v ok=%v", got, ok)
 	}
-	if meta, ok := GetConfiguredModelMetadata("claude-sonnet-4.6"); !ok || meta.ContextWindow != 1000000 {
+	if meta, ok := GetConfiguredModelMetadata("claude-sonnet-4.6"); !ok || meta.ContextWindow != 1000000 || meta.MaxToolTokens != 12288 {
 		t.Fatalf("expected upstream model metadata, got %+v ok=%v", meta, ok)
 	}
 }
@@ -660,6 +664,22 @@ func TestModelRegistryRejectsConflictingKeywords(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatalf("expected conflicting keyword validation error")
+	}
+}
+
+func TestModelRegistryRejectsInvalidToolTokenLimit(t *testing.T) {
+	if err := Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	err := UpdateModelRegistryConfig(ModelRegistryConfig{
+		NegativeCacheTTLSeconds: 600,
+		Models: []ModelEntry{{
+			ID: "invalid-tool-limit", KiroModelID: "claude-sonnet-4.6",
+			ContextWindow: 200000, MaxTokens: 64000, MaxToolTokens: 512,
+		}},
+	})
+	if err == nil {
+		t.Fatal("expected invalid maxToolTokens to be rejected")
 	}
 }
 

@@ -30,6 +30,7 @@ const (
 	UpstreamErrorTransient           UpstreamErrorKind = "transient"
 	UpstreamErrorFirstTokenTimeout   UpstreamErrorKind = "first_token_timeout"
 	UpstreamErrorToolAssemblyTimeout UpstreamErrorKind = "tool_assembly_timeout"
+	UpstreamErrorToolOutputTruncated UpstreamErrorKind = "tool_output_truncated"
 	UpstreamErrorCanceled            UpstreamErrorKind = "canceled"
 	UpstreamErrorEmptyResponse       UpstreamErrorKind = "empty_response"
 	UpstreamErrorRetryBudget         UpstreamErrorKind = "retry_budget_exhausted"
@@ -47,6 +48,9 @@ type UpstreamError struct {
 	RefreshToken         bool
 	RetryAfter           time.Duration
 	Cause                error
+	ToolName             string
+	ArgumentBytes        int
+	FragmentCount        int
 }
 
 func parseRetryAfter(value string, now time.Time) time.Duration {
@@ -176,6 +180,8 @@ func mapDownstreamError(err error) downstreamError {
 		mapped.Status = http.StatusServiceUnavailable
 	case UpstreamErrorFirstTokenTimeout, UpstreamErrorToolAssemblyTimeout:
 		mapped.Status = http.StatusGatewayTimeout
+	case UpstreamErrorToolOutputTruncated:
+		mapped.Status = http.StatusBadGateway
 	case UpstreamErrorCanceled:
 		if errors.Is(upstreamErr.Cause, context.DeadlineExceeded) {
 			mapped.Status = http.StatusGatewayTimeout
@@ -364,6 +370,40 @@ func newToolAssemblyTimeoutError(endpoint, toolName string, argumentBytes int, t
 	}
 }
 
+func newToolOutputTruncatedError(endpoint string, streamErr *EventStreamError) *UpstreamError {
+	toolName := ""
+	argumentBytes := 0
+	fragmentCount := 0
+	var cause error
+	if streamErr != nil {
+		toolName = streamErr.ToolName
+		argumentBytes = streamErr.ArgumentBytes
+		fragmentCount = streamErr.FragmentCount
+		cause = streamErr
+	}
+	message := "upstream truncated a tool call before its JSON arguments completed"
+	if strings.TrimSpace(toolName) != "" {
+		message = fmt.Sprintf("upstream truncated tool %q before its JSON arguments completed", toolName)
+	}
+	if argumentBytes > 0 {
+		message += fmt.Sprintf(" after %d argument bytes", argumentBytes)
+	}
+	if fragmentCount > 0 {
+		message += fmt.Sprintf(" across %d fragments", fragmentCount)
+	}
+	return &UpstreamError{
+		Kind:                 UpstreamErrorToolOutputTruncated,
+		Endpoint:             endpoint,
+		Message:              message,
+		RetryAcrossEndpoints: true,
+		RetryAcrossAccounts:  true,
+		Cause:                cause,
+		ToolName:             toolName,
+		ArgumentBytes:        argumentBytes,
+		FragmentCount:        fragmentCount,
+	}
+}
+
 func newRetryBudgetError(budget *upstreamAttemptBudget) *UpstreamError {
 	message := "upstream retry budget exhausted"
 	if budget != nil {
@@ -456,13 +496,9 @@ type upstreamAttemptBudgetSnapshot struct {
 
 func newUpstreamAttemptBudget() *upstreamAttemptBudget {
 	retry := config.GetRetryConfig()
-	maxAttempts := retry.MaxUpstreamAttempts
-	if retry.MaxAccountAttempts == 0 {
-		maxAttempts = 0
-	}
 	now := time.Now
 	return &upstreamAttemptBudget{
-		maxAttempts: maxAttempts,
+		maxAttempts: retry.MaxUpstreamAttempts,
 		maxEmpty:    retry.EmptyResponseRetries,
 		startedAt:   now(),
 		maxDuration: time.Duration(retry.MaxRetryDurationSeconds) * time.Second,

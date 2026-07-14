@@ -212,12 +212,18 @@ func TestRequestLogAttributesAPIKeyFromPayloadContext(t *testing.T) {
 }
 
 func TestRequestLogCapturesRequestedToolPolicy(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
 	h := &Handler{requestLog: newRequestLog(defaultRequestLogLimit)}
 	payload := &KiroPayload{
 		requireToolUse: true,
 		toolUsePolicy:  toolUsePolicyExplicit,
 		ToolNameMap:    map[string]string{"writeH123": "mcp__workspace__Write"},
 	}
+	payload.beginStreamMetrics(time.Now())
+	payload.recordToolStreamMetrics(16384, 24)
+	payload.recordToolTruncation(12000, 18, true)
 	var tool KiroToolWrapper
 	tool.ToolSpecification.Name = "writeH123"
 	payload.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext = &UserInputMessageContext{
@@ -234,6 +240,9 @@ func TestRequestLogCapturesRequestedToolPolicy(t *testing.T) {
 	}
 	if len(got[0].RequestToolNames) != 1 || got[0].RequestToolNames[0] != "mcp__workspace__Write" {
 		t.Fatalf("expected restored tool name, got %+v", got[0].RequestToolNames)
+	}
+	if got[0].ToolArgumentBytes != 16384 || got[0].ToolFragmentCount != 24 || got[0].ToolTruncationCount != 1 || got[0].ToolRecoveryAttempts != 1 {
+		t.Fatalf("expected long-tool metrics, got %+v", got[0])
 	}
 }
 

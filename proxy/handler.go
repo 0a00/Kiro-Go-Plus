@@ -1769,15 +1769,19 @@ func configureClaudeToolStreaming(payload *KiroPayload, req *ClaudeRequest, thin
 	}
 	safeMode := thinkingCfg.ToolStreamMode == config.ToolStreamModeSafe
 	liveMode := thinkingCfg.ToolStreamMode == config.ToolStreamModeLive
+	adaptiveMode := thinkingCfg.ToolStreamMode == config.ToolStreamModeAdaptive
+	highRiskTools := hasHighRiskToolNames(claudeToolNames(req.Tools))
+	useSafeBehavior := safeMode || (adaptiveMode && highRiskTools)
+	useLiveBehavior := liveMode || (adaptiveMode && !highRiskTools)
 	strictToolUse := requiresStrictClaudeToolUse(req)
-	guardToolStream := len(req.Tools) > 0 && (safeMode || strictToolUse)
+	guardToolStream := len(req.Tools) > 0 && (useSafeBehavior || strictToolUse)
 	guardActionableStream := req.Stream && guardToolStream
 
 	payload.requireActionableOutput = (len(req.Tools) > 0 || thinking) && (!req.Stream || guardActionableStream)
 	payload.toolUsePolicy = req.ToolUsePolicy
-	payload.deferTextUntilComplete = guardActionableStream && safeMode && req.ToolUsePolicy == toolUsePolicyInferred
+	payload.deferTextUntilComplete = guardActionableStream && useSafeBehavior && req.ToolUsePolicy == toolUsePolicyInferred
 	payload.streamThinkingPrecommit = guardActionableStream && thinking && !thinkingOpts.OmitDisplay
-	payload.streamToolUseDeltas = req.Stream && len(req.Tools) > 0 && liveMode
+	payload.streamToolUseDeltas = req.Stream && len(req.Tools) > 0 && useLiveBehavior
 	// Inferred workspace intent adds strong tool guidance, but only an explicit
 	// client tool_choice may reject an otherwise valid text response.
 	payload.requireToolUse = strictToolUse
@@ -1825,6 +1829,10 @@ func (h *Handler) handleClaudeMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	actualModel, thinking := resolveClaudeThinkingMode(req.Model, req.Thinking, thinkingCfg.Suffix)
+	if fallbackModel, changed := maybeLongToolFallback(actualModel, req.MaxTokens, claudeToolNames(req.Tools)); changed {
+		actualModel = fallbackModel
+		contextWindowTokens = resolveContextWindowTokens(actualModel, req.ContextWindow, req.MaxInputTokens)
+	}
 	req.Model = actualModel
 	effectiveReq := cloneClaudeRequestForThinking(&req, thinking)
 	thinkingResponseOpts := resolveClaudeThinkingResponseOptions(req.Thinking, thinkingCfg.ClaudeFormat)
@@ -2640,6 +2648,7 @@ func (h *Handler) recordFailure() {
 // handleClaudeNonStream Claude 非流式响应
 func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, thinkingOpts claudeThinkingResponseOptions, estimatedInputTokens int, cacheProfile *promptCacheProfile, apiKeyID, routeKey string) {
 	startedAt := time.Now()
+	payload.beginStreamMetrics(startedAt)
 	firstContent := newRequestFirstContentTimer(startedAt)
 	attempts := h.newAccountAttemptController(payload.requestContext)
 	excluded := attempts.excluded
@@ -2920,6 +2929,10 @@ func (h *Handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 	// 解析模型和 thinking 模式
 	thinkingCfg := config.GetThinkingConfig()
 	actualModel, thinking := ParseModelAndThinking(req.Model, thinkingCfg.Suffix)
+	if fallbackModel, changed := maybeLongToolFallback(actualModel, req.MaxTokens, openAIToolNames(req.Tools)); changed {
+		actualModel = fallbackModel
+		contextWindowTokens = resolveContextWindowTokens(actualModel, req.ContextWindow, req.MaxInputTokens)
+	}
 	req.Model = actualModel
 	estimatedInputTokens := estimateOpenAIRequestInputTokens(&req)
 	if admissionErr := reserveAPIKeyTokens(r.Context(), estimatedInputTokens); admissionErr != nil {
@@ -2944,6 +2957,7 @@ func (h *Handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 // handleOpenAIStream OpenAI 流式响应
 func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int, apiKeyID string) {
 	startedAt := time.Now()
+	payload.beginStreamMetrics(startedAt)
 	firstContent := newRequestFirstContentTimer(startedAt)
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -3431,6 +3445,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 // handleOpenAINonStream OpenAI 非流式响应
 func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int, apiKeyID string) {
 	startedAt := time.Now()
+	payload.beginStreamMetrics(startedAt)
 	firstContent := newRequestFirstContentTimer(startedAt)
 	attempts := h.newAccountAttemptController(payload.requestContext)
 	excluded := attempts.excluded
@@ -3772,6 +3787,10 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 		h.apiGetRetryConfig(w, r)
 	case path == "/retry" && r.Method == "POST":
 		h.apiUpdateRetryConfig(w, r)
+	case path == "/long-tool" && r.Method == "GET":
+		h.apiGetLongToolConfig(w, r)
+	case path == "/long-tool" && r.Method == "POST":
+		h.apiUpdateLongToolConfig(w, r)
 	case path == "/responses-storage" && r.Method == "GET":
 		h.apiGetResponsesStorageConfig(w, r)
 	case path == "/responses-storage" && r.Method == "POST":
@@ -5496,6 +5515,32 @@ func (h *Handler) apiUpdateRetryConfig(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "config": config.GetRetryConfig()})
 }
 
+func (h *Handler) apiGetLongToolConfig(w http.ResponseWriter, r *http.Request) {
+	json.NewEncoder(w).Encode(config.GetLongToolConfig())
+}
+
+func (h *Handler) apiUpdateLongToolConfig(w http.ResponseWriter, r *http.Request) {
+	var req config.LongToolConfig
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON"})
+		return
+	}
+	req.FallbackModel = strings.TrimSpace(req.FallbackModel)
+	if req.DefaultMaxToolTokens < 1024 || req.DefaultMaxToolTokens > 128000 ||
+		req.TruncationRetries < 0 || req.TruncationRetries > 5 || req.FallbackModel == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "invalid long-tool configuration"})
+		return
+	}
+	if err := config.UpdateLongToolConfig(req); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "config": config.GetLongToolConfig()})
+}
+
 func (h *Handler) apiGetResponsesStorageConfig(w http.ResponseWriter, r *http.Request) {
 	files, bytes := responsesStorageStats()
 	json.NewEncoder(w).Encode(struct {
@@ -6481,7 +6526,7 @@ func (h *Handler) apiUpdateThinkingConfig(w http.ResponseWriter, r *http.Request
 		normalized, ok := config.NormalizeToolStreamMode(*req.ToolStreamMode)
 		if !ok {
 			w.WriteHeader(400)
-			json.NewEncoder(w).Encode(map[string]string{"error": "toolStreamMode must be: safe, balanced, or live"})
+			json.NewEncoder(w).Encode(map[string]string{"error": "toolStreamMode must be: safe, adaptive, balanced, or live"})
 			return
 		}
 		toolStreamMode = normalized

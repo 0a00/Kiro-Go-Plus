@@ -52,6 +52,10 @@ type requestLogEntry struct {
 	ToolUseRequired          bool     `json:"toolUseRequired,omitempty"`
 	ToolUsePolicy            string   `json:"toolUsePolicy,omitempty"`
 	ToolUseCount             int      `json:"toolUseCount,omitempty"`
+	ToolArgumentBytes        int      `json:"toolArgumentBytes,omitempty"`
+	ToolFragmentCount        int      `json:"toolFragmentCount,omitempty"`
+	ToolTruncationCount      int      `json:"toolTruncationCount,omitempty"`
+	ToolRecoveryAttempts     int      `json:"toolRecoveryAttempts,omitempty"`
 	StopReason               string   `json:"stopReason,omitempty"`
 	Credits                  float64  `json:"credits,omitempty"`
 	Error                    string   `json:"error,omitempty"`
@@ -327,13 +331,17 @@ func (h *Handler) recordRequestLogForPayload(payload *KiroPayload, entry request
 		}
 		entry.ToolUseRequired = payload.requireToolUse
 		entry.ToolUsePolicy = payload.toolUsePolicy
-		upstreamActivityMs, toolAssemblyMs := payload.streamMetrics()
+		upstreamActivityMs, toolAssemblyMs, toolArgumentBytes, toolFragmentCount, toolTruncationCount, toolRecoveryAttempts := payload.streamMetrics()
 		if entry.UpstreamFirstActivityMs == nil {
 			entry.UpstreamFirstActivityMs = upstreamActivityMs
 		}
 		if entry.ToolAssemblyMs == nil {
 			entry.ToolAssemblyMs = toolAssemblyMs
 		}
+		entry.ToolArgumentBytes = toolArgumentBytes
+		entry.ToolFragmentCount = toolFragmentCount
+		entry.ToolTruncationCount = toolTruncationCount
+		entry.ToolRecoveryAttempts = toolRecoveryAttempts
 		entry.DetailAvailable = h.recordRequestDetailForContext(payload.requestContext, entry)
 	}
 	h.recordRequestLog(entry)

@@ -241,8 +241,31 @@ func TestParseEventStreamPreservesTruncatedFrameErrorForIncompleteToolUse(t *tes
 
 	err := parseEventStream(stream, &KiroStreamCallback{})
 	var streamErr *EventStreamError
-	if !errors.As(err, &streamErr) || streamErr.Kind != EventStreamTruncated {
-		t.Fatalf("expected truncated frame error, got %#v", err)
+	if !errors.As(err, &streamErr) || streamErr.Kind != EventStreamIncompleteToolUse {
+		t.Fatalf("expected incomplete tool-use error, got %#v", err)
+	}
+	if streamErr.ToolName != "write" || streamErr.ArgumentBytes != len(`{"file_path":"index.html","content":`) || streamErr.FragmentCount != 1 {
+		t.Fatalf("incomplete tool diagnostics were lost: %+v", streamErr)
+	}
+	var cause *EventStreamError
+	if !errors.As(streamErr.Cause, &cause) || cause.Kind != EventStreamTruncated {
+		t.Fatalf("expected truncated frame cause, got %#v", streamErr.Cause)
+	}
+}
+
+func TestParseEventStreamDoesNotMaskCorruptFrameAfterIncompleteToolUse(t *testing.T) {
+	incompleteTool := awsEventStreamFrame(t, "toolUseEvent", map[string]interface{}{
+		"toolUseId": "toolu_1",
+		"name":      "Write",
+		"input":     `{"file_path":"index.html","content":`,
+	})
+	corrupt := awsEventStreamFrame(t, "meteringEvent", map[string]interface{}{"usage": 1.0})
+	corrupt[len(corrupt)-1] ^= 0xff
+
+	err := parseEventStream(bytes.NewReader(append(incompleteTool, corrupt...)), &KiroStreamCallback{})
+	var streamErr *EventStreamError
+	if !errors.As(err, &streamErr) || streamErr.Kind != EventStreamMessageCRCMismatch {
+		t.Fatalf("expected message CRC error, got %#v", err)
 	}
 }
 

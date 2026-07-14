@@ -9,23 +9,27 @@ type toolAssemblySnapshot struct {
 	ToolUseID     string
 	Name          string
 	ArgumentBytes int
+	FragmentCount int
 	Elapsed       time.Duration
 }
 
 type toolAssemblyMonitor struct {
-	mu         sync.Mutex
-	timeout    time.Duration
-	onTimeout  func(toolAssemblySnapshot)
-	timer      *time.Timer
-	generation uint64
-	active     bool
-	startedAt  time.Time
-	toolUseID  string
-	name       string
-	bytes      int
-	timedOut   *toolAssemblySnapshot
-	maxElapsed time.Duration
-	hasElapsed bool
+	mu           sync.Mutex
+	timeout      time.Duration
+	onTimeout    func(toolAssemblySnapshot)
+	timer        *time.Timer
+	generation   uint64
+	active       bool
+	startedAt    time.Time
+	toolUseID    string
+	name         string
+	bytes        int
+	fragments    int
+	timedOut     *toolAssemblySnapshot
+	maxElapsed   time.Duration
+	hasElapsed   bool
+	maxBytes     int
+	maxFragments int
 }
 
 func wrapToolAssemblyMonitor(target *KiroStreamCallback, timeout time.Duration, onTimeout func(toolAssemblySnapshot)) (*KiroStreamCallback, *toolAssemblyMonitor) {
@@ -77,6 +81,7 @@ func (m *toolAssemblyMonitor) start(toolUseID, name string) {
 		m.toolUseID = toolUseID
 		m.name = name
 		m.bytes = 0
+		m.fragments = 0
 		m.mu.Unlock()
 		return
 	}
@@ -91,6 +96,7 @@ func (m *toolAssemblyMonitor) start(toolUseID, name string) {
 	m.toolUseID = toolUseID
 	m.name = name
 	m.bytes = 0
+	m.fragments = 0
 	m.timedOut = nil
 	if m.timeout > 0 {
 		m.timer = time.AfterFunc(m.timeout, func() {
@@ -110,6 +116,13 @@ func (m *toolAssemblyMonitor) add(toolUseID, input string) {
 			m.toolUseID = toolUseID
 		}
 		m.bytes += len(input)
+		m.fragments++
+		if m.bytes > m.maxBytes {
+			m.maxBytes = m.bytes
+		}
+		if m.fragments > m.maxFragments {
+			m.maxFragments = m.fragments
+		}
 	}
 	m.mu.Unlock()
 }
@@ -131,6 +144,7 @@ func (m *toolAssemblyMonitor) activity() {
 	m.toolUseID = ""
 	m.name = ""
 	m.bytes = 0
+	m.fragments = 0
 	m.timedOut = nil
 	if m.timeout > 0 {
 		m.timer = time.AfterFunc(m.timeout, func() {
@@ -189,6 +203,15 @@ func (m *toolAssemblyMonitor) TimedOut() (toolAssemblySnapshot, bool) {
 	return *m.timedOut, true
 }
 
+func (m *toolAssemblyMonitor) MaxArguments() (bytes, fragments int) {
+	if m == nil {
+		return 0, 0
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.maxBytes, m.maxFragments
+}
+
 func (m *toolAssemblyMonitor) fire(generation uint64) {
 	m.mu.Lock()
 	if !m.active || m.generation != generation {
@@ -199,6 +222,7 @@ func (m *toolAssemblyMonitor) fire(generation uint64) {
 		ToolUseID:     m.toolUseID,
 		Name:          m.name,
 		ArgumentBytes: m.bytes,
+		FragmentCount: m.fragments,
 		Elapsed:       time.Since(m.startedAt),
 	}
 	m.recordDurationLocked(snapshot.Elapsed)
@@ -236,6 +260,10 @@ func stopAndRecordToolAssembly(payload *KiroPayload, monitor *toolAssemblyMonito
 	monitor.Stop()
 	if elapsed, ok := monitor.MaxElapsed(); ok && payload != nil {
 		payload.recordToolAssembly(elapsed)
+	}
+	if payload != nil {
+		argumentBytes, fragmentCount := monitor.MaxArguments()
+		payload.recordToolStreamMetrics(argumentBytes, fragmentCount)
 	}
 }
 

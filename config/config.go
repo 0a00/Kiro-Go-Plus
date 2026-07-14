@@ -249,6 +249,16 @@ type RetryConfig struct {
 	ProxyCircuitCooldownSeconds    int `json:"proxyCircuitCooldownSeconds"`
 }
 
+// LongToolConfig protects large file/command tool calls from upstream
+// truncation and bounds recovery work before any partial tool JSON is exposed.
+type LongToolConfig struct {
+	Enabled              bool   `json:"enabled"`
+	DefaultMaxToolTokens int    `json:"defaultMaxToolTokens"`
+	TruncationRetries    int    `json:"truncationRetries"`
+	FallbackEnabled      bool   `json:"fallbackEnabled"`
+	FallbackModel        string `json:"fallbackModel,omitempty"`
+}
+
 // ResponsesStorageConfig bounds persisted OpenAI Responses API state.
 type ResponsesStorageConfig struct {
 	DefaultStore      bool  `json:"defaultStore"`
@@ -266,6 +276,7 @@ type ModelEntry struct {
 	KiroModelID   string   `json:"kiroModelId"`
 	ContextWindow int      `json:"contextWindow"`
 	MaxTokens     int      `json:"maxTokens"`
+	MaxToolTokens int      `json:"maxToolTokens,omitempty"`
 	MatchKeywords []string `json:"matchKeywords,omitempty"`
 	Created       int64    `json:"created,omitempty"`
 }
@@ -348,7 +359,7 @@ type Config struct {
 	ThinkingBudgetCapTokens     *int   `json:"thinkingBudgetCapTokens,omitempty"`     // Maximum proxy-derived fake-reasoning budget; 0 disables the cap
 	DefaultMaxOutputTokens      int    `json:"defaultMaxOutputTokens,omitempty"`      // Default max output tokens when the client omits a limit; 0 leaves it unset
 	DefaultContextWindowTokens  int    `json:"defaultContextWindowTokens,omitempty"`  // Default context window when the client/model omits one; 0 auto-detects
-	ToolStreamMode              string `json:"toolStreamMode,omitempty"`              // Claude tool stream mode: safe, balanced, or live
+	ToolStreamMode              string `json:"toolStreamMode,omitempty"`              // Claude tool stream mode: safe, adaptive, balanced, or live
 	BufferToolStreams           *bool  `json:"bufferToolStreams,omitempty"`           // Deprecated compatibility field: true maps to buffered/safe, false maps to live
 	EnforceAgentToolUse         *bool  `json:"enforceAgentToolUse,omitempty"`         // Require tools for detected workspace mutation/execution requests
 
@@ -373,6 +384,9 @@ type Config struct {
 
 	// Retry controls the total work a single client request may trigger upstream.
 	Retry RetryConfig `json:"retry,omitempty"`
+
+	// LongTool controls protection and recovery for large tool-call arguments.
+	LongTool LongToolConfig `json:"longTool,omitempty"`
 
 	// ResponsesStorage controls local /v1/responses persistence and history expansion.
 	ResponsesStorage ResponsesStorageConfig `json:"responsesStorage,omitempty"`
@@ -474,12 +488,13 @@ type AccountInfo struct {
 
 const (
 	ToolStreamModeSafe     = "safe"
+	ToolStreamModeAdaptive = "adaptive"
 	ToolStreamModeBalanced = "balanced"
 	ToolStreamModeLive     = "live"
 )
 
 // Version current version
-const Version = "1.2.23"
+const Version = "1.2.24"
 
 var (
 	cfg           *Config
@@ -533,6 +548,7 @@ func loadLocked() error {
 				LoadBalancingMode:         defaultRoutingConfig().LoadBalancingMode,
 				AutoRefresh:               defaultAutoRefreshConfig(),
 				Retry:                     defaultRetryConfig(),
+				LongTool:                  defaultLongToolConfig(),
 				ResponsesStorage:          defaultResponsesStorageConfig(),
 				ModelRegistry:             defaultModelRegistryConfig(),
 				Health:                    defaultHealthConfig(),
@@ -621,6 +637,9 @@ func loadLocked() error {
 			c.Retry.ToolAssemblyTimeoutSeconds = defaults.ToolAssemblyTimeoutSeconds
 		}
 	}
+	if !rawConfigHasKey(data, "longTool") {
+		c.LongTool = defaultLongToolConfig()
+	}
 	if !rawConfigHasKey(data, "responsesStorage") {
 		c.ResponsesStorage = defaultResponsesStorageConfig()
 	}
@@ -655,6 +674,7 @@ func loadLocked() error {
 	normalizeRoutingLocked()
 	normalizeAutoRefreshLocked()
 	normalizeRetryLocked()
+	normalizeLongToolLocked()
 	normalizeResponsesStorageLocked()
 	normalizeModelRegistryLocked()
 	normalizeHealthLocked()
@@ -1113,6 +1133,38 @@ func defaultResponsesStorageConfig() ResponsesStorageConfig {
 	}
 }
 
+func defaultLongToolConfig() LongToolConfig {
+	return LongToolConfig{
+		Enabled:              true,
+		DefaultMaxToolTokens: 8192,
+		TruncationRetries:    1,
+		FallbackEnabled:      false,
+		FallbackModel:        "claude-sonnet-5",
+	}
+}
+
+func normalizeLongToolLocked() {
+	defaults := defaultLongToolConfig()
+	value := cfg.LongTool
+	if value.DefaultMaxToolTokens < 1024 {
+		value.DefaultMaxToolTokens = defaults.DefaultMaxToolTokens
+	}
+	if value.DefaultMaxToolTokens > 128000 {
+		value.DefaultMaxToolTokens = 128000
+	}
+	if value.TruncationRetries < 0 {
+		value.TruncationRetries = defaults.TruncationRetries
+	}
+	if value.TruncationRetries > 5 {
+		value.TruncationRetries = 5
+	}
+	value.FallbackModel = strings.TrimSpace(value.FallbackModel)
+	if value.FallbackModel == "" {
+		value.FallbackModel = defaults.FallbackModel
+	}
+	cfg.LongTool = value
+}
+
 func normalizeResponsesStorageLocked() {
 	defaults := defaultResponsesStorageConfig()
 	storage := cfg.ResponsesStorage
@@ -1184,6 +1236,12 @@ func normalizeModelEntry(entry *ModelEntry) {
 	}
 	if entry.MaxTokens <= 0 {
 		entry.MaxTokens = 64000
+	}
+	if entry.MaxToolTokens < 0 {
+		entry.MaxToolTokens = 0
+	}
+	if entry.MaxToolTokens > 128000 {
+		entry.MaxToolTokens = 128000
 	}
 	if entry.Created <= 0 {
 		entry.Created = time.Now().Unix()
@@ -1719,6 +1777,34 @@ func UpdateRetryConfig(retry RetryConfig) error {
 	return Save()
 }
 
+func GetLongToolConfig() LongToolConfig {
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	if cfg == nil {
+		return defaultLongToolConfig()
+	}
+	out := cfg.LongTool
+	defaults := defaultLongToolConfig()
+	if out.DefaultMaxToolTokens < 1024 {
+		out.DefaultMaxToolTokens = defaults.DefaultMaxToolTokens
+	}
+	if out.TruncationRetries < 0 {
+		out.TruncationRetries = defaults.TruncationRetries
+	}
+	if strings.TrimSpace(out.FallbackModel) == "" {
+		out.FallbackModel = defaults.FallbackModel
+	}
+	return out
+}
+
+func UpdateLongToolConfig(value LongToolConfig) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	cfg.LongTool = value
+	normalizeLongToolLocked()
+	return Save()
+}
+
 func GetResponsesStorageConfig() ResponsesStorageConfig {
 	cfgLock.RLock()
 	defer cfgLock.RUnlock()
@@ -1793,7 +1879,8 @@ func validateModelEntries(models []ModelEntry) error {
 			return fmt.Errorf("duplicate model id: %s", model.ID)
 		}
 		ids[id] = true
-		if model.ContextWindow < 1024 || model.MaxTokens < 1 {
+		if model.ContextWindow < 1024 || model.MaxTokens < 1 ||
+			(model.MaxToolTokens != 0 && (model.MaxToolTokens < 1024 || model.MaxToolTokens > 128000)) {
 			return fmt.Errorf("invalid token limits for model %s", model.ID)
 		}
 		for _, keyword := range model.MatchKeywords {
@@ -2663,7 +2750,7 @@ type ThinkingConfig struct {
 	BudgetCapTokens            int    `json:"budgetCapTokens"`            // Maximum proxy-derived fake-reasoning budget; 0 disables the cap
 	DefaultMaxOutputTokens     int    `json:"defaultMaxOutputTokens"`     // Default max output tokens; 0 leaves it unset
 	DefaultContextWindowTokens int    `json:"defaultContextWindowTokens"` // Default context window; 0 auto-detects
-	ToolStreamMode             string `json:"toolStreamMode"`             // Claude tool stream mode: safe, balanced, or live
+	ToolStreamMode             string `json:"toolStreamMode"`             // Claude tool stream mode: safe, adaptive, balanced, or live
 	BufferToolStreams          bool   `json:"bufferToolStreams"`          // Deprecated compatibility mirror; false only for live mode
 	EnforceAgentToolUse        bool   `json:"enforceAgentToolUse"`        // Require tools for workspace actions
 }
@@ -2673,6 +2760,8 @@ func NormalizeToolStreamMode(mode string) (string, bool) {
 	switch strings.ToLower(strings.TrimSpace(mode)) {
 	case ToolStreamModeSafe:
 		return ToolStreamModeSafe, true
+	case ToolStreamModeAdaptive:
+		return ToolStreamModeAdaptive, true
 	case ToolStreamModeBalanced:
 		return ToolStreamModeBalanced, true
 	case ToolStreamModeLive:
@@ -2764,7 +2853,7 @@ func UpdateThinkingConfig(suffix, openaiFormat, claudeFormat string, defaultBudg
 }
 
 // UpdateThinkingConfigWithToolStreamMode persists thinking settings using the
-// three-state Claude tool stream policy. The legacy boolean is also written so
+// four-state Claude tool stream policy. The legacy boolean is also written so
 // rolling back to an older binary preserves buffered/live behavior.
 func UpdateThinkingConfigWithToolStreamMode(suffix, openaiFormat, claudeFormat string, defaultBudgetTokens, budgetCapTokens, defaultMaxOutputTokens, defaultContextWindowTokens int, toolStreamMode string, enforceAgentToolUse bool) error {
 	normalizedMode, ok := NormalizeToolStreamMode(toolStreamMode)

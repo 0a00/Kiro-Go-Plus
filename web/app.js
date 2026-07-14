@@ -770,8 +770,14 @@
         if (item.toolUseRequired) toolOutcome += ' · ' + t('requests.toolRequired');
         outcomeParts.push(toolOutcome);
       }
+      if (item.toolTruncationCount) {
+        outcomeParts.push(t('requests.toolRecovery', item.toolTruncationCount, item.toolRecoveryAttempts || 0));
+      }
       const outcome = outcomeParts.join(' · ') || '-';
-      const outcomeTitle = outcome + (Array.isArray(item.requestToolNames) && item.requestToolNames.length ? ' · ' + item.requestToolNames.join(', ') : '');
+      const toolPayloadTitle = item.toolArgumentBytes
+        ? ' · ' + t('requests.toolPayload', item.toolArgumentBytes, item.toolFragmentCount || 0)
+        : '';
+      const outcomeTitle = outcome + (Array.isArray(item.requestToolNames) && item.requestToolNames.length ? ' · ' + item.requestToolNames.join(', ') : '') + toolPayloadTitle;
       const upstreamActivityDuration = formatRequestDuration(item.upstreamFirstActivityMs);
       const firstContentDuration = formatRequestDuration(item.firstContentMs);
       const toolAssemblyDuration = formatRequestDuration(item.toolAssemblyMs);
@@ -1677,6 +1683,7 @@
       loadRoutingConfig(),
       loadAutoRefreshConfig(),
       loadRetryConfig(),
+      loadLongToolConfig(),
       loadResponsesStorageConfig(),
       loadModelRegistryConfig(),
       loadHealthConfig(),
@@ -1852,6 +1859,41 @@
     toast(t('settings.retrySaved'), 'success');
     loadRetryConfig();
   }
+  async function loadLongToolConfig() {
+    const res = await api('/long-tool');
+    const d = await res.json();
+    $('longToolEnabled').checked = d.enabled !== false;
+    $('longToolMaxTokens').value = d.defaultMaxToolTokens || 8192;
+    $('longToolRetries').value = d.truncationRetries ?? 1;
+    $('longToolFallbackEnabled').checked = d.fallbackEnabled === true;
+    $('longToolFallbackModel').value = d.fallbackModel || 'claude-sonnet-5';
+  }
+  async function saveLongToolConfig() {
+    const defaultMaxToolTokens = Math.round(Number($('longToolMaxTokens').value) || 0);
+    const truncationRetries = Math.round(Number($('longToolRetries').value) || 0);
+    const fallbackModel = $('longToolFallbackModel').value.trim();
+    if (defaultMaxToolTokens < 1024 || defaultMaxToolTokens > 128000 || truncationRetries < 0 || truncationRetries > 5 || !fallbackModel) {
+      toast(t('settings.longToolInvalid'), 'warning');
+      return;
+    }
+    const res = await api('/long-tool', {
+      method: 'POST',
+      body: JSON.stringify({
+        enabled: $('longToolEnabled').checked,
+        defaultMaxToolTokens,
+        truncationRetries,
+        fallbackEnabled: $('longToolFallbackEnabled').checked,
+        fallbackModel
+      })
+    });
+    const d = await res.json().catch(() => ({}));
+    if (!res.ok || d.success === false) {
+      toast(t('common.saveFailed') + ': ' + (d.error || t('common.unknownError')), 'error');
+      return;
+    }
+    toast(t('settings.longToolSaved'), 'success');
+    loadLongToolConfig();
+  }
   async function loadResponsesStorageConfig() {
     const res = await api('/responses-storage');
     const d = await res.json();
@@ -2022,10 +2064,11 @@
     $('thinkingBudgetCap').value = d.budgetCapTokens == null ? 10000 : d.budgetCapTokens;
     $('defaultMaxOutputTokens').value = d.defaultMaxOutputTokens || 0;
     $('defaultContextWindowTokens').value = d.defaultContextWindowTokens || 0;
-    const toolStreamMode = ['safe', 'balanced', 'live'].includes(d.toolStreamMode)
+    const toolStreamMode = ['safe', 'adaptive', 'balanced', 'live'].includes(d.toolStreamMode)
       ? d.toolStreamMode
       : (d.bufferToolStreams === false ? 'live' : 'safe');
     $('toolStreamModeSafe').checked = toolStreamMode === 'safe';
+    $('toolStreamModeAdaptive').checked = toolStreamMode === 'adaptive';
     $('toolStreamModeBalanced').checked = toolStreamMode === 'balanced';
     $('toolStreamModeLive').checked = toolStreamMode === 'live';
     $('enforceAgentToolUse').checked = d.enforceAgentToolUse !== false;
@@ -3796,6 +3839,7 @@
     $('saveRoutingBtn').addEventListener('click', saveRoutingConfig);
     $('saveAutoRefreshBtn').addEventListener('click', saveAutoRefreshConfig);
     $('saveRetryBtn').addEventListener('click', saveRetryConfig);
+    $('saveLongToolBtn').addEventListener('click', saveLongToolConfig);
     $('saveResponsesStorageBtn').addEventListener('click', saveResponsesStorageConfig);
     $('purgeResponsesStorageBtn').addEventListener('click', purgeResponsesStorage);
     $('saveModelRegistryBtn').addEventListener('click', saveModelRegistryConfig);

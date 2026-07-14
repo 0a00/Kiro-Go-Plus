@@ -131,7 +131,12 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 	thinkingCfg := config.GetThinkingConfig()
 	contextWindowTokens := applyOpenAITokenBudgetDefaults(openaiReq)
 	actualModel, thinking := ParseModelAndThinking(req.Model, thinkingCfg.Suffix)
+	if fallbackModel, changed := maybeLongToolFallback(actualModel, openaiReq.MaxTokens, openAIToolNames(openaiReq.Tools)); changed {
+		actualModel = fallbackModel
+		contextWindowTokens = resolveContextWindowTokens(actualModel, openaiReq.ContextWindow, openaiReq.MaxInputTokens)
+	}
 	openaiReq.Model = actualModel
+	req.Model = actualModel
 
 	estimatedInputTokens := estimateOpenAIRequestInputTokens(openaiReq)
 	if admissionErr := reserveAPIKeyTokens(r.Context(), estimatedInputTokens); admissionErr != nil {
@@ -176,6 +181,7 @@ func (h *Handler) handleResponsesNonStream(
 	req *ResponsesRequest, storedInput json.RawMessage, storeResponse bool,
 ) {
 	startedAt := time.Now()
+	payload.beginStreamMetrics(startedAt)
 	firstContent := newRequestFirstContentTimer(startedAt)
 	attempts := h.newAccountAttemptController(payload.requestContext)
 	excluded := attempts.excluded
@@ -422,6 +428,7 @@ func (h *Handler) handleResponsesStream(
 	req *ResponsesRequest, storedInput json.RawMessage, storeResponse bool,
 ) {
 	startedAt := time.Now()
+	payload.beginStreamMetrics(startedAt)
 	firstContent := newRequestFirstContentTimer(startedAt)
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")

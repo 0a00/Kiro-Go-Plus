@@ -42,8 +42,11 @@ func TestConfigureClaudeToolStreamingModes(t *testing.T) {
 		streamThinking      bool
 		streamToolDeltas    bool
 		requireExplicitTool bool
+		toolName            string
 	}{
 		{name: "safe inferred", mode: config.ToolStreamModeSafe, policy: toolUsePolicyInferred, requireActionable: true, deferText: true, streamThinking: true},
+		{name: "adaptive high risk", mode: config.ToolStreamModeAdaptive, policy: toolUsePolicyInferred, requireActionable: true, deferText: true, streamThinking: true, toolName: "Write"},
+		{name: "adaptive low risk", mode: config.ToolStreamModeAdaptive, policy: toolUsePolicyInferred, streamToolDeltas: true, toolName: "WebSearch"},
 		{name: "balanced inferred", mode: config.ToolStreamModeBalanced, policy: toolUsePolicyInferred},
 		{name: "live inferred", mode: config.ToolStreamModeLive, policy: toolUsePolicyInferred, streamToolDeltas: true},
 		{name: "balanced explicit", mode: config.ToolStreamModeBalanced, policy: toolUsePolicyExplicit, requireActionable: true, streamThinking: true, requireExplicitTool: true},
@@ -52,9 +55,13 @@ func TestConfigureClaudeToolStreamingModes(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			toolName := tc.toolName
+			if toolName == "" {
+				toolName = "Write"
+			}
 			req := &ClaudeRequest{
 				Stream:        true,
-				Tools:         []ClaudeTool{{Name: "Write"}},
+				Tools:         []ClaudeTool{{Name: toolName}},
 				ToolUsePolicy: tc.policy,
 			}
 			payload := &KiroPayload{}
@@ -68,6 +75,37 @@ func TestConfigureClaudeToolStreamingModes(t *testing.T) {
 				t.Fatalf("unexpected stream policy: %+v", payload)
 			}
 		})
+	}
+}
+
+func TestLongToolConfigAPI(t *testing.T) {
+	tempDir := t.TempDir()
+	if err := config.Init(filepath.Join(tempDir, "config.json")); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	t.Cleanup(func() { _ = config.Init(filepath.Join(tempDir, "reset.json")) })
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/admin/api/long-tool", strings.NewReader(`{
+		"enabled":true,
+		"defaultMaxToolTokens":12288,
+		"truncationRetries":2,
+		"fallbackEnabled":true,
+		"fallbackModel":"claude-sonnet-5"
+	}`))
+	(&Handler{}).apiUpdateLongToolConfig(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	got := config.GetLongToolConfig()
+	if !got.Enabled || got.DefaultMaxToolTokens != 12288 || got.TruncationRetries != 2 || !got.FallbackEnabled || got.FallbackModel != "claude-sonnet-5" {
+		t.Fatalf("unexpected long-tool config: %+v", got)
+	}
+
+	invalid := httptest.NewRecorder()
+	(&Handler{}).apiUpdateLongToolConfig(invalid, httptest.NewRequest(http.MethodPost, "/admin/api/long-tool", strings.NewReader(`{"enabled":true,"defaultMaxToolTokens":1,"truncationRetries":1,"fallbackModel":"claude-sonnet-5"}`)))
+	if invalid.Code != http.StatusBadRequest {
+		t.Fatalf("expected invalid long-tool config to return 400, got %d", invalid.Code)
 	}
 }
 
@@ -148,6 +186,12 @@ func TestThinkingConfigAPIUpdatesTokenDefaults(t *testing.T) {
 	}
 	if response.ToolStreamMode != config.ToolStreamModeBalanced || !response.BufferToolStreams {
 		t.Fatalf("unexpected thinking config response: %+v", response)
+	}
+
+	adaptive := httptest.NewRecorder()
+	(&Handler{}).apiUpdateThinkingConfig(adaptive, httptest.NewRequest(http.MethodPost, "/admin/api/thinking", strings.NewReader(`{"toolStreamMode":"adaptive"}`)))
+	if adaptive.Code != http.StatusOK || config.GetThinkingConfig().ToolStreamMode != config.ToolStreamModeAdaptive || !config.GetThinkingConfig().BufferToolStreams {
+		t.Fatalf("adaptive tool stream mode was not persisted: status=%d body=%s config=%+v", adaptive.Code, adaptive.Body.String(), config.GetThinkingConfig())
 	}
 
 	legacy := httptest.NewRecorder()

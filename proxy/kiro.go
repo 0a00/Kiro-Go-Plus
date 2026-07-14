@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"kiro-go/config"
@@ -221,6 +222,11 @@ type KiroPayload struct {
 	streamMetricsStartedAt  time.Time
 	firstUpstreamActivityMs int64
 	maxToolAssemblyMs       int64
+	maxToolArgumentBytes    int
+	maxToolFragmentCount    int
+	toolTruncationCount     int
+	toolRecoveryAttempts    int
+	toolRecoveryHintApplied bool
 	runtimeMu               sync.RWMutex
 	selectedEndpoint        string
 }
@@ -234,6 +240,11 @@ func (p *KiroPayload) beginStreamMetrics(startedAt time.Time) {
 	p.streamMetricsStartedAt = startedAt
 	p.firstUpstreamActivityMs = -1
 	p.maxToolAssemblyMs = -1
+	p.maxToolArgumentBytes = 0
+	p.maxToolFragmentCount = 0
+	p.toolTruncationCount = 0
+	p.toolRecoveryAttempts = 0
+	p.toolRecoveryHintApplied = false
 	p.streamMetricsMu.Unlock()
 }
 
@@ -267,14 +278,14 @@ func (p *KiroPayload) recordToolAssembly(elapsed time.Duration) {
 	p.streamMetricsMu.Unlock()
 }
 
-func (p *KiroPayload) streamMetrics() (firstUpstreamActivityMs, maxToolAssemblyMs *int64) {
+func (p *KiroPayload) streamMetrics() (firstUpstreamActivityMs, maxToolAssemblyMs *int64, maxToolArgumentBytes, maxToolFragmentCount, toolTruncationCount, toolRecoveryAttempts int) {
 	if p == nil {
-		return nil, nil
+		return nil, nil, 0, 0, 0, 0
 	}
 	p.streamMetricsMu.Lock()
 	defer p.streamMetricsMu.Unlock()
 	if !p.streamMetricsEnabled {
-		return nil, nil
+		return nil, nil, 0, 0, 0, 0
 	}
 	if p.firstUpstreamActivityMs >= 0 {
 		value := p.firstUpstreamActivityMs
@@ -284,7 +295,7 @@ func (p *KiroPayload) streamMetrics() (firstUpstreamActivityMs, maxToolAssemblyM
 		value := p.maxToolAssemblyMs
 		maxToolAssemblyMs = &value
 	}
-	return firstUpstreamActivityMs, maxToolAssemblyMs
+	return firstUpstreamActivityMs, maxToolAssemblyMs, p.maxToolArgumentBytes, p.maxToolFragmentCount, p.toolTruncationCount, p.toolRecoveryAttempts
 }
 
 func (p *KiroPayload) setSuccessfulEndpoint(endpoint string) {
@@ -835,7 +846,17 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 				err = classifyTransportError(ep.Name, context.DeadlineExceeded)
 			} else if firstTokenTimedOut.Load() && !meaningfulGate.hasActivity() {
 				err = classifyTransportError(ep.Name, context.DeadlineExceeded)
-			} else if _, ok := asUpstreamError(err); !ok {
+			} else {
+				var streamErr *EventStreamError
+				if errors.As(err, &streamErr) && streamErr.Kind == EventStreamIncompleteToolUse {
+					truncatedErr := newToolOutputTruncatedError(ep.Name, streamErr)
+					allowRetry := payload != nil && payload.recordToolTruncation(streamErr.ArgumentBytes, streamErr.FragmentCount, !meaningfulGate.hasActionableOutput())
+					truncatedErr.RetryAcrossEndpoints = allowRetry
+					truncatedErr.RetryAcrossAccounts = allowRetry
+					err = truncatedErr
+				}
+			}
+			if _, ok := asUpstreamError(err); !ok {
 				err = classifyTransportError(ep.Name, err)
 			}
 			lastErr = err
@@ -926,6 +947,10 @@ func parseEventStream(body io.Reader, callback *KiroStreamCallback) error {
 				currentToolUse = nil
 				recoveredToolUse = true
 				break
+			}
+			var streamErr *EventStreamError
+			if currentToolUse != nil && errors.As(err, &streamErr) && streamErr.Kind == EventStreamTruncated {
+				return incompleteToolUseStreamError(currentToolUse, err)
 			}
 			return err
 		}
@@ -1041,10 +1066,7 @@ func parseEventStream(body io.Reader, callback *KiroStreamCallback) error {
 
 	if currentToolUse != nil {
 		if !recoverCompleteToolUseWithoutStop(currentToolUse, callback, io.EOF) {
-			return &EventStreamError{
-				Kind:    EventStreamIncompleteToolUse,
-				Message: fmt.Sprintf("tool %q ended without a stop marker", currentToolUse.Name),
-			}
+			return incompleteToolUseStreamError(currentToolUse, io.EOF)
 		}
 		currentToolUse = nil
 		recoveredToolUse = true
@@ -1325,6 +1347,7 @@ type toolUseState struct {
 	ToolUseID     string
 	Name          string
 	InputBuffer   strings.Builder
+	FragmentCount int
 	GeneratedID   bool
 	StreamStarted bool
 }
@@ -1411,6 +1434,9 @@ func handleToolUseEvent(event map[string]interface{}, current *toolUseState, cal
 
 	if input, ok := event["input"].(string); ok {
 		current.InputBuffer.WriteString(input)
+		if input != "" {
+			current.FragmentCount++
+		}
 		if input != "" && callback != nil && callback.OnToolUseDelta != nil {
 			if current.StreamStarted {
 				callback.OnToolUseDelta(current.ToolUseID, input)
@@ -1423,6 +1449,7 @@ func handleToolUseEvent(event map[string]interface{}, current *toolUseState, cal
 		data, _ := json.Marshal(inputObj)
 		current.InputBuffer.Reset()
 		current.InputBuffer.Write(data)
+		current.FragmentCount++
 		if callback != nil && callback.OnToolUseDelta != nil {
 			if current.StreamStarted {
 				callback.OnToolUseDelta(current.ToolUseID, string(data))
@@ -1441,6 +1468,24 @@ func handleToolUseEvent(event map[string]interface{}, current *toolUseState, cal
 	}
 
 	return current, nil
+}
+
+func incompleteToolUseStreamError(state *toolUseState, cause error) *EventStreamError {
+	if state == nil {
+		return &EventStreamError{Kind: EventStreamIncompleteToolUse, Message: "tool use ended without a stop marker", Cause: cause}
+	}
+	message := fmt.Sprintf("tool %q ended without a stop marker", state.Name)
+	if state.InputBuffer.Len() > 0 {
+		message += fmt.Sprintf(" after %d argument bytes", state.InputBuffer.Len())
+	}
+	return &EventStreamError{
+		Kind:          EventStreamIncompleteToolUse,
+		Message:       message,
+		Cause:         cause,
+		ToolName:      state.Name,
+		ArgumentBytes: state.InputBuffer.Len(),
+		FragmentCount: state.FragmentCount,
+	}
 }
 
 func startToolUseStream(state *toolUseState, callback *KiroStreamCallback) {

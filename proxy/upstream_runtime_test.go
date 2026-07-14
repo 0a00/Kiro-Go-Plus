@@ -391,6 +391,82 @@ func TestCallKiroAPIRetriesCodeOnlyResponseWhenToolIsRequired(t *testing.T) {
 	}
 }
 
+func TestCallKiroAPIRetriesTruncatedToolWithRecoveryHint(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	longTool := config.GetLongToolConfig()
+	longTool.TruncationRetries = 1
+	if err := config.UpdateLongToolConfig(longTool); err != nil {
+		t.Fatalf("update long-tool config: %v", err)
+	}
+	_ = config.UpdatePreferredEndpoint("auto")
+	_ = config.UpdateEndpointFallback(true)
+
+	var requests atomic.Int32
+	var sawRecoveryHint atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempt := requests.Add(1)
+		body, _ := io.ReadAll(r.Body)
+		var requestPayload KiroPayload
+		_ = json.Unmarshal(body, &requestPayload)
+		if attempt > 1 && strings.Contains(requestPayload.ConversationState.CurrentMessage.UserInputMessage.Content, toolRecoveryHintMarker) {
+			sawRecoveryHint.Store(true)
+		}
+
+		w.WriteHeader(http.StatusOK)
+		if attempt == 1 {
+			_, _ = w.Write(awsEventStreamFrame(t, "toolUseEvent", map[string]interface{}{
+				"toolUseId": "toolu_truncated",
+				"name":      "Write",
+				"input":     `{"file_path":"index.html","content":"unfinished`,
+			}))
+			return
+		}
+		_, _ = w.Write(awsEventStreamFrame(t, "toolUseEvent", map[string]interface{}{
+			"toolUseId": "toolu_recovered",
+			"name":      "Write",
+			"input":     `{"file_path":"index.html","content":"complete"}`,
+			"stop":      true,
+		}))
+		_, _ = w.Write(awsEventStreamFrame(t, "meteringEvent", map[string]interface{}{"usage": 1.0}))
+	}))
+	defer server.Close()
+
+	oldEndpoints := kiroEndpoints
+	kiroEndpoints = []kiroEndpoint{
+		{Key: "runtime", URL: server.URL, Name: "Kiro Runtime"},
+		{Key: "kiro", URL: server.URL, Name: "Kiro IDE"},
+	}
+	t.Cleanup(func() { kiroEndpoints = oldEndpoints })
+
+	payload := &KiroPayload{requireActionableOutput: true, requireToolUse: true, deferTextUntilComplete: true}
+	payload.ConversationState.CurrentMessage.UserInputMessage.ModelID = "claude-sonnet-4.6"
+	payload.ConversationState.CurrentMessage.UserInputMessage.Content = "Create index.html."
+	var tool KiroToolWrapper
+	tool.ToolSpecification.Name = "Write"
+	payload.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext = &UserInputMessageContext{Tools: []KiroToolWrapper{tool}}
+	payload.beginStreamMetrics(time.Now())
+
+	var toolUses []KiroToolUse
+	err := CallKiroAPI(&config.Account{ID: "long-tool-account", AccessToken: "token"}, payload, &KiroStreamCallback{
+		OnToolUse: func(toolUse KiroToolUse) { toolUses = append(toolUses, toolUse) },
+	})
+	if err != nil {
+		t.Fatalf("expected recovered tool call, got %v", err)
+	}
+	if requests.Load() != 2 || !sawRecoveryHint.Load() {
+		t.Fatalf("expected one hinted retry, requests=%d hint=%v", requests.Load(), sawRecoveryHint.Load())
+	}
+	if len(toolUses) != 1 || toolUses[0].ToolUseID != "toolu_recovered" || toolUses[0].Input["content"] != "complete" {
+		t.Fatalf("partial tool leaked or recovered tool missing: %+v", toolUses)
+	}
+	_, _, argumentBytes, fragments, truncations, recoveries := payload.streamMetrics()
+	if argumentBytes == 0 || fragments == 0 || truncations != 1 || recoveries != 1 {
+		t.Fatalf("unexpected recovery metrics: bytes=%d fragments=%d truncations=%d recoveries=%d", argumentBytes, fragments, truncations, recoveries)
+	}
+}
+
 func TestCallKiroAPIStopsWhenClientRequestIsCanceled(t *testing.T) {
 	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatalf("init config: %v", err)

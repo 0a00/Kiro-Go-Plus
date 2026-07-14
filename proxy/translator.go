@@ -239,6 +239,7 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 		}
 		systemPrompt += buildClaudeAgentToolPolicy(req)
 	}
+	systemPrompt = appendLongToolPolicy(systemPrompt, modelID, claudeToolNames(req.Tools))
 
 	// 构建历史消息
 	history := make([]KiroHistoryMessage, 0)
@@ -1357,6 +1358,7 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 			systemPrompt = thinkingPrompt + "\n\n" + systemPrompt
 		}
 	}
+	systemPrompt = appendLongToolPolicy(strings.TrimSpace(systemPrompt), modelID, openAIToolNames(req.Tools))
 
 	// 构建历史消息
 	history := make([]KiroHistoryMessage, 0)

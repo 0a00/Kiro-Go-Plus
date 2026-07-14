@@ -453,6 +453,39 @@
           <button class="btn btn-primary" id="saveRetryBtn" data-i18n="settings.saveRetry"></button>
         </div>
 
+        <!-- Long tool protection -->
+        <div class="card">
+          <div class="card-header"><span class="card-title" data-i18n="settings.longToolProtection"></span></div>
+          <div class="form-group">
+            <label class="flex items-center gap-2">
+              <span class="switch"><input type="checkbox" id="longToolEnabled" /><span class="slider"></span></span>
+              <span data-i18n="settings.longToolEnabled"></span>
+            </label>
+          </div>
+          <div class="form-grid-2">
+            <div class="form-group">
+              <label data-i18n="settings.longToolMaxTokens"></label>
+              <input type="number" id="longToolMaxTokens" min="1024" max="128000" step="256" />
+            </div>
+            <div class="form-group">
+              <label data-i18n="settings.longToolRetries"></label>
+              <input type="number" id="longToolRetries" min="0" max="5" step="1" />
+            </div>
+          </div>
+          <div class="form-group">
+            <label class="flex items-center gap-2">
+              <span class="switch"><input type="checkbox" id="longToolFallbackEnabled" /><span class="slider"></span></span>
+              <span data-i18n="settings.longToolFallbackEnabled"></span>
+            </label>
+          </div>
+          <div class="form-group">
+            <label data-i18n="settings.longToolFallbackModel"></label>
+            <input type="text" id="longToolFallbackModel" placeholder="claude-sonnet-5" />
+            <small data-i18n="settings.longToolHint"></small>
+          </div>
+          <button class="btn btn-primary" id="saveLongToolBtn" data-i18n="settings.saveLongTool"></button>
+        </div>
+
         <!-- Responses storage -->
         <div class="card">
           <div class="card-header"><span class="card-title" data-i18n="settings.responsesStorage"></span></div>
@@ -501,7 +534,7 @@
           <div class="form-group">
             <label data-i18n="settings.modelRegistryJson"></label>
             <textarea id="modelRegistryJson" class="font-mono" rows="12"
-              placeholder='[{"id":"my-sonnet","displayName":"My Sonnet","kiroModelId":"claude-sonnet-4.6","contextWindow":1000000,"maxTokens":64000,"matchKeywords":["my-sonnet"]}]'></textarea>
+              placeholder='[{"id":"my-sonnet","displayName":"My Sonnet","kiroModelId":"claude-sonnet-4.6","contextWindow":1000000,"maxTokens":64000,"maxToolTokens":8192,"matchKeywords":["my-sonnet"]}]'></textarea>
             <small data-i18n="settings.modelRegistryHint"></small>
           </div>
           <button class="btn btn-primary" id="saveModelRegistryBtn" data-i18n="settings.saveModelRegistry"></button>
@@ -810,6 +843,10 @@
           <div class="form-group">
             <label data-i18n="settings.toolStreamMode"></label>
             <div class="segmented-control" role="radiogroup" data-i18n-aria-label="settings.toolStreamMode">
+              <label class="segmented-option">
+                <input type="radio" id="toolStreamModeAdaptive" name="toolStreamMode" value="adaptive" />
+                <span data-i18n="settings.toolStreamAdaptive"></span>
+              </label>
               <label class="segmented-option">
                 <input type="radio" id="toolStreamModeLive" name="toolStreamMode" value="live" />
                 <span data-i18n="settings.toolStreamLive"></span>

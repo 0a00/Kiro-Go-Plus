@@ -31,9 +31,12 @@ const (
 
 // EventStreamError is returned for malformed or incomplete upstream frames.
 type EventStreamError struct {
-	Kind    EventStreamErrorKind
-	Message string
-	Cause   error
+	Kind          EventStreamErrorKind
+	Message       string
+	Cause         error
+	ToolName      string
+	ArgumentBytes int
+	FragmentCount int
 }
 
 func (e *EventStreamError) Error() string {

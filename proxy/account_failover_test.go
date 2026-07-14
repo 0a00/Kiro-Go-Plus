@@ -146,7 +146,7 @@ func TestAccountAttemptControllerShutdownStopsNewAttempts(t *testing.T) {
 	}
 }
 
-func TestUnlimitedAccountPollingUsesRetryWindowInsteadOfAttemptCap(t *testing.T) {
+func TestUnlimitedAccountPollingStillHonorsUpstreamAttemptCap(t *testing.T) {
 	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatalf("config.Init: %v", err)
 	}
@@ -159,21 +159,17 @@ func TestUnlimitedAccountPollingUsesRetryWindowInsteadOfAttemptCap(t *testing.T)
 	}
 
 	budget := newUpstreamAttemptBudget()
-	for attempt := 0; attempt < 3; attempt++ {
-		if !budget.take() {
-			t.Fatalf("unlimited account polling rejected attempt %d", attempt+1)
-		}
+	if !budget.take() {
+		t.Fatal("first upstream attempt was rejected")
+	}
+	if budget.take() {
+		t.Fatal("unlimited account polling bypassed the upstream attempt cap")
 	}
 	budget.recordFailure("Kiro IDE", errors.New("incomplete tool JSON"))
-	budget.maxDuration = time.Second
-	budget.now = func() time.Time { return budget.startedAt.Add(2 * time.Second) }
-	if budget.take() {
-		t.Fatal("retry window did not stop unlimited polling")
-	}
 	err := newRetryBudgetError(budget)
-	if !strings.Contains(err.Error(), "after 3 attempts") || !strings.Contains(err.Error(), "window exhausted") ||
+	if !strings.Contains(err.Error(), "after 1 attempts") || !strings.Contains(err.Error(), "budget exhausted") ||
 		!strings.Contains(err.Error(), "last failure from Kiro IDE: incomplete tool JSON") {
-		t.Fatalf("unexpected retry-window error: %v", err)
+		t.Fatalf("unexpected retry-budget error: %v", err)
 	}
 }
 
