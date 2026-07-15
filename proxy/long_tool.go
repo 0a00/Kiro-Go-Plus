@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"kiro-go/config"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/google/uuid"
@@ -13,6 +14,19 @@ const (
 	longToolPolicyMarker   = "<long_tool_policy>"
 	toolRecoveryHintMarker = "<tool_truncation_recovery>"
 )
+
+var resolveLongToolActionableOutputTimeout = configuredLongToolActionableOutputTimeout
+
+func configuredLongToolActionableOutputTimeout(payload *KiroPayload) time.Duration {
+	if payload == nil || !payload.requireActionableOutput || !payloadHasHighRiskTools(payload) {
+		return 0
+	}
+	settings := config.GetLongToolConfig()
+	if !settings.Enabled || settings.ActionableOutputTimeoutSeconds <= 0 {
+		return 0
+	}
+	return time.Duration(settings.ActionableOutputTimeoutSeconds) * time.Second
+}
 
 func isHighRiskToolName(name string) bool {
 	var normalized strings.Builder

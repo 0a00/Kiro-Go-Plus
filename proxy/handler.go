@@ -2516,7 +2516,8 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 		return
 	}
 
-	if attempts.stopErr() != nil {
+	if stopErr := attempts.stopErr(); stopErr != nil {
+		h.recordCanceledRequestForPayload(payload, "claude.messages.stream", model, startedAt, firstContent.Value(), stopErr)
 		return
 	}
 	if lastErr == nil {
@@ -2871,7 +2872,8 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 		return
 	}
 
-	if attempts.stopErr() != nil {
+	if stopErr := attempts.stopErr(); stopErr != nil {
+		h.recordCanceledRequestForPayload(payload, "claude.messages", model, startedAt, firstContent.Value(), stopErr)
 		return
 	}
 	if lastErr == nil {
@@ -3453,7 +3455,8 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 		return
 	}
 
-	if attempts.stopErr() != nil {
+	if stopErr := attempts.stopErr(); stopErr != nil {
+		h.recordCanceledRequestForPayload(payload, "openai.chat.stream", model, startedAt, firstContent.Value(), stopErr)
 		return
 	}
 	if lastErr == nil {
@@ -3615,7 +3618,8 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 		return
 	}
 
-	if attempts.stopErr() != nil {
+	if stopErr := attempts.stopErr(); stopErr != nil {
+		h.recordCanceledRequestForPayload(payload, "openai.chat", model, startedAt, firstContent.Value(), stopErr)
 		return
 	}
 	if lastErr == nil {
@@ -5580,8 +5584,13 @@ func (h *Handler) apiUpdateLongToolConfig(w http.ResponseWriter, r *http.Request
 		return
 	}
 	req.FallbackModel = strings.TrimSpace(req.FallbackModel)
+	if req.ActionableOutputTimeoutSeconds == 0 {
+		req.ActionableOutputTimeoutSeconds = config.GetLongToolConfig().ActionableOutputTimeoutSeconds
+	}
 	if req.DefaultMaxToolTokens < 1024 || req.DefaultMaxToolTokens > 128000 ||
-		req.TruncationRetries < 0 || req.TruncationRetries > 5 || req.FallbackModel == "" {
+		req.TruncationRetries < 0 || req.TruncationRetries > 5 ||
+		req.ActionableOutputTimeoutSeconds < 30 || req.ActionableOutputTimeoutSeconds > 600 ||
+		req.FallbackModel == "" {
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]string{"error": "invalid long-tool configuration"})
 		return

@@ -29,6 +29,7 @@ const (
 	UpstreamErrorEndpointUnavailable UpstreamErrorKind = "endpoint_unavailable"
 	UpstreamErrorTransient           UpstreamErrorKind = "transient"
 	UpstreamErrorFirstTokenTimeout   UpstreamErrorKind = "first_token_timeout"
+	UpstreamErrorActionableTimeout   UpstreamErrorKind = "actionable_output_timeout"
 	UpstreamErrorToolAssemblyTimeout UpstreamErrorKind = "tool_assembly_timeout"
 	UpstreamErrorToolOutputTruncated UpstreamErrorKind = "tool_output_truncated"
 	UpstreamErrorCanceled            UpstreamErrorKind = "canceled"
@@ -178,7 +179,7 @@ func mapDownstreamError(err error) downstreamError {
 		// These credentials and models belong to the proxy, not the caller.
 		// Returning 401 would incorrectly tell clients their own API key failed.
 		mapped.Status = http.StatusServiceUnavailable
-	case UpstreamErrorFirstTokenTimeout, UpstreamErrorToolAssemblyTimeout:
+	case UpstreamErrorFirstTokenTimeout, UpstreamErrorActionableTimeout, UpstreamErrorToolAssemblyTimeout:
 		mapped.Status = http.StatusGatewayTimeout
 	case UpstreamErrorToolOutputTruncated:
 		mapped.Status = http.StatusBadGateway
@@ -365,6 +366,17 @@ func newToolAssemblyTimeoutError(endpoint, toolName string, argumentBytes int, t
 		Kind:                 UpstreamErrorToolAssemblyTimeout,
 		Endpoint:             endpoint,
 		Message:              message,
+		RetryAcrossEndpoints: true,
+		RetryAcrossAccounts:  true,
+	}
+}
+
+func newActionableOutputTimeoutError(endpoint string, timeout time.Duration) *UpstreamError {
+	return &UpstreamError{
+		Kind:                 UpstreamErrorActionableTimeout,
+		Endpoint:             endpoint,
+		Message:              fmt.Sprintf("upstream did not produce actionable text or a complete tool call within %s", timeout.Round(time.Second)),
+		Cause:                context.DeadlineExceeded,
 		RetryAcrossEndpoints: true,
 		RetryAcrossAccounts:  true,
 	}

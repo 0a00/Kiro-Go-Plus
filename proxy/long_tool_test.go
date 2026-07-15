@@ -3,6 +3,7 @@ package proxy
 import (
 	"errors"
 	"kiro-go/config"
+	"net/http"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -114,5 +115,18 @@ func TestToolOutputTruncationOnlyPenalizesWorkloadRoute(t *testing.T) {
 	(&Handler{}).handleAccountFailure(&config.Account{ID: "account"}, err)
 	if !errors.Is(err, streamErr) {
 		t.Fatal("tool truncation did not preserve its EventStream cause")
+	}
+}
+
+func TestActionableOutputTimeoutOnlyPenalizesWorkloadRoute(t *testing.T) {
+	err := newActionableOutputTimeoutError("Kiro IDE", 2*time.Minute)
+	if circuitEligibleFailure(err) {
+		t.Fatal("actionable-output timeout must not open the shared endpoint circuit")
+	}
+	if _, eligible := endpointRouteFailure(err); !eligible {
+		t.Fatal("actionable-output timeout must cool the isolated long-tool endpoint route")
+	}
+	if mapped := mapDownstreamError(err); mapped.Status != http.StatusGatewayTimeout {
+		t.Fatalf("actionable-output timeout status = %d, want %d", mapped.Status, http.StatusGatewayTimeout)
 	}
 }

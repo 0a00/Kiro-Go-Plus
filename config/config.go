@@ -252,11 +252,12 @@ type RetryConfig struct {
 // LongToolConfig protects large file/command tool calls from upstream
 // truncation and bounds recovery work before any partial tool JSON is exposed.
 type LongToolConfig struct {
-	Enabled              bool   `json:"enabled"`
-	DefaultMaxToolTokens int    `json:"defaultMaxToolTokens"`
-	TruncationRetries    int    `json:"truncationRetries"`
-	FallbackEnabled      bool   `json:"fallbackEnabled"`
-	FallbackModel        string `json:"fallbackModel,omitempty"`
+	Enabled                        bool   `json:"enabled"`
+	DefaultMaxToolTokens           int    `json:"defaultMaxToolTokens"`
+	TruncationRetries              int    `json:"truncationRetries"`
+	ActionableOutputTimeoutSeconds int    `json:"actionableOutputTimeoutSeconds"`
+	FallbackEnabled                bool   `json:"fallbackEnabled"`
+	FallbackModel                  string `json:"fallbackModel,omitempty"`
 }
 
 // ResponsesStorageConfig bounds persisted OpenAI Responses API state.
@@ -494,7 +495,7 @@ const (
 )
 
 // Version current version
-const Version = "1.2.25"
+const Version = "1.2.26"
 
 var (
 	cfg           *Config
@@ -1135,11 +1136,12 @@ func defaultResponsesStorageConfig() ResponsesStorageConfig {
 
 func defaultLongToolConfig() LongToolConfig {
 	return LongToolConfig{
-		Enabled:              true,
-		DefaultMaxToolTokens: 8192,
-		TruncationRetries:    1,
-		FallbackEnabled:      false,
-		FallbackModel:        "claude-sonnet-5",
+		Enabled:                        true,
+		DefaultMaxToolTokens:           8192,
+		TruncationRetries:              1,
+		ActionableOutputTimeoutSeconds: 120,
+		FallbackEnabled:                false,
+		FallbackModel:                  "claude-sonnet-5",
 	}
 }
 
@@ -1157,6 +1159,12 @@ func normalizeLongToolLocked() {
 	}
 	if value.TruncationRetries > 5 {
 		value.TruncationRetries = 5
+	}
+	if value.ActionableOutputTimeoutSeconds < 30 {
+		value.ActionableOutputTimeoutSeconds = defaults.ActionableOutputTimeoutSeconds
+	}
+	if value.ActionableOutputTimeoutSeconds > 600 {
+		value.ActionableOutputTimeoutSeconds = 600
 	}
 	value.FallbackModel = strings.TrimSpace(value.FallbackModel)
 	if value.FallbackModel == "" {
@@ -1790,6 +1798,9 @@ func GetLongToolConfig() LongToolConfig {
 	}
 	if out.TruncationRetries < 0 {
 		out.TruncationRetries = defaults.TruncationRetries
+	}
+	if out.ActionableOutputTimeoutSeconds < 30 {
+		out.ActionableOutputTimeoutSeconds = defaults.ActionableOutputTimeoutSeconds
 	}
 	if strings.TrimSpace(out.FallbackModel) == "" {
 		out.FallbackModel = defaults.FallbackModel

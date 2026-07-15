@@ -3,6 +3,7 @@ package proxy
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -90,6 +91,7 @@ func TestLongToolConfigAPI(t *testing.T) {
 		"enabled":true,
 		"defaultMaxToolTokens":12288,
 		"truncationRetries":2,
+		"actionableOutputTimeoutSeconds":150,
 		"fallbackEnabled":true,
 		"fallbackModel":"claude-sonnet-5"
 	}`))
@@ -98,7 +100,7 @@ func TestLongToolConfigAPI(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
 	}
 	got := config.GetLongToolConfig()
-	if !got.Enabled || got.DefaultMaxToolTokens != 12288 || got.TruncationRetries != 2 || !got.FallbackEnabled || got.FallbackModel != "claude-sonnet-5" {
+	if !got.Enabled || got.DefaultMaxToolTokens != 12288 || got.TruncationRetries != 2 || got.ActionableOutputTimeoutSeconds != 150 || !got.FallbackEnabled || got.FallbackModel != "claude-sonnet-5" {
 		t.Fatalf("unexpected long-tool config: %+v", got)
 	}
 
@@ -106,6 +108,62 @@ func TestLongToolConfigAPI(t *testing.T) {
 	(&Handler{}).apiUpdateLongToolConfig(invalid, httptest.NewRequest(http.MethodPost, "/admin/api/long-tool", strings.NewReader(`{"enabled":true,"defaultMaxToolTokens":1,"truncationRetries":1,"fallbackModel":"claude-sonnet-5"}`)))
 	if invalid.Code != http.StatusBadRequest {
 		t.Fatalf("expected invalid long-tool config to return 400, got %d", invalid.Code)
+	}
+
+	invalidTimeout := httptest.NewRecorder()
+	(&Handler{}).apiUpdateLongToolConfig(invalidTimeout, httptest.NewRequest(http.MethodPost, "/admin/api/long-tool", strings.NewReader(`{"enabled":true,"defaultMaxToolTokens":8192,"truncationRetries":1,"actionableOutputTimeoutSeconds":10,"fallbackModel":"claude-sonnet-5"}`)))
+	if invalidTimeout.Code != http.StatusBadRequest {
+		t.Fatalf("expected invalid actionable timeout to return 400, got %d", invalidTimeout.Code)
+	}
+}
+
+func TestCanceledRequestsAreLoggedAcrossProtocols(t *testing.T) {
+	t.Setenv("ALLOW_UNAUTHENTICATED_API", "true")
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	p := accountpool.GetPool()
+	p.Reload()
+
+	tests := []struct {
+		name     string
+		path     string
+		body     string
+		protocol string
+	}{
+		{name: "claude nonstream", path: "/v1/messages", body: `{"model":"claude-sonnet-4.6","max_tokens":32,"messages":[{"role":"user","content":"hello"}]}`, protocol: "claude.messages"},
+		{name: "claude stream", path: "/v1/messages", body: `{"model":"claude-sonnet-4.6","stream":true,"max_tokens":32,"messages":[{"role":"user","content":"hello"}]}`, protocol: "claude.messages.stream"},
+		{name: "chat nonstream", path: "/v1/chat/completions", body: `{"model":"claude-sonnet-4.6","max_tokens":32,"messages":[{"role":"user","content":"hello"}]}`, protocol: "openai.chat"},
+		{name: "chat stream", path: "/v1/chat/completions", body: `{"model":"claude-sonnet-4.6","stream":true,"max_tokens":32,"messages":[{"role":"user","content":"hello"}]}`, protocol: "openai.chat.stream"},
+		{name: "responses nonstream", path: "/v1/responses", body: `{"model":"claude-sonnet-4.6","input":"hello","store":false}`, protocol: "openai.responses"},
+		{name: "responses stream", path: "/v1/responses", body: `{"model":"claude-sonnet-4.6","input":"hello","stream":true,"store":false}`, protocol: "openai.responses.stream"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			h := &Handler{
+				pool:        p,
+				promptCache: newPromptCacheTracker(defaultPromptCacheTTL),
+				requestLog:  newRequestLog(defaultRequestLogLimit),
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			req := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body)).WithContext(ctx)
+			req.Header.Set("Content-Type", "application/json")
+			h.ServeHTTP(httptest.NewRecorder(), req)
+
+			entries := h.requestLog.list(2)
+			if len(entries) != 1 {
+				t.Fatalf("request log entries = %d, want 1: %+v", len(entries), entries)
+			}
+			entry := entries[0]
+			if entry.Protocol != tc.protocol || entry.Status != "canceled" || entry.StatusCode != 499 {
+				t.Fatalf("unexpected canceled request log: %+v", entry)
+			}
+			if h.failedRequests.Load() != 0 {
+				t.Fatalf("client cancellation counted as service failure: %d", h.failedRequests.Load())
+			}
+		})
 	}
 }
 

@@ -533,7 +533,8 @@ func TestOperationalConfigDefaults(t *testing.T) {
 		t.Fatalf("unexpected model registry defaults: %+v", models)
 	}
 	longTool := GetLongToolConfig()
-	if !longTool.Enabled || longTool.DefaultMaxToolTokens != 8192 || longTool.TruncationRetries != 1 || longTool.FallbackEnabled || longTool.FallbackModel != "claude-sonnet-5" {
+	if !longTool.Enabled || longTool.DefaultMaxToolTokens != 8192 || longTool.TruncationRetries != 1 ||
+		longTool.ActionableOutputTimeoutSeconds != 120 || longTool.FallbackEnabled || longTool.FallbackModel != "claude-sonnet-5" {
 		t.Fatalf("unexpected long-tool defaults: %+v", longTool)
 	}
 	health := GetHealthConfig()

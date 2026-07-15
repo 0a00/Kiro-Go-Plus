@@ -740,9 +740,21 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 		wrappedCallback, toolMonitor := wrapToolAssemblyMonitor(wrappedCallback, toolAssemblyTimeout, func(toolAssemblySnapshot) {
 			cancelRequest()
 		})
+		var actionableOutputTimedOut atomic.Bool
+		actionableOutputTimeout := resolveLongToolActionableOutputTimeout(payload)
+		var actionableOutputTimer *time.Timer
 		if firstTokenTimeout > 0 {
 			firstTokenTimer = time.AfterFunc(firstTokenTimeout, func() {
 				firstTokenTimedOut.Store(true)
+				cancelRequest()
+			})
+		}
+		if actionableOutputTimeout > 0 {
+			actionableOutputTimer = time.AfterFunc(actionableOutputTimeout, func() {
+				if meaningfulGate.hasActionableOutput() {
+					return
+				}
+				actionableOutputTimedOut.Store(true)
 				cancelRequest()
 			})
 		}
@@ -753,15 +765,23 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 			if firstTokenTimer != nil {
 				firstTokenTimer.Stop()
 			}
+			if actionableOutputTimer != nil {
+				actionableOutputTimer.Stop()
+			}
 			cancelRequest()
-			if firstTokenTimedOut.Load() {
-				err = context.DeadlineExceeded
-			} else if requestContext.Err() != nil {
+			if requestContext.Err() != nil {
 				lastErr = classifyRequestCancellation(ep.Name, requestContext.Err())
 				detailTrace.recordAttempt(accountID, accountEmail, ep.Name, endpointHost, attemptStartedAt, 0, "canceled", lastErr, requestDetailRetryReason(lastErr))
 				return lastErr
 			}
-			lastErr = classifyTransportError(ep.Name, err)
+			if actionableOutputTimedOut.Load() {
+				lastErr = newActionableOutputTimeoutError(ep.Name, actionableOutputTimeout)
+			} else {
+				if firstTokenTimedOut.Load() {
+					err = context.DeadlineExceeded
+				}
+				lastErr = classifyTransportError(ep.Name, err)
+			}
 			detailTrace.recordAttempt(accountID, accountEmail, ep.Name, endpointHost, attemptStartedAt, 0, "error", lastErr, requestDetailRetryReason(lastErr))
 			if payload != nil {
 				payload.attemptBudget.recordFailure(ep.Name, lastErr)
@@ -769,9 +789,13 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 			if cooldown := sharedAccountEndpointRoutes.recordFailure(accountID, modelKey, ep, lastErr); cooldown > 0 {
 				logger.Warnf("[EndpointRouting] Account %s model %s endpoint %s cooling for %s after transport error: %v", accountID, modelKey, ep.Name, cooldown, lastErr)
 			}
-			lastCircuitError = lastErr
-			proxyTransportFailed = true
-			sharedUpstreamHealth.endpointFailure(endpointCircuitKey, lastErr, time.Since(attemptStartedAt))
+			if circuitEligibleFailure(lastErr) {
+				lastCircuitError = lastErr
+				proxyTransportFailed = true
+				sharedUpstreamHealth.endpointFailure(endpointCircuitKey, lastErr, time.Since(attemptStartedAt))
+			} else {
+				sharedUpstreamHealth.endpointSuccess(endpointCircuitKey, time.Since(attemptStartedAt))
+			}
 			logger.Warnf("[KiroAPI] Endpoint %s failed: %v", ep.Name, err)
 			if payload != nil && payload.attemptBudget.expired() && requestContext.Err() == nil {
 				return newRetryBudgetError(payload.attemptBudget)
@@ -789,6 +813,9 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 			resp.Body.Close()
 			if firstTokenTimer != nil {
 				firstTokenTimer.Stop()
+			}
+			if actionableOutputTimer != nil {
+				actionableOutputTimer.Stop()
 			}
 			cancelRequest()
 			classifiedErr := classifyUpstreamHTTPError(resp.StatusCode, ep.Name, errBody)
@@ -838,6 +865,9 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 		if firstTokenTimer != nil {
 			firstTokenTimer.Stop()
 		}
+		if actionableOutputTimer != nil {
+			actionableOutputTimer.Stop()
+		}
 		cancelRequest()
 		if err == nil && meaningfulGate.hasInvalidCommittedToolUse() {
 			err = &EventStreamError{
@@ -849,13 +879,15 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 			if toolSnapshot, timedOut := toolMonitor.TimedOut(); timedOut {
 				err = newToolAssemblyTimeoutError(ep.Name, toolSnapshot.Name, toolSnapshot.ArgumentBytes, toolAssemblyTimeout)
 			}
-			if requestContext.Err() != nil && !firstTokenTimedOut.Load() {
+			if requestContext.Err() != nil {
 				sharedUpstreamHealth.releaseEndpoint(endpointCircuitKey)
 				lastErr = classifyRequestCancellation(ep.Name, requestContext.Err())
 				detailTrace.recordAttempt(accountID, accountEmail, ep.Name, endpointHost, attemptStartedAt, http.StatusOK, "canceled", lastErr, requestDetailRetryReason(lastErr))
 				return lastErr
 			}
-			if streamIdleTimedOut.Load() {
+			if actionableOutputTimedOut.Load() && !meaningfulGate.hasActionableOutput() {
+				err = newActionableOutputTimeoutError(ep.Name, actionableOutputTimeout)
+			} else if streamIdleTimedOut.Load() {
 				err = classifyTransportError(ep.Name, context.DeadlineExceeded)
 			} else if firstTokenTimedOut.Load() && !meaningfulGate.hasActivity() {
 				err = classifyTransportError(ep.Name, context.DeadlineExceeded)

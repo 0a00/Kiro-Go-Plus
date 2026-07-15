@@ -235,6 +235,95 @@ func TestCallKiroAPIStopsToolStreamThatNeverCompletes(t *testing.T) {
 	}
 }
 
+func TestCallKiroAPIRotatesEndpointAfterActionableOutputTimeout(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	retry := config.GetRetryConfig()
+	retry.MaxAccountAttempts = 1
+	retry.MaxUpstreamAttempts = 4
+	retry.MaxRetryDurationSeconds = 5
+	retry.FirstTokenTimeoutSeconds = 5
+	retry.StreamIdleTimeoutSeconds = 15
+	retry.ToolAssemblyTimeoutSeconds = 0
+	if err := config.UpdateRetryConfig(retry); err != nil {
+		t.Fatalf("update retry config: %v", err)
+	}
+	_ = config.UpdatePreferredEndpoint("auto")
+	_ = config.UpdateEndpointFallback(true)
+	sharedAccountEndpointRoutes.reset()
+
+	oldTimeoutResolver := resolveLongToolActionableOutputTimeout
+	resolveLongToolActionableOutputTimeout = func(*KiroPayload) time.Duration { return 150 * time.Millisecond }
+	t.Cleanup(func() { resolveLongToolActionableOutputTimeout = oldTimeoutResolver })
+
+	var stalledCalls atomic.Int32
+	stalled := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		stalledCalls.Add(1)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(awsEventStreamFrame(t, "toolUseEvent", map[string]interface{}{
+			"toolUseId": "toolu_stalled",
+			"name":      "Write",
+			"input":     `{"file_path":"index.html","content":"`,
+		}))
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		<-r.Context().Done()
+	}))
+	defer stalled.Close()
+
+	var recoveredCalls atomic.Int32
+	recovered := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		recoveredCalls.Add(1)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(awsEventStreamFrame(t, "toolUseEvent", map[string]interface{}{
+			"toolUseId": "toolu_recovered",
+			"name":      "Write",
+			"input":     `{"file_path":"index.html","content":"complete"}`,
+			"stop":      true,
+		}))
+		_, _ = w.Write(awsEventStreamFrame(t, "contextUsageEvent", map[string]interface{}{"contextUsagePercentage": 1.0}))
+	}))
+	defer recovered.Close()
+
+	oldEndpoints := kiroEndpoints
+	kiroEndpoints = []kiroEndpoint{
+		{Key: "kiro", URL: stalled.URL, Name: "Kiro IDE"},
+		{Key: "runtime", URL: recovered.URL, Name: "Kiro Runtime"},
+	}
+	t.Cleanup(func() { kiroEndpoints = oldEndpoints })
+
+	payload := &KiroPayload{requireActionableOutput: true, requireToolUse: true, deferTextUntilComplete: true}
+	payload.ConversationState.CurrentMessage.UserInputMessage.ModelID = "claude-sonnet-4.6"
+	var tool KiroToolWrapper
+	tool.ToolSpecification.Name = "Write"
+	payload.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext = &UserInputMessageContext{Tools: []KiroToolWrapper{tool}}
+
+	var toolUses []KiroToolUse
+	startedAt := time.Now()
+	err := CallKiroAPI(&config.Account{ID: "actionable-timeout-account", AccessToken: "token"}, payload, &KiroStreamCallback{
+		OnToolUse: func(toolUse KiroToolUse) { toolUses = append(toolUses, toolUse) },
+	})
+	if err != nil {
+		t.Fatalf("expected endpoint recovery, got %v", err)
+	}
+	if elapsed := time.Since(startedAt); elapsed > 2*time.Second {
+		t.Fatalf("actionable timeout recovery took too long: %s", elapsed)
+	}
+	if stalledCalls.Load() != 1 || recoveredCalls.Load() != 1 {
+		t.Fatalf("unexpected endpoint attempts: stalled=%d recovered=%d", stalledCalls.Load(), recoveredCalls.Load())
+	}
+	if len(toolUses) != 1 || toolUses[0].ToolUseID != "toolu_recovered" || toolUses[0].Input["content"] != "complete" {
+		t.Fatalf("partial tool leaked or recovered tool missing: %+v", toolUses)
+	}
+	status := sharedAccountEndpointRoutes.snapshot()
+	cooldowns, _ := status["cooldowns"].([]accountEndpointRouteSnapshot)
+	if len(cooldowns) != 1 || cooldowns[0].Workload != "long-tool" || cooldowns[0].Endpoint != "Kiro IDE" {
+		t.Fatalf("actionable timeout did not cool only the long-tool route: %+v", status)
+	}
+}
+
 func TestRetryWindowErrorIncludesCurrentTransportFailure(t *testing.T) {
 	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatalf("init config: %v", err)

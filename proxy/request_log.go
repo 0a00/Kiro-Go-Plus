@@ -307,6 +307,24 @@ func (h *Handler) recordRequestLog(entry requestLogEntry) {
 	h.requestLog.add(entry)
 }
 
+func (h *Handler) recordCanceledRequestForPayload(payload *KiroPayload, protocol, model string, startedAt time.Time, firstContentMs *int64, err error) {
+	if h == nil || err == nil {
+		return
+	}
+	canceled := classifyRequestCancellation("", err)
+	mapped := mapDownstreamError(canceled)
+	h.recordRequestLogForPayload(payload, requestLogEntry{
+		Timestamp:      time.Now().Unix(),
+		Protocol:       protocol,
+		Model:          model,
+		Status:         "canceled",
+		StatusCode:     mapped.Status,
+		FirstContentMs: firstContentMs,
+		DurationMs:     requestDurationMs(startedAt),
+		Error:          canceled.Error(),
+	})
+}
+
 func (h *Handler) recordRequestLogForPayload(payload *KiroPayload, entry requestLogEntry) {
 	if payload != nil {
 		entry.RequestID = requestIDFromContext(payload.requestContext)

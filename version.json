@@ -1,5 +1,5 @@
 {
-  "version": "1.2.25",
-  "changelog": "Keep Claude streams alive with independent heartbeats, reject unknown models before account polling, isolate long-tool endpoint routing and retries, and return protocol-complete WebSearch blocks and usage.\n新增 Claude 流独立心跳、账号轮询前的未知模型校验、长工具端点路由与重试隔离，并完善 WebSearch 协议块及用量统计。",
+  "version": "1.2.26",
+  "changelog": "Bound high-risk tool stalls with a configurable actionable-output timeout and endpoint/account failover, and persist client-canceled requests in request logs.\n新增高风险工具可提交输出超时，可自动切换端点和账号，并将客户端取消的请求持久化到请求日志。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }

@@ -308,7 +308,8 @@ func (h *Handler) handleResponsesNonStream(
 		return
 	}
 
-	if attempts.stopErr() != nil {
+	if stopErr := attempts.stopErr(); stopErr != nil {
+		h.recordCanceledRequestForPayload(payload, "openai.responses", model, startedAt, firstContent.Value(), stopErr)
 		return
 	}
 	if lastErr == nil {
@@ -856,7 +857,8 @@ func (h *Handler) handleResponsesStream(
 		return
 	}
 
-	if attempts.stopErr() != nil {
+	if stopErr := attempts.stopErr(); stopErr != nil {
+		h.recordCanceledRequestForPayload(payload, "openai.responses.stream", model, startedAt, firstContent.Value(), stopErr)
 		return
 	}
 	if lastErr == nil {

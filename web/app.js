@@ -1865,14 +1865,16 @@
     $('longToolEnabled').checked = d.enabled !== false;
     $('longToolMaxTokens').value = d.defaultMaxToolTokens || 8192;
     $('longToolRetries').value = d.truncationRetries ?? 1;
+    $('longToolActionableTimeout').value = d.actionableOutputTimeoutSeconds || 120;
     $('longToolFallbackEnabled').checked = d.fallbackEnabled === true;
     $('longToolFallbackModel').value = d.fallbackModel || 'claude-sonnet-5';
   }
   async function saveLongToolConfig() {
     const defaultMaxToolTokens = Math.round(Number($('longToolMaxTokens').value) || 0);
     const truncationRetries = Math.round(Number($('longToolRetries').value) || 0);
+    const actionableOutputTimeoutSeconds = Math.round(Number($('longToolActionableTimeout').value) || 0);
     const fallbackModel = $('longToolFallbackModel').value.trim();
-    if (defaultMaxToolTokens < 1024 || defaultMaxToolTokens > 128000 || truncationRetries < 0 || truncationRetries > 5 || !fallbackModel) {
+    if (defaultMaxToolTokens < 1024 || defaultMaxToolTokens > 128000 || truncationRetries < 0 || truncationRetries > 5 || actionableOutputTimeoutSeconds < 30 || actionableOutputTimeoutSeconds > 600 || !fallbackModel) {
       toast(t('settings.longToolInvalid'), 'warning');
       return;
     }
@@ -1882,6 +1884,7 @@
         enabled: $('longToolEnabled').checked,
         defaultMaxToolTokens,
         truncationRetries,
+        actionableOutputTimeoutSeconds,
         fallbackEnabled: $('longToolFallbackEnabled').checked,
         fallbackModel
       })
