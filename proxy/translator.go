@@ -54,6 +54,7 @@ const ThinkingModePrompt = `<thinking_mode>enabled</thinking_mode>
 const minimalFallbackUserContent = "."
 const toolResultsContinuationPrefix = "Tool results:"
 const toolResultImagePlaceholder = "[Tool returned an image; the image is attached to this message.]"
+const toolResultTruncatedNote = "[Tool result omitted to fit the model's input limit.]"
 
 // maxPayloadBytes is the upper bound for the serialized Kiro request body.
 // Kiro's upstream rejects oversized requests with HTTP 400
@@ -68,6 +69,11 @@ const maxPayloadBytes = 900 * 1024
 // truncationPlaceholder is inserted in history where older turns were dropped to
 // fit within maxPayloadBytes.
 const truncationPlaceholder = "[Earlier conversation history was truncated to fit the model's input limit. Older messages and tool activity have been omitted.]"
+
+// Conservative semantic token estimation supplies the safety margin. The
+// remaining fraction leaves room for Kiro's upstream-only request scaffolding.
+const payloadTokenUtilization = 0.9
+const tokenBudgetSlack = 256
 
 // minRecentHistoryTurns is the number of most-recent history entries always kept
 // (in addition to system priming and the active tool turn) when truncating.
@@ -347,6 +353,7 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 
 	// 构建 payload
 	payload := &KiroPayload{}
+	payload.hasSystemPriming = systemPrompt != ""
 	payload.ToolNameMap = toolNames.restoreMap()
 	payload.ConversationState.ChatTriggerType = "MANUAL"
 	payload.ConversationState.AgentTaskType = "vibe"
@@ -1508,6 +1515,7 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 
 	// 构建 payload
 	payload := &KiroPayload{}
+	payload.hasSystemPriming = systemPrompt != ""
 	payload.ToolNameMap = toolNames.restoreMap()
 	payload.ConversationState.ChatTriggerType = "MANUAL"
 	payload.ConversationState.ConversationID = buildConversationID(modelID, systemPrompt, firstOpenAIConversationAnchor(nonSystemMessages))
@@ -1890,21 +1898,17 @@ func stripTextualThinkingBlocks(content string) string {
 	return strings.TrimSpace(visible)
 }
 
-// truncatePayloadToLimit drops the oldest conversation history turns until the
-// serialized payload fits within maxPayloadBytes. It preserves, in order:
-//   - the system priming pair (if present) at the front of history,
-//   - the most recent turns (at least minRecentHistoryTurns, and always the
-//     active tool turn that pairs with the current message),
-//   - the current message itself.
-//
-// A single placeholder note (truncationPlaceholder) is inserted where older
-// turns were removed so the model is aware context was elided. hasPriming
-// indicates whether history begins with the 2-entry system priming pair.
+// truncatePayloadToLimit enforces both the serialized byte ceiling and the
+// effective model input window. It drops old history first, preserves the
+// active tool turn where possible, then shrinks only fields that can safely be
+// shortened without corrupting tool schemas.
 func truncatePayloadToLimit(payload *KiroPayload, hasPriming bool) {
 	if payload == nil {
 		return
 	}
-	if payloadByteSize(payload) <= maxPayloadBytes {
+
+	tokenLimit := payloadInputTokenLimit(payload)
+	if payloadFitsInputLimits(payload, tokenLimit) {
 		return
 	}
 
@@ -1913,60 +1917,160 @@ func truncatePayloadToLimit(payload *KiroPayload, hasPriming bool) {
 	if hasPriming && len(history) >= 2 {
 		primingCount = 2
 	}
-
 	priming := history[:primingCount]
 	conversation := history[primingCount:]
+	placeholderEntry := KiroHistoryMessage{UserInputMessage: &KiroUserInputMessage{
+		Content: truncationPlaceholder,
+		ModelID: currentMessageModelID(payload),
+		Origin:  "AI_EDITOR",
+	}}
 
-	// Compute the fixed overhead (everything except the trimmable conversation):
-	// priming, current message, inference config, profileArn, etc. We estimate by
-	// measuring the payload with an empty conversation tail, then add a budget for
-	// the placeholder and retained tail turns.
-	placeholderEntry := KiroHistoryMessage{
-		UserInputMessage: &KiroUserInputMessage{
-			Content: truncationPlaceholder,
-			ModelID: currentMessageModelID(payload),
-			Origin:  "AI_EDITOR",
-		},
-	}
-
-	// Precompute byte size of each conversation entry once (O(n)).
-	entrySizes := make([]int, len(conversation))
+	entryBytes := make([]int, len(conversation))
+	entryTokens := make([]int, len(conversation))
 	for i := range conversation {
-		entrySizes[i] = historyEntryByteSize(conversation[i])
+		entryBytes[i] = historyEntryByteSize(conversation[i])
+		entryTokens[i] = estimateKiroHistoryEntryTokens(conversation[i])
 	}
 
-	// Base size: payload with priming only (no conversation), plus placeholder.
 	payload.ConversationState.History = priming
-	baseSize := payloadByteSize(payload) + historyEntryByteSize(placeholderEntry)
-
-	// Keep the largest suffix of the conversation that fits, but never fewer than
-	// minRecentHistoryTurns entries (so recent context is preserved).
+	baseBytes := payloadByteSize(payload) + historyEntryByteSize(placeholderEntry)
+	baseTokens := estimateKiroPayloadTokens(payload) + estimateKiroHistoryEntryTokens(placeholderEntry)
 	keepFrom := len(conversation)
-	running := baseSize
+	runningBytes, runningTokens := baseBytes, baseTokens
 	for i := len(conversation) - 1; i >= 0; i-- {
-		running += entrySizes[i]
+		runningBytes += entryBytes[i]
+		runningTokens += entryTokens[i]
 		kept := len(conversation) - i
-		if running > maxPayloadBytes && kept > minRecentHistoryTurns {
+		overLimit := runningBytes > maxPayloadBytes || (tokenLimit > 0 && runningTokens > tokenLimit)
+		if overLimit && kept > minRecentHistoryTurns {
 			break
 		}
 		keepFrom = i
 	}
 
-	tail := conversation[keepFrom:]
-	tail = dropLeadingAssistant(tail)
-
-	rebuilt := make([]KiroHistoryMessage, 0, len(priming)+1+len(tail))
-	rebuilt = append(rebuilt, priming...)
-	if keepFrom > 0 { // older turns were dropped → note the elision
-		rebuilt = append(rebuilt, placeholderEntry)
+	activeToolAssistant := activeToolTurn(payload, history, conversation)
+	rebuild := func(from int) {
+		tail := conversation[from:]
+		for len(tail) > 0 && tail[0].AssistantResponseMessage != nil && tail[0].AssistantResponseMessage != activeToolAssistant {
+			tail = tail[1:]
+		}
+		rebuilt := make([]KiroHistoryMessage, 0, len(priming)+1+len(tail))
+		rebuilt = append(rebuilt, priming...)
+		if from > 0 {
+			rebuilt = append(rebuilt, placeholderEntry)
+		}
+		rebuilt = append(rebuilt, tail...)
+		payload.ConversationState.History = rebuilt
 	}
-	rebuilt = append(rebuilt, tail...)
-	payload.ConversationState.History = rebuilt
+	rebuild(keepFrom)
 
-	// If still too large (current message or retained tail alone exceeds the
-	// limit), shrink the current message content as a last resort.
+	maxDrop := len(conversation)
+	if activeToolAssistant != nil {
+		maxDrop--
+	}
+	for keepFrom < maxDrop && !payloadFitsInputLimits(payload, tokenLimit) {
+		keepFrom++
+		rebuild(keepFrom)
+	}
+
+	// Drop the active assistant turn early only when doing so alone resolves the
+	// overflow. Otherwise retain it while shrinking its current tool results.
+	if !payloadFitsInputLimits(payload, tokenLimit) && activeToolAssistant != nil && keepFrom < len(conversation) {
+		activeEntry := KiroHistoryMessage{AssistantResponseMessage: activeToolAssistant}
+		bytesWithoutActive := payloadByteSize(payload) - historyEntryByteSize(activeEntry)
+		tokensWithoutActive := estimateKiroPayloadTokens(payload) - estimateKiroHistoryEntryTokens(activeEntry)
+		tokenFits := tokenLimit == 0 || tokensWithoutActive <= tokenLimit-tokenBudgetSlack
+		if bytesWithoutActive <= maxPayloadBytes && tokenFits {
+			keepFrom = len(conversation)
+			rebuild(keepFrom)
+			detachOrphanedToolResults(payload)
+		}
+	}
+
+	if !payloadFitsInputLimits(payload, tokenLimit) {
+		truncateCurrentMessage(payload, tokenLimit)
+	}
+
+	if !payloadFitsInputLimits(payload, tokenLimit) && keepFrom < len(conversation) {
+		keepFrom = len(conversation)
+		rebuild(keepFrom)
+		detachOrphanedToolResults(payload)
+		truncateCurrentMessage(payload, tokenLimit)
+	}
+
+	detachOrphanedToolResults(payload)
+	// Detaching an orphaned tool result folds a bounded continuation back into
+	// the current text. Re-run the shrinker because that final rewrite can push a
+	// payload which was exactly on the ceiling over it again.
+	for attempts := 0; attempts < 3 && !payloadFitsInputLimits(payload, tokenLimit); attempts++ {
+		beforeBytes := payloadByteSize(payload)
+		beforeTokens := estimateKiroPayloadTokens(payload)
+		truncateCurrentMessage(payload, tokenLimit)
+		if payloadByteSize(payload) >= beforeBytes && estimateKiroPayloadTokens(payload) >= beforeTokens {
+			break
+		}
+	}
+}
+
+func payloadInputTokenLimit(payload *KiroPayload) int {
+	if payload == nil || payload.contextWindowTokens <= 0 {
+		return 0
+	}
+	window := payload.contextWindowTokens
+	if discovered, ok := getDiscoveredModelTokenLimits(currentMessageModelID(payload)); ok && discovered.MaxInputTokens > 0 && discovered.MaxInputTokens < window {
+		window = discovered.MaxInputTokens
+	}
+	limit := int(float64(window) * payloadTokenUtilization)
+	if limit <= tokenBudgetSlack {
+		return window
+	}
+	return limit
+}
+
+func payloadFitsInputLimits(payload *KiroPayload, tokenLimit int) bool {
 	if payloadByteSize(payload) > maxPayloadBytes {
-		truncateCurrentMessage(payload)
+		return false
+	}
+	return tokenLimit <= 0 || estimateKiroPayloadTokens(payload) <= tokenLimit
+}
+
+func activeToolTurn(payload *KiroPayload, history, conversation []KiroHistoryMessage) *KiroAssistantResponseMessage {
+	if payload == nil || len(conversation) == 0 {
+		return nil
+	}
+	context := payload.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext
+	if context == nil || len(context.ToolResults) == 0 {
+		return nil
+	}
+	if !currentToolResultsMatchLastAssistant(history, collectToolResultIDs(context.ToolResults)) {
+		return nil
+	}
+	return conversation[len(conversation)-1].AssistantResponseMessage
+}
+
+func detachOrphanedToolResults(payload *KiroPayload) {
+	if payload == nil {
+		return
+	}
+	current := &payload.ConversationState.CurrentMessage.UserInputMessage
+	context := current.UserInputMessageContext
+	if context == nil || len(context.ToolResults) == 0 {
+		return
+	}
+	if currentToolResultsMatchLastAssistant(payload.ConversationState.History, collectToolResultIDs(context.ToolResults)) {
+		return
+	}
+
+	continuation := buildToolResultsContinuation(context.ToolResults)
+	switch {
+	case current.Content == "" || current.Content == minimalFallbackUserContent:
+		current.Content = continuation
+	case continuation != current.Content:
+		current.Content += "\n\n" + continuation
+	}
+	context.ToolResults = nil
+	if len(context.Tools) == 0 {
+		current.UserInputMessageContext = nil
 	}
 }
 
@@ -1978,15 +2082,6 @@ func historyEntryByteSize(entry KiroHistoryMessage) int {
 		return 0
 	}
 	return len(raw) + 1
-}
-
-// dropLeadingAssistant removes a leading assistant message from a history tail so
-// it does not directly follow the placeholder user turn with a broken pairing.
-func dropLeadingAssistant(tail []KiroHistoryMessage) []KiroHistoryMessage {
-	for len(tail) > 0 && tail[0].AssistantResponseMessage != nil {
-		tail = tail[1:]
-	}
-	return tail
 }
 
 // payloadByteSize returns the serialized size of the payload in bytes.
@@ -2002,23 +2097,98 @@ func currentMessageModelID(payload *KiroPayload) string {
 	return payload.ConversationState.CurrentMessage.UserInputMessage.ModelID
 }
 
-// truncateCurrentMessage hard-truncates the current message content as a last
-// resort when even the minimal retained history plus current message exceeds the
-// limit.
-func truncateCurrentMessage(payload *KiroPayload) {
-	cur := &payload.ConversationState.CurrentMessage.UserInputMessage
-	overhead := payloadByteSize(payload) - len(cur.Content)
-	budget := maxPayloadBytes - overhead
-	if budget < 0 {
-		budget = 0
+func truncateCurrentMessage(payload *KiroPayload, tokenLimit int) {
+	current := &payload.ConversationState.CurrentMessage.UserInputMessage
+	current.Content = fitPayloadTextBytes(payload, current.Content)
+	if current.Content == "" {
+		current.Content = minimalFallbackUserContent
 	}
-	if len(cur.Content) > budget {
-		if budget == 0 {
-			cur.Content = minimalFallbackUserContent
-			return
+
+	if tokenLimit > 0 {
+		current.Content = fitTextToTokenBudget(current.Content, remainingTokenBudget(payload, tokenLimit, estimateWireTokens(current.Content)))
+		if current.Content == "" {
+			current.Content = minimalFallbackUserContent
 		}
-		cur.Content = cur.Content[:budget]
 	}
+
+	if context := current.UserInputMessageContext; context != nil {
+		for i := range context.ToolResults {
+			for j := range context.ToolResults[i].Content {
+				text := &context.ToolResults[i].Content[j].Text
+				*text = fitPayloadTextBytes(payload, *text)
+				if tokenLimit > 0 && estimateKiroPayloadTokens(payload) > tokenLimit {
+					*text = fitTextToTokenBudget(*text, remainingTokenBudget(payload, tokenLimit, estimateWireTokens(*text)))
+				}
+				if *text == "" {
+					*text = toolResultTruncatedNote
+				}
+			}
+		}
+
+		// Tool descriptions are advisory and may be shortened as a final step;
+		// names and schemas remain intact because they define the client contract.
+		for i := range context.Tools {
+			if payloadFitsInputLimits(payload, tokenLimit) {
+				break
+			}
+			description := &context.Tools[i].ToolSpecification.Description
+			*description = fitPayloadTextBytes(payload, *description)
+			if tokenLimit > 0 {
+				*description = fitTextToTokenBudget(*description, remainingTokenBudget(payload, tokenLimit, estimateWireTokens(*description)))
+			}
+		}
+	}
+
+	if len(current.Images) > 0 && !payloadFitsInputLimits(payload, tokenLimit) {
+		current.Images = nil
+	}
+}
+
+func fitPayloadTextBytes(payload *KiroPayload, text string) string {
+	size := payloadByteSize(payload)
+	if text == "" || size <= maxPayloadBytes {
+		return text
+	}
+	target := len(text) - (size - maxPayloadBytes) - 16
+	if target >= len(text) {
+		target = len(text) - 1
+	}
+	return truncateStringToBytes(text, target)
+}
+
+func remainingTokenBudget(payload *KiroPayload, tokenLimit, selfTokens int) int {
+	return tokenLimit - tokenBudgetSlack - (estimateKiroPayloadTokens(payload) - selfTokens)
+}
+
+func fitTextToTokenBudget(text string, budget int) string {
+	if budget <= 0 {
+		return ""
+	}
+	for text != "" {
+		tokens := estimateWireTokens(text)
+		if tokens <= budget {
+			return text
+		}
+		target := int(float64(len(text)) * float64(budget) / float64(tokens))
+		if target >= len(text) {
+			target = len(text) - 1
+		}
+		text = truncateStringToBytes(text, target)
+	}
+	return ""
+}
+
+func truncateStringToBytes(value string, maxBytes int) string {
+	if maxBytes <= 0 {
+		return ""
+	}
+	if len(value) <= maxBytes {
+		return value
+	}
+	for maxBytes > 0 && !utf8.RuneStart(value[maxBytes]) {
+		maxBytes--
+	}
+	return value[:maxBytes]
 }
 
 func buildToolResultsContinuation(toolResults []KiroToolResult) string {
@@ -2044,7 +2214,7 @@ func buildToolResultsContinuation(toolResults []KiroToolResult) string {
 
 	joined := toolResultsContinuationPrefix + "\n\n" + strings.Join(parts, "\n\n")
 	if len(joined) > 4000 {
-		return joined[:4000]
+		return truncateStringToBytes(joined, 4000)
 	}
 	return joined
 }

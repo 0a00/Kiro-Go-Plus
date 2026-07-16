@@ -12,10 +12,11 @@ import (
 const runtimeStateVersion = 1
 
 type persistedAccountRuntimeState struct {
-	CooldownUntil        int64 `json:"cooldownUntil,omitempty"`
-	RefreshCooldownUntil int64 `json:"refreshCooldownUntil,omitempty"`
-	ErrorCount           int   `json:"errorCount,omitempty"`
-	LastSuccessAt        int64 `json:"lastSuccessAt,omitempty"`
+	CooldownUntil        int64  `json:"cooldownUntil,omitempty"`
+	CooldownKind         string `json:"cooldownKind,omitempty"`
+	RefreshCooldownUntil int64  `json:"refreshCooldownUntil,omitempty"`
+	ErrorCount           int    `json:"errorCount,omitempty"`
+	LastSuccessAt        int64  `json:"lastSuccessAt,omitempty"`
 }
 
 type persistedModelNegativeState struct {
@@ -68,6 +69,7 @@ func (p *AccountPool) loadRuntimeState() {
 		p.errorCounts[accountID] = entry.ErrorCount
 		if entry.CooldownUntil > now.Unix() {
 			p.cooldowns[accountID] = time.Unix(entry.CooldownUntil, 0)
+			p.cooldownKinds[accountID] = accountCooldownKind(entry.CooldownKind)
 		}
 		if entry.LastSuccessAt > 0 {
 			p.lastSuccess[accountID] = time.Unix(entry.LastSuccessAt, 0)
@@ -174,6 +176,7 @@ func (p *AccountPool) saveRuntimeStateTo(path string) {
 		entry := persistedAccountRuntimeState{ErrorCount: errorCount}
 		if cooldown := p.cooldowns[accountID]; cooldown.After(now) {
 			entry.CooldownUntil = cooldown.Unix()
+			entry.CooldownKind = string(p.cooldownKinds[accountID])
 		}
 		if success := p.lastSuccess[accountID]; !success.IsZero() {
 			entry.LastSuccessAt = success.Unix()

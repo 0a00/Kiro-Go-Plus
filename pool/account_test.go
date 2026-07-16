@@ -509,6 +509,47 @@ func TestDisableAccountSetsCooldown(t *testing.T) {
 	}
 }
 
+func TestAccountCooldownNeverShortensQuotaBackoff(t *testing.T) {
+	p := newTestPool(config.Account{ID: "a", Enabled: true})
+	p.RecordError("a", true)
+	quotaUntil := p.cooldowns["a"]
+	p.RecordError("a", false)
+	p.RecordError("a", false)
+
+	if got := p.cooldowns["a"]; got.Before(quotaUntil) {
+		t.Fatalf("transient error shortened quota cooldown: quota=%v got=%v", quotaUntil, got)
+	}
+	if p.cooldownKinds["a"] != accountCooldownQuota {
+		t.Fatalf("quota cooldown kind was overwritten: %q", p.cooldownKinds["a"])
+	}
+}
+
+func TestAccountSuccessPreservesHardCooldownAndClearsTransient(t *testing.T) {
+	p := newTestPool(config.Account{ID: "a", Enabled: true})
+	p.RecordError("a", true)
+	p.RecordSuccess("a")
+	if _, ok := p.cooldowns["a"]; !ok || p.cooldownKinds["a"] != accountCooldownQuota {
+		t.Fatalf("late success cleared hard cooldown: until=%v kind=%q", p.cooldowns["a"], p.cooldownKinds["a"])
+	}
+
+	p.mu.Lock()
+	p.setCooldownLocked("a", time.Now().Add(24*time.Hour), accountCooldownDisabled)
+	p.mu.Unlock()
+	p.RecordSuccess("a")
+	if p.cooldownKinds["a"] != accountCooldownDisabled {
+		t.Fatalf("late success cleared disabled cooldown: %q", p.cooldownKinds["a"])
+	}
+
+	p = newTestPool(config.Account{ID: "b", Enabled: true})
+	p.mu.Lock()
+	p.setCooldownLocked("b", time.Now().Add(time.Minute), accountCooldownTransient)
+	p.mu.Unlock()
+	p.RecordSuccess("b")
+	if _, ok := p.cooldowns["b"]; ok {
+		t.Fatal("success did not clear transient cooldown")
+	}
+}
+
 func TestGetNextExcludingSkipsExcludedAccount(t *testing.T) {
 	p := &AccountPool{
 		accounts: []config.Account{
@@ -1000,6 +1041,9 @@ func TestRuntimeStatePersistsCooldownModelsAndRefreshCursor(t *testing.T) {
 	restored.loadRuntimeState()
 	if restored.errorCounts["a"] != 1 || !restored.cooldowns["a"].After(time.Now()) {
 		t.Fatalf("account cooldown was not restored: errors=%d cooldown=%v", restored.errorCounts["a"], restored.cooldowns["a"])
+	}
+	if restored.cooldownKinds["a"] != accountCooldownQuota {
+		t.Fatalf("account cooldown kind was not restored: %q", restored.cooldownKinds["a"])
 	}
 	if restored.RefreshCursor() != 37 {
 		t.Fatalf("expected refresh cursor 37, got %d", restored.RefreshCursor())

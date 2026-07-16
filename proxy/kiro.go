@@ -209,6 +209,7 @@ type KiroPayload struct {
 	requestContext          context.Context
 	attemptBudget           *upstreamAttemptBudget
 	contextWindowTokens     int
+	hasSystemPriming        bool
 	requireActionableOutput bool
 	requireToolUse          bool
 	deferTextUntilComplete  bool

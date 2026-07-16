@@ -701,12 +701,33 @@
   async function loadStats() {
     const res = await api('/status');
     const d = await res.json();
-    $('statAccounts').textContent = d.accounts || 0;
+    const inventory = d.accountInventory || {};
+    $('statAccounts').textContent = inventory.total ?? d.accounts ?? 0;
     $('statRequests').textContent = d.totalRequests || 0;
     $('statSuccess').textContent = d.successRequests || 0;
     $('statFailed').textContent = d.failedRequests || 0;
     $('statTokens').textContent = formatNum(d.totalTokens || 0);
     $('statCredits').textContent = (d.totalCredits || 0).toFixed(1);
+    renderAccountInventory(inventory);
+  }
+  function renderAccountInventory(inventory) {
+    const el = $('accountInventorySummary');
+    if (!el) return;
+    const total = inventory.total || 0;
+    const rows = inventory.configuredRows || total;
+    const values = [
+      ['stats.inventoryTotal', rows === total ? total : total + ' / ' + rows],
+      ['stats.inventoryRoutable', inventory.routable || 0],
+      ['stats.inventoryCooling', inventory.cooling || 0],
+      ['stats.inventoryQuota', inventory.quotaBlocked || 0],
+      ['stats.inventoryBanned', inventory.banned || 0],
+      ['stats.inventoryDisabled', inventory.disabled || 0],
+      ['stats.inventoryCredential', inventory.credentialIssue || 0],
+      ['stats.inventoryProfile', inventory.profileIssue || 0]
+    ];
+    el.innerHTML = values.map(([label, value]) =>
+      '<div class="request-summary-item"><span>' + escapeHtml(t(label)) + '</span><strong>' + escapeHtml(String(value)) + '</strong></div>'
+    ).join('');
   }
   async function loadAccounts() {
     const res = await api('/accounts');
@@ -3227,11 +3248,11 @@
         clientId: item.clientId || '',
         clientSecret: item.clientSecret || '',
         authMethod, provider,
-        region: item.region || 'us-east-1',
+        region: authMethod === 'api_key' ? (item.region || '') : (item.region || 'us-east-1'),
         profileArn: item.profileArn || '',
         tokenEndpoint: item.tokenEndpoint || '',
         issuerUrl: item.issuerUrl || '',
-        scopes: item.scopes || '',
+        scopes: normalizeCredentialScopes(item.scopes),
         subscription: item.subscription || null,
         usage: item.usage || null
       });
@@ -3259,6 +3280,7 @@
     toastPrimary(msg, { duration: 5200 });
   }
   function normalizeImportCredentialItem(item) {
+	item = item && typeof item === 'object' ? item : {};
     const c = (item && item.credentials) || {};
     return {
       ...item,
@@ -3274,8 +3296,17 @@
       profileArn: c.profileArn || item.profileArn,
       tokenEndpoint: c.tokenEndpoint || item.tokenEndpoint,
       issuerUrl: c.issuerUrl || item.issuerUrl,
-      scopes: c.scopes || item.scopes
+      scopes: normalizeCredentialScopes(c.scopes || item.scopes)
     };
+  }
+  function normalizeCredentialScopes(value) {
+    const values = Array.isArray(value) ? value : (typeof value === 'string' ? [value] : []);
+    const seen = new Set();
+    const scopes = [];
+    values.forEach(raw => String(raw).split(/[\s,]+/).filter(Boolean).forEach(scope => {
+      if (!seen.has(scope)) { seen.add(scope); scopes.push(scope); }
+    }));
+    return scopes.join(' ');
   }
   function parseLineCredentials(text) {
     const items = [];

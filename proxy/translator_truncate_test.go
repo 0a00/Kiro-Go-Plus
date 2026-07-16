@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // TestClaudeToKiroTruncatesOversizedHistory builds a conversation whose history
@@ -85,6 +86,125 @@ func TestClaudeToKiroSmallPayloadNotTruncated(t *testing.T) {
 	for _, h := range payload.ConversationState.History {
 		if h.UserInputMessage != nil && strings.Contains(h.UserInputMessage.Content, "truncated to fit") {
 			t.Fatalf("small payload should not be truncated")
+		}
+	}
+}
+
+func TestPayloadTruncationEnforcesTokenWindowBelowByteLimit(t *testing.T) {
+	chunk := strings.Repeat("这是用于验证输入窗口的中文上下文。", 350)
+	messages := []ClaudeMessage{{Role: "user", Content: "start"}}
+	for i := 0; i < 18; i++ {
+		messages = append(messages,
+			ClaudeMessage{Role: "assistant", Content: chunk},
+			ClaudeMessage{Role: "user", Content: chunk},
+		)
+	}
+	messages = append(messages, ClaudeMessage{Role: "user", Content: "FINAL: summarize"})
+	payload := ClaudeToKiro(&ClaudeRequest{Model: "claude-sonnet-4.6", Messages: messages}, false)
+	if payloadByteSize(payload) >= maxPayloadBytes {
+		t.Fatalf("test payload must exercise token-only truncation, bytes=%d", payloadByteSize(payload))
+	}
+	payload.contextWindowTokens = 50_000
+	truncatePayloadToLimit(payload, payload.hasSystemPriming)
+
+	limit := payloadInputTokenLimit(payload)
+	if got := estimateKiroPayloadTokens(payload); got > limit {
+		t.Fatalf("payload tokens=%d exceed limit=%d", got, limit)
+	}
+	if !strings.Contains(payload.ConversationState.CurrentMessage.UserInputMessage.Content, "FINAL") {
+		t.Fatalf("current instruction was lost: %q", payload.ConversationState.CurrentMessage.UserInputMessage.Content)
+	}
+}
+
+func TestPayloadTruncationShrinksActiveToolResultWithoutOrphaning(t *testing.T) {
+	huge := strings.Repeat("中", 50_000)
+	payload := ClaudeToKiro(&ClaudeRequest{
+		Model: "claude-sonnet-4.6",
+		Messages: []ClaudeMessage{
+			{Role: "user", Content: "read it"},
+			{Role: "assistant", Content: []interface{}{map[string]interface{}{
+				"type": "tool_use", "id": "tool_1", "name": "Read", "input": map[string]interface{}{"path": "large.txt"},
+			}}},
+			{Role: "user", Content: []interface{}{map[string]interface{}{
+				"type": "tool_result", "tool_use_id": "tool_1", "content": huge,
+			}}},
+		},
+	}, false)
+	payload.contextWindowTokens = 20_000
+	truncatePayloadToLimit(payload, payload.hasSystemPriming)
+
+	limit := payloadInputTokenLimit(payload)
+	if got := estimateKiroPayloadTokens(payload); got > limit {
+		t.Fatalf("tool-result payload tokens=%d exceed limit=%d", got, limit)
+	}
+	context := payload.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext
+	if context == nil || len(context.ToolResults) != 1 {
+		t.Fatalf("active tool result was discarded instead of shrunk: %+v", context)
+	}
+	if !currentToolResultsMatchLastAssistant(payload.ConversationState.History, collectToolResultIDs(context.ToolResults)) {
+		t.Fatal("truncation orphaned the active tool result")
+	}
+	if got := len([]rune(context.ToolResults[0].Content[0].Text)); got <= 0 || got >= len([]rune(huge)) {
+		t.Fatalf("tool result was not meaningfully shrunk: runes=%d", got)
+	}
+}
+
+func TestPayloadTruncationDropsWholeImagesOnByteOverflow(t *testing.T) {
+	payload := &KiroPayload{contextWindowTokens: 200_000}
+	payload.ConversationState.CurrentMessage.UserInputMessage = KiroUserInputMessage{
+		Content: "describe the images",
+		ModelID: "claude-sonnet-4.6",
+		Origin:  "AI_EDITOR",
+		Images:  make([]KiroImage, 3),
+	}
+	for i := range payload.ConversationState.CurrentMessage.UserInputMessage.Images {
+		payload.ConversationState.CurrentMessage.UserInputMessage.Images[i].Format = "png"
+		payload.ConversationState.CurrentMessage.UserInputMessage.Images[i].Source.Bytes = strings.Repeat("A", 400_000)
+	}
+	truncatePayloadToLimit(payload, false)
+
+	if payloadByteSize(payload) > maxPayloadBytes {
+		t.Fatalf("image payload remains oversized: %d", payloadByteSize(payload))
+	}
+	if len(payload.ConversationState.CurrentMessage.UserInputMessage.Images) != 0 {
+		t.Fatal("oversized base64 images must be removed whole")
+	}
+}
+
+func TestPayloadTruncationRefitsDetachedToolResult(t *testing.T) {
+	payload := &KiroPayload{contextWindowTokens: 4_000}
+	payload.ConversationState.CurrentMessage.UserInputMessage = KiroUserInputMessage{
+		Content: strings.Repeat("current context ", 500),
+		ModelID: "claude-sonnet-4.6",
+		Origin:  "AI_EDITOR",
+		UserInputMessageContext: &UserInputMessageContext{
+			ToolResults: []KiroToolResult{{
+				ToolUseID: "orphaned-tool",
+				Status:    "success",
+				Content:   []KiroResultContent{{Text: strings.Repeat("result data ", 800)}},
+			}},
+		},
+	}
+
+	truncatePayloadToLimit(payload, false)
+
+	if context := payload.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext; context != nil && len(context.ToolResults) > 0 {
+		t.Fatal("orphaned tool result remained structured")
+	}
+	if got, limit := estimateKiroPayloadTokens(payload), payloadInputTokenLimit(payload); got > limit {
+		t.Fatalf("detached payload tokens=%d exceed limit=%d", got, limit)
+	}
+	if got := payloadByteSize(payload); got > maxPayloadBytes {
+		t.Fatalf("detached payload bytes=%d exceed limit=%d", got, maxPayloadBytes)
+	}
+}
+
+func TestTruncateStringToBytesPreservesUTF8(t *testing.T) {
+	value := "héllo世界"
+	for limit := 0; limit <= len(value); limit++ {
+		got := truncateStringToBytes(value, limit)
+		if len(got) > limit || !utf8.ValidString(got) {
+			t.Fatalf("limit=%d produced invalid value %q", limit, got)
 		}
 	}
 }

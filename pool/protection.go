@@ -74,6 +74,8 @@ func (p *AccountPool) AcquireForModel(model, routeKey string, excluded map[strin
 	if !up.Enabled {
 		return p.GetNextForModelExcluding(model, excluded), nil, nil
 	}
+	allowOverUsage := config.GetAllowOverUsage()
+	routingMode := config.GetRoutingConfig().LoadBalancingMode
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -93,7 +95,7 @@ func (p *AccountPool) AcquireForModel(model, routeKey string, excluded map[strin
 
 	if routeKey != "" {
 		if entry, ok := p.affinity[routeKey]; ok {
-			if acc := p.findSelectableAccountLocked(entry.accountID, model, excluded, now); acc != nil {
+			if acc := p.findSelectableAccountLocked(entry.accountID, model, excluded, now, allowOverUsage); acc != nil {
 				if guard, busy := p.tryAcquireSlotLocked(acc, modelKey, up, now); guard != nil {
 					p.rememberRouteAffinityLocked(routeKey, acc.ID, now, up)
 					return cloneAccount(acc), guard, nil
@@ -105,11 +107,11 @@ func (p *AccountPool) AcquireForModel(model, routeKey string, excluded map[strin
 		}
 	}
 
-	selectionIndexes := p.selectionIndexesLocked(model, excluded, now, config.GetAllowOverUsage())
+	selectionIndexes := p.selectionIndexesLocked(model, excluded, now, allowOverUsage, routingMode)
 	for _, idx := range selectionIndexes {
 		acc := &p.accounts[idx]
 		if guard, busy := p.tryAcquireSlotLocked(acc, modelKey, up, now); guard != nil {
-			p.commitWeightedSelectionLocked(acc.ID, selectionIndexes)
+			p.commitWeightedSelectionLocked(acc.ID, selectionIndexes, routingMode)
 			p.rememberRouteAffinityLocked(routeKey, acc.ID, now, up)
 			return cloneAccount(acc), guard, nil
 		} else if busy != nil {
@@ -201,6 +203,7 @@ func (p *AccountPool) RecordUpstreamSuccess(accountID, profileArn, model string)
 }
 
 func (p *AccountPool) ProtectionSnapshot() map[string]interface{} {
+	up := config.GetUpstreamProtectionConfig()
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
@@ -251,7 +254,7 @@ func (p *AccountPool) ProtectionSnapshot() map[string]interface{} {
 	}
 
 	return map[string]interface{}{
-		"config":             config.GetUpstreamProtectionConfig(),
+		"config":             up,
 		"accountStates":      accounts,
 		"accountModelStates": upstream,
 		"profileModelStates": profiles,
@@ -262,6 +265,9 @@ func (p *AccountPool) ProtectionSnapshot() map[string]interface{} {
 func (p *AccountPool) ensureProtectionMapsLocked() {
 	if p.cooldowns == nil {
 		p.cooldowns = make(map[string]time.Time)
+	}
+	if p.cooldownKinds == nil {
+		p.cooldownKinds = make(map[string]accountCooldownKind)
 	}
 	if p.errorCounts == nil {
 		p.errorCounts = make(map[string]int)
@@ -295,21 +301,21 @@ func (p *AccountPool) ensureProtectionMapsLocked() {
 	}
 }
 
-func (p *AccountPool) findSelectableAccountLocked(accountID, model string, excluded map[string]bool, now time.Time) *config.Account {
+func (p *AccountPool) findSelectableAccountLocked(accountID, model string, excluded map[string]bool, now time.Time, allowOverUsage bool) *config.Account {
 	if i, ok := p.accountIndexLocked(accountID); ok {
 		acc := &p.accounts[i]
-		if p.accountSelectableLocked(acc, model, excluded, now) {
+		if p.accountSelectableLocked(acc, model, excluded, now, allowOverUsage) {
 			return acc
 		}
 	}
 	return nil
 }
 
-func (p *AccountPool) accountSelectableLocked(acc *config.Account, model string, excluded map[string]bool, now time.Time) bool {
+func (p *AccountPool) accountSelectableLocked(acc *config.Account, model string, excluded map[string]bool, now time.Time, allowOverUsage bool) bool {
 	// Affinity must not make a stale account outrank another ready account.
 	// selectionIndexesLocked performs a stale-but-refreshable fallback only
 	// after it has established that no ready account is available.
-	return p.accountSelectableBasicLocked(acc, model, excluded, now, config.GetAllowOverUsage(), false)
+	return p.accountSelectableBasicLocked(acc, model, excluded, now, allowOverUsage, false)
 }
 
 func (p *AccountPool) tryAcquireSlotLocked(acc *config.Account, model string, up config.UpstreamProtectionConfig, now time.Time) (*UpstreamRequestGuard, *UpstreamBusyError) {
@@ -357,6 +363,7 @@ func (p *AccountPool) tryAcquireSlotLocked(acc *config.Account, model string, up
 }
 
 func (p *AccountPool) releaseUpstreamSlot(accountID, profileArn, model string) {
+	up := config.GetUpstreamProtectionConfig()
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.ensureProtectionMapsLocked()
@@ -378,7 +385,7 @@ func (p *AccountPool) releaseUpstreamSlot(accountID, profileArn, model string) {
 		if state.inFlight > 0 {
 			state.inFlight--
 		}
-		reopenAbandonedHalfOpenProbe(&state, config.GetUpstreamProtectionConfig(), now)
+		reopenAbandonedHalfOpenProbe(&state, up, now)
 		if protectionStateIdle(state) {
 			delete(p.upstream, key)
 		} else {
@@ -392,7 +399,7 @@ func (p *AccountPool) releaseUpstreamSlot(accountID, profileArn, model string) {
 		if pstate.inFlight > 0 {
 			pstate.inFlight--
 		}
-		reopenAbandonedHalfOpenProbe(&pstate, config.GetUpstreamProtectionConfig(), now)
+		reopenAbandonedHalfOpenProbe(&pstate, up, now)
 		if protectionStateIdle(pstate) {
 			delete(p.profiles, pkey)
 		} else {

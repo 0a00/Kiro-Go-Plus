@@ -1,5 +1,5 @@
 {
-  "version": "1.2.26",
-  "changelog": "Bound high-risk tool stalls with a configurable actionable-output timeout and endpoint/account failover, and persist client-canceled requests in request logs.\n新增高风险工具可提交输出超时，可自动切换端点和账号，并将客户端取消的请求持久化到请求日志。",
+  "version": "1.2.27",
+  "changelog": "Add model-window-aware input truncation, durable cooldown semantics, account inventory diagnostics, ksk_ region discovery, and native credential scopes compatibility.\n新增按模型上下文窗口裁剪输入、持久化冷却语义、账号库存诊断、ksk_ 区域发现和原生凭据 scopes 兼容。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }

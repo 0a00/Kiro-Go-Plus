@@ -976,6 +976,10 @@ label:has(> .switch) > span {
   margin: 0.5rem 0 1rem;
 }
 
+.account-inventory-summary {
+  margin-top: -0.5rem;
+}
+
 .request-summary-item {
   display: flex;
   align-items: center;

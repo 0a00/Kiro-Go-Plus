@@ -19,6 +19,7 @@ import (
 const (
 	kiroRestAPIBase               = "https://codewhisperer.us-east-1.amazonaws.com"
 	profileArnUnsupportedCooldown = 24 * time.Hour
+	kiroAPIKeyProbeTimeout        = 20 * time.Second
 )
 
 var profileArnResolutionCooldowns sync.Map
@@ -118,6 +119,89 @@ func regionalizeURLForRegion(rawURL, region string) string {
 }
 
 var defaultKiroProfileRegions = []string{"us-east-1", "eu-central-1"}
+
+func kiroAPIKeyCandidateRegions() []string {
+	configured := strings.TrimSpace(os.Getenv("KIRO_PROFILE_REGIONS"))
+	if configured == "" {
+		return append([]string(nil), defaultKiroProfileRegions...)
+	}
+	seen := make(map[string]bool)
+	regions := make([]string, 0)
+	for _, region := range strings.Split(configured, ",") {
+		region = strings.TrimSpace(region)
+		if !validKiroRegion(region) || seen[region] {
+			continue
+		}
+		seen[region] = true
+		regions = append(regions, region)
+	}
+	if len(regions) == 0 {
+		return append([]string(nil), defaultKiroProfileRegions...)
+	}
+	return regions
+}
+
+func validKiroRegion(region string) bool {
+	region = strings.TrimSpace(region)
+	if len(region) < 5 || len(region) > 32 || !strings.Contains(region, "-") {
+		return false
+	}
+	for _, r := range region {
+		if (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '-' {
+			return false
+		}
+	}
+	last := region[len(region)-1]
+	return last >= '0' && last <= '9'
+}
+
+var probeKiroAPIKeyRegion = func(ctx context.Context, key, region string) (*config.AccountInfo, error) {
+	account := &config.Account{
+		AccessToken: key,
+		KiroApiKey:  key,
+		AuthMethod:  "api_key",
+		Region:      region,
+		MachineId:   config.GenerateMachineId(),
+	}
+	return RefreshAccountInfoContext(ctx, account)
+}
+
+// resolveKiroAPIKeyRegion validates the data-plane region for a ksk_ key. An
+// explicit region is checked alone; otherwise the configured candidates are
+// tried in order. retryable is true when any failure was transport/upstream
+// related rather than an authentication rejection.
+func resolveKiroAPIKeyRegion(ctx context.Context, key, explicitRegion string) (region string, info *config.AccountInfo, retryable bool, err error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return "", nil, false, fmt.Errorf("kiroApiKey is required")
+	}
+
+	regions := kiroAPIKeyCandidateRegions()
+	if explicitRegion = strings.TrimSpace(explicitRegion); explicitRegion != "" {
+		if !validKiroRegion(explicitRegion) {
+			return "", nil, false, fmt.Errorf("invalid Kiro data-plane region")
+		}
+		regions = []string{explicitRegion}
+	}
+
+	errorsByRegion := make([]string, 0, len(regions))
+	for _, candidate := range regions {
+		probeCtx, cancel := context.WithTimeout(ctx, kiroAPIKeyProbeTimeout)
+		probedInfo, probeErr := probeKiroAPIKeyRegion(probeCtx, key, candidate)
+		cancel()
+		if probeErr == nil {
+			return candidate, probedInfo, false, nil
+		}
+		if !accountpool.IsAuthFailure(probeErr) {
+			retryable = true
+		}
+		errorsByRegion = append(errorsByRegion, candidate+": "+probeErr.Error())
+	}
+	return "", nil, retryable, fmt.Errorf("kiroApiKey not usable in any probed region (%s)", strings.Join(errorsByRegion, "; "))
+}
 
 func kiroProfileRegionCandidates(account *config.Account) []string {
 	seen := make(map[string]bool)

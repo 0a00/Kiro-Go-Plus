@@ -17,7 +17,38 @@ const (
 	imageTokenPixelDivisor  = 750.0
 )
 
+type tokenEstimateWeights struct {
+	regularASCII float64
+	digits       float64
+	symbols      float64
+	nonASCII     float64
+}
+
+var reportingTokenWeights = tokenEstimateWeights{
+	regularASCII: 4.5,
+	digits:       2.0,
+	symbols:      1.5,
+	nonASCII:     1.5,
+}
+
+// Wire estimates deliberately over-count prose and non-ASCII text. Usage
+// estimates may be approximate, but an input ceiling must err toward trimming.
+var wireTokenWeights = tokenEstimateWeights{
+	regularASCII: 4.0,
+	digits:       2.0,
+	symbols:      1.5,
+	nonASCII:     1.0,
+}
+
 func estimateApproxTokens(text string) int {
+	return estimateTextTokens(text, reportingTokenWeights, true)
+}
+
+func estimateWireTokens(text string) int {
+	return estimateTextTokens(text, wireTokenWeights, false)
+}
+
+func estimateTextTokens(text string, weights tokenEstimateWeights, useShortTextHeuristic bool) int {
 	if text == "" {
 		return 0
 	}
@@ -27,7 +58,7 @@ func estimateApproxTokens(text string) int {
 	if length == 0 {
 		return 0
 	}
-	if length < 5 {
+	if useShortTextHeuristic && length < 5 {
 		return max(1, int(math.Ceil(float64(length)/3.0)))
 	}
 
@@ -46,10 +77,10 @@ func estimateApproxTokens(text string) int {
 	}
 
 	estimated := int(math.Ceil(
-		float64(regularAscii)/4.5 +
-			float64(digits)/2.0 +
-			float64(symbols)/1.5 +
-			float64(nonASCII)/1.5,
+		float64(regularAscii)/weights.regularASCII +
+			float64(digits)/weights.digits +
+			float64(symbols)/weights.symbols +
+			float64(nonASCII)/weights.nonASCII,
 	))
 
 	if estimated < 1 {
@@ -164,6 +195,72 @@ func estimateJSONTokens(v interface{}) int {
 	}
 
 	return estimateApproxTokens(string(b))
+}
+
+func estimateWireJSONTokens(v interface{}) int {
+	if v == nil {
+		return 0
+	}
+
+	b, err := json.Marshal(v)
+	if err != nil {
+		return 0
+	}
+	return estimateWireTokens(string(b))
+}
+
+// estimateKiroPayloadTokens walks semantic payload fields instead of counting
+// serialized JSON. In particular, image base64 is charged as an image rather
+// than as hundreds of thousands of text tokens.
+func estimateKiroPayloadTokens(payload *KiroPayload) int {
+	if payload == nil {
+		return 0
+	}
+
+	total := estimateKiroUserInputTokens(&payload.ConversationState.CurrentMessage.UserInputMessage)
+	for _, entry := range payload.ConversationState.History {
+		total += estimateKiroHistoryEntryTokens(entry)
+	}
+	return total
+}
+
+func estimateKiroHistoryEntryTokens(entry KiroHistoryMessage) int {
+	total := 0
+	if entry.UserInputMessage != nil {
+		total += estimateKiroUserInputTokens(entry.UserInputMessage)
+	}
+	if assistant := entry.AssistantResponseMessage; assistant != nil {
+		total += estimateWireTokens(assistant.Content)
+		for _, toolUse := range assistant.ToolUses {
+			total += estimateWireTokens(toolUse.Name)
+			total += estimateWireJSONTokens(toolUse.Input)
+		}
+	}
+	return total
+}
+
+func estimateKiroUserInputTokens(message *KiroUserInputMessage) int {
+	if message == nil {
+		return 0
+	}
+
+	total := estimateWireTokens(message.Content)
+	total += len(message.Images) * maxImageInputTokens
+	if message.UserInputMessageContext == nil {
+		return total
+	}
+	for _, tool := range message.UserInputMessageContext.Tools {
+		spec := tool.ToolSpecification
+		total += estimateWireTokens(spec.Name)
+		total += estimateWireTokens(spec.Description)
+		total += estimateWireJSONTokens(spec.InputSchema.JSON)
+	}
+	for _, result := range message.UserInputMessageContext.ToolResults {
+		for _, content := range result.Content {
+			total += estimateWireTokens(content.Text)
+		}
+	}
+	return total
 }
 
 func estimateOpenAIRequestInputTokens(req *OpenAIRequest) int {

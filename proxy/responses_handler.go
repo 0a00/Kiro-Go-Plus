@@ -151,6 +151,7 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 	kiroPayload := OpenAIToKiro(openaiReq, thinking)
 	kiroPayload.requestContext = r.Context()
 	kiroPayload.contextWindowTokens = contextWindowTokens
+	truncatePayloadToLimit(kiroPayload, kiroPayload.hasSystemPriming)
 
 	apiKeyID := apiKeyIDFromContext(r.Context())
 	namespaceConversationID(kiroPayload, requestConversationNamespace(r, apiKeyID))

@@ -15,6 +15,14 @@ const tokenRefreshSkewSeconds int64 = 120
 const accountStatsSaveDelay = 750 * time.Millisecond
 const maxAccountWeight = 100
 
+type accountCooldownKind string
+
+const (
+	accountCooldownTransient accountCooldownKind = "transient"
+	accountCooldownQuota     accountCooldownKind = "quota"
+	accountCooldownDisabled  accountCooldownKind = "disabled"
+)
+
 // AccountPool 账号池
 type AccountPool struct {
 	mu               sync.RWMutex
@@ -22,7 +30,8 @@ type AccountPool struct {
 	accountIndex     map[string]int
 	totalAccounts    int
 	currentIndex     atomic.Uint64
-	cooldowns        map[string]time.Time       // 账号冷却时间
+	cooldowns        map[string]time.Time // 账号冷却时间
+	cooldownKinds    map[string]accountCooldownKind
 	errorCounts      map[string]int             // 连续错误计数
 	modelLists       map[string]map[string]bool // accountID → set of modelIDs (from ListAvailableModels)
 	accountUpstream  map[string]upstreamRuntimeState
@@ -57,6 +66,7 @@ func GetPool() *AccountPool {
 	poolOnce.Do(func() {
 		pool = &AccountPool{
 			cooldowns:        make(map[string]time.Time),
+			cooldownKinds:    make(map[string]accountCooldownKind),
 			accountIndex:     make(map[string]int),
 			errorCounts:      make(map[string]int),
 			modelLists:       make(map[string]map[string]bool),
@@ -138,6 +148,8 @@ func (p *AccountPool) GetNext() *config.Account {
 
 // GetNextExcluding 获取下一个可用账号（加权轮询），并跳过指定账号。
 func (p *AccountPool) GetNextExcluding(excluded map[string]bool) *config.Account {
+	allowOverUsage := config.GetAllowOverUsage()
+	routingMode := config.GetRoutingConfig().LoadBalancingMode
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -145,12 +157,11 @@ func (p *AccountPool) GetNextExcluding(excluded map[string]bool) *config.Account
 		return nil
 	}
 
-	allowOverUsage := config.GetAllowOverUsage()
 	now := time.Now()
-	indexes := p.selectionIndexesLocked("", excluded, now, allowOverUsage)
+	indexes := p.selectionIndexesLocked("", excluded, now, allowOverUsage, routingMode)
 	if len(indexes) > 0 {
 		idx := indexes[0]
-		p.commitWeightedSelectionLocked(p.accounts[idx].ID, indexes)
+		p.commitWeightedSelectionLocked(p.accounts[idx].ID, indexes, routingMode)
 		return cloneAccount(&p.accounts[idx])
 	}
 
@@ -242,6 +253,8 @@ func (p *AccountPool) GetNextForModel(model string) *config.Account {
 
 // GetNextForModelExcluding 获取下一个支持指定模型的可用账号，并跳过指定账号。
 func (p *AccountPool) GetNextForModelExcluding(model string, excluded map[string]bool) *config.Account {
+	allowOverUsage := config.GetAllowOverUsage()
+	routingMode := config.GetRoutingConfig().LoadBalancingMode
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -249,12 +262,11 @@ func (p *AccountPool) GetNextForModelExcluding(model string, excluded map[string
 		return nil
 	}
 
-	allowOverUsage := config.GetAllowOverUsage()
 	now := time.Now()
-	indexes := p.selectionIndexesLocked(model, excluded, now, allowOverUsage)
+	indexes := p.selectionIndexesLocked(model, excluded, now, allowOverUsage, routingMode)
 	if len(indexes) > 0 {
 		idx := indexes[0]
-		p.commitWeightedSelectionLocked(p.accounts[idx].ID, indexes)
+		p.commitWeightedSelectionLocked(p.accounts[idx].ID, indexes, routingMode)
 		return cloneAccount(&p.accounts[idx])
 	}
 
@@ -287,20 +299,19 @@ func (p *AccountPool) GetNextForModelExcluding(model string, excluded map[string
 	return cloneAccount(best)
 }
 
-func (p *AccountPool) selectionIndexesLocked(model string, excluded map[string]bool, now time.Time, allowOverUsage bool) []int {
-	indexes := p.selectionIndexesForTokenStateLocked(model, excluded, now, allowOverUsage, false)
+func (p *AccountPool) selectionIndexesLocked(model string, excluded map[string]bool, now time.Time, allowOverUsage bool, routingMode string) []int {
+	indexes := p.selectionIndexesForTokenStateLocked(model, excluded, now, allowOverUsage, false, routingMode)
 	if len(indexes) == 0 {
 		// Background refresh is deliberately not the only recovery path. When no
 		// ready account exists, allow an OAuth account with a refresh token to be
 		// selected so the request path can refresh it before upstream use.
-		indexes = p.selectionIndexesForTokenStateLocked(model, excluded, now, allowOverUsage, true)
+		indexes = p.selectionIndexesForTokenStateLocked(model, excluded, now, allowOverUsage, true, routingMode)
 	}
-	return p.orderSelectionIndexesLocked(indexes, model)
+	return p.orderSelectionIndexesLocked(indexes, model, routingMode)
 }
 
-func (p *AccountPool) selectionIndexesForTokenStateLocked(model string, excluded map[string]bool, now time.Time, allowOverUsage, allowRefreshFallback bool) []int {
-	mode := config.GetRoutingConfig().LoadBalancingMode
-	if mode == "priority" || mode == "balanced" {
+func (p *AccountPool) selectionIndexesForTokenStateLocked(model string, excluded map[string]bool, now time.Time, allowOverUsage, allowRefreshFallback bool, routingMode string) []int {
+	if routingMode == "priority" || routingMode == "balanced" {
 		indexes := make([]int, 0, len(p.accounts))
 		seen := make(map[string]bool)
 		for i := range p.accounts {
@@ -328,9 +339,8 @@ func (p *AccountPool) selectionIndexesForTokenStateLocked(model string, excluded
 	return indexes
 }
 
-func (p *AccountPool) orderSelectionIndexesLocked(indexes []int, model string) []int {
-	mode := config.GetRoutingConfig().LoadBalancingMode
-	if mode == "priority" {
+func (p *AccountPool) orderSelectionIndexesLocked(indexes []int, model, routingMode string) []int {
+	if routingMode == "priority" {
 		sort.SliceStable(indexes, func(i, j int) bool {
 			a := p.accounts[indexes[i]]
 			b := p.accounts[indexes[j]]
@@ -350,7 +360,7 @@ func (p *AccountPool) orderSelectionIndexesLocked(indexes []int, model string) [
 		return indexes
 	}
 
-	if mode == "balanced" {
+	if routingMode == "balanced" {
 		// Historical request totals are unsuitable for balancing: a newly added
 		// account starts at zero and would receive all traffic until it catches up.
 		// Rotate equally within each priority tier instead.
@@ -423,16 +433,15 @@ func (p *AccountPool) preferAdvertisedModelsLocked(indexes []int, model string) 
 	return append(preferred, unknown...)
 }
 
-func (p *AccountPool) commitWeightedSelectionLocked(selectedID string, eligibleIndexes []int) {
+func (p *AccountPool) commitWeightedSelectionLocked(selectedID string, eligibleIndexes []int, routingMode string) {
 	if selectedID == "" || len(eligibleIndexes) == 0 {
 		return
 	}
-	mode := config.GetRoutingConfig().LoadBalancingMode
-	if mode == "balanced" {
+	if routingMode == "balanced" {
 		p.currentIndex.Add(1)
 		return
 	}
-	if mode != "weighted" {
+	if routingMode != "weighted" {
 		return
 	}
 	if p.weightedCurrent == nil {
@@ -522,13 +531,39 @@ func (p *AccountPool) accountIndexLocked(id string) (int, bool) {
 	return idx, ok
 }
 
-// RecordSuccess 记录请求成功，清除冷却
+func (p *AccountPool) setCooldownLocked(id string, until time.Time, kind accountCooldownKind) {
+	p.ensureProtectionMapsLocked()
+	if current, ok := p.cooldowns[id]; ok && current.After(until) {
+		return
+	}
+	p.cooldowns[id] = until
+	p.cooldownKinds[id] = kind
+}
+
+func (p *AccountPool) clearTransientCooldownLocked(id string, now time.Time) {
+	until, ok := p.cooldowns[id]
+	if !ok {
+		delete(p.cooldownKinds, id)
+		return
+	}
+	kind := p.cooldownKinds[id]
+	// Runtime state written by older versions has no kind. Preserve an unknown
+	// long cooldown, but allow an old short transient cooldown to clear.
+	if kind == accountCooldownTransient || (kind == "" && until.Sub(now) <= 10*time.Minute) || !until.After(now) {
+		delete(p.cooldowns, id)
+		delete(p.cooldownKinds, id)
+	}
+}
+
+// RecordSuccess clears only transient protection. Quota and disabled cooldowns
+// survive a late in-flight success and expire through their own recovery path.
 func (p *AccountPool) RecordSuccess(id string) {
+	now := time.Now()
 	p.mu.Lock()
 	p.ensureProtectionMapsLocked()
-	delete(p.cooldowns, id)
+	p.clearTransientCooldownLocked(id, now)
 	p.errorCounts[id] = 0
-	p.lastSuccess[id] = time.Now()
+	p.lastSuccess[id] = now
 	p.mu.Unlock()
 	p.scheduleRuntimeStateSave()
 }
@@ -565,11 +600,9 @@ func (p *AccountPool) RecordError(id string, isQuotaError bool) {
 	}
 
 	if isQuotaError {
-		// 配额错误，冷却 1 小时
-		p.cooldowns[id] = time.Now().Add(time.Hour)
+		p.setCooldownLocked(id, time.Now().Add(time.Hour), accountCooldownQuota)
 	} else if p.errorCounts[id] >= 3 {
-		// 连续 3 次错误，冷却 1 分钟
-		p.cooldowns[id] = time.Now().Add(time.Minute)
+		p.setCooldownLocked(id, time.Now().Add(time.Minute), accountCooldownTransient)
 	}
 	p.mu.Unlock()
 	p.scheduleRuntimeStateSave()
@@ -663,6 +696,24 @@ func (p *AccountPool) ClearRefreshFailureCooldown(accountID string) {
 	p.scheduleRuntimeStateSave()
 }
 
+// ClearAccountCooldowns removes persisted runtime backoffs after an operator
+// explicitly re-enables accounts. Without this reset, a disabled account can be
+// enabled in config but remain unroutable behind its old 24-hour safety cooldown.
+func (p *AccountPool) ClearAccountCooldowns(ids map[string]bool) {
+	if len(ids) == 0 {
+		return
+	}
+	p.mu.Lock()
+	for id := range ids {
+		delete(p.cooldowns, id)
+		delete(p.cooldownKinds, id)
+		delete(p.errorCounts, id)
+		delete(p.refreshFailures, id)
+	}
+	p.mu.Unlock()
+	p.scheduleRuntimeStateSave()
+}
+
 // IsAuthFailure reports whether an error indicates the refresh token / credentials
 // have been revoked or invalidated upstream (401, 403 with auth markers, etc.).
 // These accounts cannot be recovered automatically and must be re-authenticated.
@@ -737,8 +788,9 @@ func (p *AccountPool) DisableAccount(id, reason string) {
 	}
 	p.mu.Lock()
 	// Long cooldown as a safety net in case Reload races
-	p.cooldowns[id] = time.Now().Add(24 * time.Hour)
+	p.setCooldownLocked(id, time.Now().Add(24*time.Hour), accountCooldownDisabled)
 	p.mu.Unlock()
+	p.scheduleRuntimeStateSave()
 	p.Reload()
 }
 
@@ -748,8 +800,9 @@ func (p *AccountPool) DisableAccount(id, reason string) {
 // the next attempt picks a different account, then reload.
 func (p *AccountPool) MarkOverLimit(id string) {
 	p.mu.Lock()
-	p.cooldowns[id] = time.Now().Add(time.Hour)
+	p.setCooldownLocked(id, time.Now().Add(time.Hour), accountCooldownQuota)
 	p.mu.Unlock()
+	p.scheduleRuntimeStateSave()
 	p.Reload()
 }
 
@@ -820,10 +873,10 @@ func (p *AccountPool) Count() int {
 
 // AvailableCount 返回可用账号数
 func (p *AccountPool) AvailableCount() int {
+	allowOverUsage := config.GetAllowOverUsage()
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	now := time.Now()
-	allowOverUsage := config.GetAllowOverUsage()
 	count := 0
 	seen := make(map[string]bool)
 	for _, acc := range p.accounts {

@@ -1858,6 +1858,7 @@ func (h *Handler) handleClaudeMessages(w http.ResponseWriter, r *http.Request) {
 	kiroPayload := ClaudeToKiro(&req, thinking)
 	kiroPayload.requestContext = r.Context()
 	kiroPayload.contextWindowTokens = contextWindowTokens
+	truncatePayloadToLimit(kiroPayload, kiroPayload.hasSystemPriming)
 
 	// Stream or non-stream
 	apiKeyID := apiKeyIDFromContext(r.Context())
@@ -2999,6 +3000,7 @@ func (h *Handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 	kiroPayload := OpenAIToKiro(&req, thinking)
 	kiroPayload.requestContext = r.Context()
 	kiroPayload.contextWindowTokens = contextWindowTokens
+	truncatePayloadToLimit(kiroPayload, kiroPayload.hasSystemPriming)
 
 	apiKeyID := apiKeyIDFromContext(r.Context())
 	namespaceConversationID(kiroPayload, requestConversationNamespace(r, apiKeyID))
@@ -4025,11 +4027,60 @@ func (h *Handler) apiAddAccount(w http.ResponseWriter, r *http.Request) {
 	if account.ID == "" {
 		account.ID = auth.GenerateAccountID()
 	}
+	account.KiroApiKey = strings.TrimSpace(account.KiroApiKey)
+	isAPIKey := isKiroAPIKeyAccount(&account)
+	if isAPIKey {
+		if method := strings.TrimSpace(account.AuthMethod); account.KiroApiKey != "" && method != "" && !strings.EqualFold(method, "api_key") && !strings.EqualFold(method, "apikey") {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "kiroApiKey cannot be combined with authMethod " + method})
+			return
+		}
+		if account.KiroApiKey == "" {
+			account.KiroApiKey = strings.TrimSpace(account.AccessToken)
+		}
+		if account.KiroApiKey == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "kiroApiKey is required"})
+			return
+		}
+		account.AuthMethod = "api_key"
+		if strings.TrimSpace(account.Provider) == "" {
+			account.Provider = "API Key"
+		}
+		account.AccessToken = account.KiroApiKey
+		account.RefreshToken = ""
+		account.ExpiresAt = 0
+		if strings.HasPrefix(account.KiroApiKey, "ksk_") {
+			region, info, retryable, err := resolveKiroAPIKeyRegion(r.Context(), account.KiroApiKey, account.Region)
+			if err != nil {
+				status := http.StatusBadRequest
+				if retryable {
+					status = http.StatusBadGateway
+				}
+				w.WriteHeader(status)
+				json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+				return
+			}
+			account.Region = region
+			applyProbedAccountInfo(&account, info)
+		}
+	}
 	if account.Region == "" {
 		account.Region = "us-east-1"
 	}
 
-	if err := config.AddAccount(account); err != nil {
+	action := "created"
+	var err error
+	if isAPIKey {
+		var updated bool
+		account, updated, err = config.UpsertAccountByIdentity(account)
+		if updated {
+			action = "updated"
+		}
+	} else {
+		err = config.AddAccount(account)
+	}
+	if err != nil {
 		w.WriteHeader(500)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
@@ -4040,7 +4091,7 @@ func (h *Handler) apiAddAccount(w http.ResponseWriter, r *http.Request) {
 	if account.Enabled && account.AccessToken != "" {
 		h.refreshModelCachesAsync([]config.Account{account})
 	}
-	json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "id": account.ID})
+	json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "id": account.ID, "action": action})
 }
 
 func (h *Handler) apiDeleteAccount(w http.ResponseWriter, r *http.Request, id string) {
@@ -4081,6 +4132,11 @@ func (h *Handler) apiUpdateAccount(w http.ResponseWriter, r *http.Request, id st
 	oldEnabled := existing.Enabled
 	if v, ok := updates["enabled"].(bool); ok {
 		existing.Enabled = v
+		if v && !oldEnabled && existing.BanStatus != "" && !strings.EqualFold(existing.BanStatus, "ACTIVE") {
+			existing.BanStatus = "ACTIVE"
+			existing.BanReason = ""
+			existing.BanTime = 0
+		}
 	}
 	if v, ok := updates["nickname"].(string); ok {
 		existing.Nickname = v
@@ -4132,8 +4188,11 @@ func (h *Handler) apiUpdateAccount(w http.ResponseWriter, r *http.Request, id st
 
 	h.pool.Reload()
 	// 账号从禁用→启用时，自动拉取并缓存模型列表
-	if !oldEnabled && existing.Enabled && existing.AccessToken != "" {
-		h.refreshModelCachesAsync([]config.Account{*existing})
+	if !oldEnabled && existing.Enabled {
+		h.pool.ClearAccountCooldowns(map[string]bool{id: true})
+		if existing.AccessToken != "" {
+			h.refreshModelCachesAsync([]config.Account{*existing})
+		}
 	}
 	json.NewEncoder(w).Encode(map[string]bool{"success": true})
 }
@@ -4267,6 +4326,9 @@ func (h *Handler) apiBatchAccounts(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(500)
 			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 			return
+		}
+		if enabled {
+			h.pool.ClearAccountCooldowns(matchedIDs)
 		}
 		h.pool.Reload()
 		h.pruneModelsByAccount(config.GetEnabledAccounts())
@@ -4614,39 +4676,39 @@ func (h *Handler) apiImportSsoToken(w http.ResponseWriter, r *http.Request) {
 }
 
 type importCredentialsRequest struct {
-	ID            string `json:"id"`
-	Email         string `json:"email"`
-	UserID        string `json:"userId"`
-	AccessToken   string `json:"accessToken"`
-	RefreshToken  string `json:"refreshToken"`
-	KiroApiKey    string `json:"kiroApiKey"`
-	ClientID      string `json:"clientId"`
-	ClientSecret  string `json:"clientSecret"`
-	AuthMethod    string `json:"authMethod"`
-	Provider      string `json:"provider"`
-	IDP           string `json:"idp"`
-	Region        string `json:"region"`
-	ExpiresAt     int64  `json:"expiresAt"`
-	ProfileArn    string `json:"profileArn"`
-	TokenEndpoint string `json:"tokenEndpoint"`
-	IssuerURL     string `json:"issuerUrl"`
-	Scopes        string `json:"scopes"`
-	MachineId     string `json:"machineId"`
-	Status        string `json:"status"`
+	ID            string       `json:"id"`
+	Email         string       `json:"email"`
+	UserID        string       `json:"userId"`
+	AccessToken   string       `json:"accessToken"`
+	RefreshToken  string       `json:"refreshToken"`
+	KiroApiKey    string       `json:"kiroApiKey"`
+	ClientID      string       `json:"clientId"`
+	ClientSecret  string       `json:"clientSecret"`
+	AuthMethod    string       `json:"authMethod"`
+	Provider      string       `json:"provider"`
+	IDP           string       `json:"idp"`
+	Region        string       `json:"region"`
+	ExpiresAt     int64        `json:"expiresAt"`
+	ProfileArn    string       `json:"profileArn"`
+	TokenEndpoint string       `json:"tokenEndpoint"`
+	IssuerURL     string       `json:"issuerUrl"`
+	Scopes        importScopes `json:"scopes"`
+	MachineId     string       `json:"machineId"`
+	Status        string       `json:"status"`
 
 	Credentials *struct {
-		AccessToken   string `json:"accessToken"`
-		RefreshToken  string `json:"refreshToken"`
-		KiroApiKey    string `json:"kiroApiKey"`
-		ClientID      string `json:"clientId"`
-		ClientSecret  string `json:"clientSecret"`
-		AuthMethod    string `json:"authMethod"`
-		Region        string `json:"region"`
-		ExpiresAt     int64  `json:"expiresAt"`
-		ProfileArn    string `json:"profileArn"`
-		TokenEndpoint string `json:"tokenEndpoint"`
-		IssuerURL     string `json:"issuerUrl"`
-		Scopes        string `json:"scopes"`
+		AccessToken   string       `json:"accessToken"`
+		RefreshToken  string       `json:"refreshToken"`
+		KiroApiKey    string       `json:"kiroApiKey"`
+		ClientID      string       `json:"clientId"`
+		ClientSecret  string       `json:"clientSecret"`
+		AuthMethod    string       `json:"authMethod"`
+		Region        string       `json:"region"`
+		ExpiresAt     int64        `json:"expiresAt"`
+		ProfileArn    string       `json:"profileArn"`
+		TokenEndpoint string       `json:"tokenEndpoint"`
+		IssuerURL     string       `json:"issuerUrl"`
+		Scopes        importScopes `json:"scopes"`
 	} `json:"credentials"`
 	Subscription *struct {
 		Type  string `json:"type"`
@@ -4658,6 +4720,44 @@ type importCredentialsRequest struct {
 		PercentUsed float64 `json:"percentUsed"`
 		LastUpdated int64   `json:"lastUpdated"`
 	} `json:"usage"`
+}
+
+type importScopes string
+
+func (s *importScopes) UnmarshalJSON(raw []byte) error {
+	if s == nil {
+		return fmt.Errorf("scopes target is nil")
+	}
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		*s = ""
+		return nil
+	}
+	var single string
+	if err := json.Unmarshal(raw, &single); err == nil {
+		*s = importScopes(normalizeImportedScopes([]string{single}))
+		return nil
+	}
+	var list []string
+	if err := json.Unmarshal(raw, &list); err != nil {
+		return fmt.Errorf("scopes must be a string or string array")
+	}
+	*s = importScopes(normalizeImportedScopes(list))
+	return nil
+}
+
+func normalizeImportedScopes(values []string) string {
+	seen := make(map[string]bool)
+	normalized := make([]string, 0, len(values))
+	for _, value := range values {
+		for _, scope := range strings.FieldsFunc(value, func(r rune) bool { return r == ',' || r == ' ' || r == '\t' || r == '\r' || r == '\n' }) {
+			if scope == "" || seen[scope] {
+				continue
+			}
+			seen[scope] = true
+			normalized = append(normalized, scope)
+		}
+	}
+	return strings.Join(normalized, " ")
 }
 
 type importCredentialsBatchRequest struct {
@@ -4843,7 +4943,7 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 			go func() {
 				defer workers.Done()
 				for index := range jobs {
-					prepared[index].account, prepared[index].err = h.prepareCredentialsAccount(reqs[index])
+					prepared[index].account, prepared[index].err = h.prepareCredentialsAccountContext(r.Context(), reqs[index])
 				}
 			}()
 		}
@@ -4898,7 +4998,7 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, importErr := h.importCredentialsAccount(reqs[0])
+	result, importErr := h.importCredentialsAccountContext(r.Context(), reqs[0])
 	if importErr != nil {
 		w.WriteHeader(importErr.status)
 		json.NewEncoder(w).Encode(map[string]string{"error": importErr.Error()})
@@ -4917,46 +5017,35 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) prepareCredentialsAccount(req importCredentialsRequest) (config.Account, *credentialImportError) {
+	return h.prepareCredentialsAccountContext(context.Background(), req)
+}
+
+func (h *Handler) prepareCredentialsAccountContext(ctx context.Context, req importCredentialsRequest) (config.Account, *credentialImportError) {
 	req = normalizeNestedCredentialImport(req)
-
-	// 设置默认值
-	if req.Region == "" {
-		req.Region = "us-east-1"
-	}
 	req.AuthMethod = normalizeImportAuthMethod(req.AuthMethod, req.ClientID, req.ClientSecret, req.KiroApiKey, req.TokenEndpoint)
-	derivedTokenEndpoint, derivedIssuer, derivedScopes := auth.DeriveExternalIdpEndpoints(req.UserID, req.ClientID, req.AccessToken)
-	if derivedTokenEndpoint != "" && auth.ValidateExternalIdpEndpoint(derivedTokenEndpoint) == nil && req.AuthMethod != "external_idp" {
-		req.AuthMethod = "external_idp"
-	}
-	if req.AuthMethod == "external_idp" {
-		if req.TokenEndpoint == "" {
-			req.TokenEndpoint = derivedTokenEndpoint
-		}
-		if req.IssuerURL == "" {
-			req.IssuerURL = derivedIssuer
-		}
-		if req.Scopes == "" {
-			req.Scopes = derivedScopes
-		}
-		if strings.TrimSpace(req.ClientID) == "" || strings.TrimSpace(req.TokenEndpoint) == "" {
-			return config.Account{}, newCredentialImportError(http.StatusBadRequest, "external_idp requires clientId and tokenEndpoint (or userId/accessToken to derive it)")
-		}
-		if err := auth.ValidateExternalIdpEndpoint(req.TokenEndpoint); err != nil {
-			return config.Account{}, newCredentialImportError(http.StatusBadRequest, "external IdP endpoint rejected: "+err.Error())
-		}
-		if req.IssuerURL != "" {
-			if err := auth.ValidateExternalIdpEndpoint(req.IssuerURL); err != nil {
-				return config.Account{}, newCredentialImportError(http.StatusBadRequest, "external IdP issuer rejected: "+err.Error())
-			}
-		}
-	}
-
 	if req.AuthMethod == "api_key" {
 		if req.KiroApiKey == "" {
-			req.KiroApiKey = req.AccessToken
+			req.KiroApiKey = strings.TrimSpace(req.AccessToken)
 		}
+		req.KiroApiKey = strings.TrimSpace(req.KiroApiKey)
 		if req.KiroApiKey == "" {
 			return config.Account{}, newCredentialImportError(http.StatusBadRequest, "kiroApiKey is required")
+		}
+		var probedInfo *config.AccountInfo
+		if strings.HasPrefix(req.KiroApiKey, "ksk_") {
+			region, info, retryable, err := resolveKiroAPIKeyRegion(ctx, req.KiroApiKey, req.Region)
+			if err != nil {
+				status := http.StatusBadRequest
+				if retryable {
+					status = http.StatusBadGateway
+				}
+				return config.Account{}, &credentialImportError{status: status, err: err}
+			}
+			req.Region = region
+			probedInfo = info
+		}
+		if req.Region == "" {
+			req.Region = "us-east-1"
 		}
 		if req.Provider == "" {
 			req.Provider = "API Key"
@@ -4973,8 +5062,39 @@ func (h *Handler) prepareCredentialsAccount(req importCredentialsRequest) (confi
 			MachineId:   config.GenerateMachineId(),
 		}
 		applyImportedAccountMetadata(&account, req)
-
+		applyProbedAccountInfo(&account, probedInfo)
 		return account, nil
+	}
+
+	// OAuth credentials default to the historical OIDC/data-plane region.
+	if req.Region == "" {
+		req.Region = "us-east-1"
+	}
+	derivedTokenEndpoint, derivedIssuer, derivedScopes := auth.DeriveExternalIdpEndpoints(req.UserID, req.ClientID, req.AccessToken)
+	if derivedTokenEndpoint != "" && auth.ValidateExternalIdpEndpoint(derivedTokenEndpoint) == nil && req.AuthMethod != "external_idp" {
+		req.AuthMethod = "external_idp"
+	}
+	if req.AuthMethod == "external_idp" {
+		if req.TokenEndpoint == "" {
+			req.TokenEndpoint = derivedTokenEndpoint
+		}
+		if req.IssuerURL == "" {
+			req.IssuerURL = derivedIssuer
+		}
+		if req.Scopes == "" {
+			req.Scopes = importScopes(derivedScopes)
+		}
+		if strings.TrimSpace(req.ClientID) == "" || strings.TrimSpace(req.TokenEndpoint) == "" {
+			return config.Account{}, newCredentialImportError(http.StatusBadRequest, "external_idp requires clientId and tokenEndpoint (or userId/accessToken to derive it)")
+		}
+		if err := auth.ValidateExternalIdpEndpoint(req.TokenEndpoint); err != nil {
+			return config.Account{}, newCredentialImportError(http.StatusBadRequest, "external IdP endpoint rejected: "+err.Error())
+		}
+		if req.IssuerURL != "" {
+			if err := auth.ValidateExternalIdpEndpoint(req.IssuerURL); err != nil {
+				return config.Account{}, newCredentialImportError(http.StatusBadRequest, "external IdP issuer rejected: "+err.Error())
+			}
+		}
 	}
 
 	if req.RefreshToken == "" {
@@ -4999,7 +5119,7 @@ func (h *Handler) prepareCredentialsAccount(req importCredentialsRequest) (confi
 			RefreshToken: req.RefreshToken, ClientID: req.ClientID,
 			ClientSecret: req.ClientSecret, AuthMethod: req.AuthMethod,
 			Region: req.Region, TokenEndpoint: req.TokenEndpoint,
-			IssuerURL: req.IssuerURL, Scopes: req.Scopes,
+			IssuerURL: req.IssuerURL, Scopes: string(req.Scopes),
 		}
 		var newRefreshToken string
 		var refreshedProfileArn string
@@ -5041,7 +5161,7 @@ func (h *Handler) prepareCredentialsAccount(req importCredentialsRequest) (confi
 		ProfileArn:    profileArn,
 		TokenEndpoint: req.TokenEndpoint,
 		IssuerURL:     req.IssuerURL,
-		Scopes:        req.Scopes,
+		Scopes:        string(req.Scopes),
 	}
 	applyImportedAccountMetadata(&account, req)
 	if account.Email == "" {
@@ -5052,7 +5172,11 @@ func (h *Handler) prepareCredentialsAccount(req importCredentialsRequest) (confi
 }
 
 func (h *Handler) importCredentialsAccount(req importCredentialsRequest) (*credentialImportResult, *credentialImportError) {
-	account, prepareErr := h.prepareCredentialsAccount(req)
+	return h.importCredentialsAccountContext(context.Background(), req)
+}
+
+func (h *Handler) importCredentialsAccountContext(ctx context.Context, req importCredentialsRequest) (*credentialImportResult, *credentialImportError) {
+	account, prepareErr := h.prepareCredentialsAccountContext(ctx, req)
 	if prepareErr != nil {
 		return nil, prepareErr
 	}
@@ -5061,6 +5185,31 @@ func (h *Handler) importCredentialsAccount(req importCredentialsRequest) (*crede
 		return nil, &credentialImportError{status: http.StatusInternalServerError, err: err}
 	}
 	return &credentialImportResult{account: account, action: importAction(updated)}, nil
+}
+
+func applyProbedAccountInfo(account *config.Account, info *config.AccountInfo) {
+	if account == nil || info == nil {
+		return
+	}
+	if info.Email != "" {
+		account.Email = info.Email
+	}
+	if info.UserId != "" {
+		account.UserId = info.UserId
+	}
+	account.SubscriptionType = info.SubscriptionType
+	account.SubscriptionTitle = info.SubscriptionTitle
+	account.DaysRemaining = info.DaysRemaining
+	account.UsageCurrent = info.UsageCurrent
+	account.UsageLimit = info.UsageLimit
+	account.UsagePercent = info.UsagePercent
+	account.NextResetDate = info.NextResetDate
+	account.LastRefresh = info.LastRefresh
+	account.TrialUsageCurrent = info.TrialUsageCurrent
+	account.TrialUsageLimit = info.TrialUsageLimit
+	account.TrialUsagePercent = info.TrialUsagePercent
+	account.TrialStatus = info.TrialStatus
+	account.TrialExpiresAt = info.TrialExpiresAt
 }
 
 func importAction(updated bool) string {
@@ -5121,15 +5270,17 @@ func maskedKiroAPIKeyLabel(key string) string {
 }
 
 func (h *Handler) apiGetStatus(w http.ResponseWriter, r *http.Request) {
+	inventory := h.pool.InventorySnapshot()
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"accounts":        h.pool.Count(),
-		"available":       h.pool.AvailableCount(),
-		"totalRequests":   h.totalRequests.Load(),
-		"successRequests": h.successRequests.Load(),
-		"failedRequests":  h.failedRequests.Load(),
-		"totalTokens":     h.totalTokens.Load(),
-		"totalCredits":    h.getCredits(),
-		"uptime":          time.Now().Unix() - h.startTime,
+		"accounts":         h.pool.Count(),
+		"available":        h.pool.AvailableCount(),
+		"totalRequests":    h.totalRequests.Load(),
+		"successRequests":  h.successRequests.Load(),
+		"failedRequests":   h.failedRequests.Load(),
+		"totalTokens":      h.totalTokens.Load(),
+		"totalCredits":     h.getCredits(),
+		"uptime":           time.Now().Unix() - h.startTime,
+		"accountInventory": inventory,
 	})
 }
 

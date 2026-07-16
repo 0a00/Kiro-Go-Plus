@@ -19,13 +19,13 @@ Kiro-Go Plus preserves Kiro-Go's API and deployment compatibility while adding p
 - Upstream routing: Kiro Runtime as the primary path with legacy Kiro / CodeWhisperer / Amazon Q fallback
 - Multi-account scheduling: weighted, priority, and balanced modes; per-account concurrency, sticky routing, and failover
 - Refresh coordination: deduplication, bounded queues, timeouts, jitter, and adaptive batches for tens or hundreds of accounts
-- Failure protection: first-output timeout, actionable-output and required-tool validation, selectable safe/adaptive/balanced/live tool streams, long-tool truncation recovery, endpoint circuits, cooldowns, and bounded retries
+- Failure protection: model-window-aware input truncation, first-output timeout, actionable-output and required-tool validation, selectable safe/adaptive/balanced/live tool streams, long-tool truncation recovery, endpoint circuits, durable cooldowns, and bounded retries
 - Token controls: bounded enabled/adaptive thinking, configurable default thinking/output/context budgets, and client-value precedence
 - Streaming validation: AWS EventStream length and CRC validation, idle timeout, and truncated-response detection
-- Authentication: Builder ID, IAM Identity Center, Kiro hosted SSO, Microsoft 365 / Entra ID, SSO Token, API key, and JSON import
+- Authentication: Builder ID, IAM Identity Center, Kiro hosted SSO, Microsoft 365 / Entra ID, SSO Token, API key, and native/KAM JSON import; `ksk_` keys discover and validate their data-plane region before persistence
 - Prompt Cache accounting: configurable creation/read ranges, 5m/1h TTLs, sharded LRU, API-key isolation, and statistics
 - Extensions: dynamic model discovery, Web Search, external token counting, and Responses history
-- Operations: persisted request metadata, optional complete logs with sanitized request/output, retries and stream timing, diagnostic events, webhook alerts, `/health`, and `/ready`
+- Operations: account inventory diagnostics, persisted request metadata, optional complete logs with sanitized request/output, retries and stream timing, diagnostic events, webhook alerts, `/health`, and `/ready`
 - Networking: global and per-account HTTP / SOCKS5 proxies
 
 Prompt Cache simulates and reports Anthropic cache usage. It does not cache model response bodies.
@@ -36,7 +36,7 @@ Token-budget precedence is: explicit request values, per-model registry values, 
 
 Open `/admin` to manage:
 
-- Account import, enable/disable state, weights, priority, per-account concurrency, and proxies
+- Account import, routability/inventory diagnostics, enable/disable state, weights, priority, per-account concurrency, and proxies
 - Runtime/legacy endpoint preference and automatic fallback
 - Load balancing, retries, timeouts, circuits, and upstream protection
 - Token/model refresh intervals, concurrency, and batch sizes
@@ -232,7 +232,7 @@ Compose uses `/health`, so account exhaustion does not cause a restart loop. Rev
 | `ALLOW_INSECURE_PUBLIC_BIND` | Allow the default admin password on a public bind; emergency use only | `false` |
 | `ALLOW_UNAUTHENTICATED_API` | Explicitly allow anonymous compatible API calls on a public bind | `false` |
 | `KIRO_SSO_CALLBACK_BIND` | Hosted SSO callback listener | loopback only |
-| `KIRO_PROFILE_REGIONS` | Comma-separated Entra ID profile discovery regions | `us-east-1,eu-central-1` |
+| `KIRO_PROFILE_REGIONS` | Comma-separated Entra Profile and `ksk_` API-key discovery regions | `us-east-1,eu-central-1` |
 
 ## Upstream and Credits
 
