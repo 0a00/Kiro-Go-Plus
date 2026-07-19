@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"container/list"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -34,6 +35,27 @@ type promptCacheUsage struct {
 	CacheCreation1hInputTokens int
 }
 
+type promptCacheDiagnostic struct {
+	Status              string
+	Reason              string
+	Source              string
+	MatchedInputTokens  int
+	EligibleInputTokens int
+	ReadEfficiency      float64
+}
+
+func (d promptCacheDiagnostic) Apply(entry *requestLogEntry) {
+	if entry == nil {
+		return
+	}
+	entry.CacheStatus = d.Status
+	entry.CacheMissReason = d.Reason
+	entry.CacheSource = d.Source
+	entry.CacheMatchedInputTokens = d.MatchedInputTokens
+	entry.CacheEligibleInputTokens = d.EligibleInputTokens
+	entry.CacheReadEfficiency = d.ReadEfficiency
+}
+
 type promptCacheBreakpoint struct {
 	Fingerprint      [32]byte
 	CumulativeTokens int
@@ -55,14 +77,20 @@ func minCacheableTokensForModel(model string) int {
 }
 
 type promptCacheEntry struct {
-	ExpiresAt  time.Time
-	TTL        time.Duration
-	LastAccess time.Time
+	Scope       string
+	Fingerprint [32]byte
+	ExpiresAt   time.Time
+	TTL         time.Duration
+	LastAccess  time.Time
+	accountElem *list.Element
+	shardElem   *list.Element
 }
 
 type promptCacheShard struct {
 	mu               sync.Mutex
-	entriesByAccount map[string]map[[32]byte]promptCacheEntry
+	entriesByAccount map[string]map[[32]byte]*promptCacheEntry
+	accountOrder     map[string]*list.List
+	order            *list.List
 }
 
 type promptCacheTracker struct {
@@ -82,17 +110,25 @@ type promptCacheTracker struct {
 	cacheMisses          atomic.Uint64
 	cacheReadTokens      atomic.Uint64
 	cacheCreationTokens  atomic.Uint64
+	cacheSkipped         atomic.Uint64
+	stateGeneration      atomic.Uint64
+	persistedGeneration  atomic.Uint64
+	persistMu            sync.Mutex
+	diagnosticMu         sync.Mutex
+	missReasons          map[string]uint64
 }
 
 type promptCacheStats struct {
-	Entries             int     `json:"entries"`
-	Accounts            int     `json:"accounts"`
-	TrackedRequests     uint64  `json:"trackedRequests"`
-	CacheHits           uint64  `json:"cacheHits"`
-	CacheMisses         uint64  `json:"cacheMisses"`
-	HitRate             float64 `json:"hitRate"`
-	CacheReadTokens     uint64  `json:"cacheReadTokens"`
-	CacheCreationTokens uint64  `json:"cacheCreationTokens"`
+	Entries             int               `json:"entries"`
+	Accounts            int               `json:"accounts"`
+	TrackedRequests     uint64            `json:"trackedRequests"`
+	CacheHits           uint64            `json:"cacheHits"`
+	CacheMisses         uint64            `json:"cacheMisses"`
+	CacheSkipped        uint64            `json:"cacheSkipped"`
+	HitRate             float64           `json:"hitRate"`
+	CacheReadTokens     uint64            `json:"cacheReadTokens"`
+	CacheCreationTokens uint64            `json:"cacheCreationTokens"`
+	MissReasons         map[string]uint64 `json:"missReasons,omitempty"`
 }
 
 func newPromptCacheTracker(maxTTL time.Duration) *promptCacheTracker {
@@ -116,9 +152,12 @@ func newPromptCacheTrackerWithEfficiencyRange(maxTTL time.Duration, readEfficien
 		readEfficiencyMax:    readEfficiencyMax,
 		maxEntriesPerAccount: defaultPromptCacheMaxEntriesPerAccount,
 		maxEntriesTotal:      defaultPromptCacheMaxEntriesTotal,
+		missReasons:          make(map[string]uint64),
 	}
 	for i := range tracker.shards {
-		tracker.shards[i].entriesByAccount = make(map[string]map[[32]byte]promptCacheEntry)
+		tracker.shards[i].entriesByAccount = make(map[string]map[[32]byte]*promptCacheEntry)
+		tracker.shards[i].accountOrder = make(map[string]*list.List)
+		tracker.shards[i].order = list.New()
 	}
 	return tracker
 }
@@ -261,23 +300,47 @@ func (t *promptCacheTracker) BuildClaudeProfile(req *ClaudeRequest, totalInputTo
 }
 
 func (t *promptCacheTracker) Compute(accountID string, profile *promptCacheProfile) promptCacheUsage {
-	if t == nil || profile == nil || len(profile.Breakpoints) == 0 || accountID == "" {
-		return promptCacheUsage{}
+	usage, _ := t.ComputeDetailed(accountID, profile)
+	return usage
+}
+
+func (t *promptCacheTracker) ComputeDetailed(accountID string, profile *promptCacheProfile) (promptCacheUsage, promptCacheDiagnostic) {
+	diagnostic := promptCacheDiagnostic{Status: "skipped", Source: "local"}
+	if t == nil {
+		diagnostic.Reason = "tracker_unavailable"
+		return promptCacheUsage{}, diagnostic
+	}
+	if profile == nil || len(profile.Breakpoints) == 0 {
+		diagnostic.Reason = "no_cache_breakpoint"
+		return promptCacheUsage{}, diagnostic
+	}
+	if accountID == "" {
+		diagnostic.Reason = "missing_cache_scope"
+		return promptCacheUsage{}, diagnostic
 	}
 
 	minTokens := minCacheableTokensForModel(profile.Model)
 	last := profile.Breakpoints[len(profile.Breakpoints)-1]
 	lastTokens := minInt(last.CumulativeTokens, profile.TotalInputTokens)
+	diagnostic.EligibleInputTokens = lastTokens
 	now := time.Now()
 
 	readEfficiencyMin, readEfficiencyMax := t.efficiencyRange()
 	shard := t.shardFor(accountID)
 	shard.mu.Lock()
+	expiredMatch := false
+	for _, breakpoint := range profile.Breakpoints {
+		if entry, ok := shard.entriesByAccount[accountID][breakpoint.Fingerprint]; ok && !entry.ExpiresAt.After(now) {
+			expiredMatch = true
+			break
+		}
+	}
 	t.pruneExpiredAccountLocked(shard, accountID, now)
 	entries := shard.entriesByAccount[accountID]
 	if lastTokens < minTokens {
 		shard.mu.Unlock()
-		return promptCacheUsage{}
+		diagnostic.Reason = "below_minimum_tokens"
+		return promptCacheUsage{}, diagnostic
 	}
 
 	rawMatchedTokens := 0
@@ -299,7 +362,18 @@ func (t *promptCacheTracker) Compute(accountID string, profile *promptCacheProfi
 		matchedFingerprint = breakpoint.Fingerprint
 		break
 	}
+	namespaceEntries := len(entries)
 	shard.mu.Unlock()
+	if rawMatchedTokens == 0 {
+		diagnostic.Status = "miss"
+		if expiredMatch {
+			diagnostic.Reason = "expired"
+		} else if namespaceEntries == 0 {
+			diagnostic.Reason = "empty_namespace"
+		} else {
+			diagnostic.Reason = "prefix_not_found"
+		}
+	}
 
 	readEfficiency := deterministicPromptCacheEfficiency(readEfficiencyMin, readEfficiencyMax, accountID, matchedFingerprint, now)
 	matchedTokens := int(math.Round(float64(rawMatchedTokens) * readEfficiency))
@@ -312,12 +386,25 @@ func (t *promptCacheTracker) Compute(accountID string, profile *promptCacheProfi
 	// reported as a new cache creation on every exact hit.
 	creation := maxInt(lastTokens-rawMatchedTokens, 0)
 	cache5m, cache1h := computePromptCacheTTLBreakdown(profile, rawMatchedTokens)
-	return promptCacheUsage{
+	usage := promptCacheUsage{
 		CacheCreationInputTokens:   creation,
 		CacheReadInputTokens:       matchedTokens,
 		CacheCreation5mInputTokens: cache5m,
 		CacheCreation1hInputTokens: cache1h,
 	}
+	diagnostic.MatchedInputTokens = rawMatchedTokens
+	if rawMatchedTokens > 0 {
+		diagnostic.ReadEfficiency = float64(matchedTokens) / float64(rawMatchedTokens)
+		if creation > 0 {
+			diagnostic.Status = "partial_hit"
+		} else {
+			diagnostic.Status = "hit"
+		}
+		if matchedTokens == 0 {
+			diagnostic.Reason = "read_efficiency_zero"
+		}
+	}
+	return usage, diagnostic
 }
 
 func (t *promptCacheTracker) Update(accountID string, profile *promptCacheProfile) {
@@ -331,30 +418,21 @@ func (t *promptCacheTracker) Update(accountID string, profile *promptCacheProfil
 	shard := t.shardFor(accountID)
 	shard.mu.Lock()
 	t.pruneExpiredAccountLocked(shard, accountID, now)
-
-	entries := shard.entriesByAccount[accountID]
-	if entries == nil {
-		entries = make(map[[32]byte]promptCacheEntry)
-		shard.entriesByAccount[accountID] = entries
-	}
-
+	updated := false
 	for _, breakpoint := range profile.Breakpoints {
 		// Skip breakpoints below the minimum cacheable token threshold.
 		if breakpoint.CumulativeTokens < minTokens {
 			continue
 		}
 		ttl := effectivePromptCacheTTL(maxTTL, breakpoint.TTL)
-		if _, exists := entries[breakpoint.Fingerprint]; !exists {
-			t.entryCount.Add(1)
-		}
-		entries[breakpoint.Fingerprint] = promptCacheEntry{
-			ExpiresAt:  now.Add(ttl),
-			TTL:        ttl,
-			LastAccess: now,
-		}
+		t.putEntryLocked(shard, accountID, breakpoint.Fingerprint, now.Add(ttl), ttl, now)
+		updated = true
 	}
 	t.enforceAccountLimitLocked(shard, accountID, maxPerAccount)
 	shard.mu.Unlock()
+	if updated {
+		t.markStateChanged()
+	}
 	t.enforceGlobalLimit(maxTotal)
 }
 
@@ -389,31 +467,96 @@ func (t *promptCacheTracker) shardFor(accountID string) *promptCacheShard {
 	return &t.shards[hash%promptCacheShardCount]
 }
 
+func (t *promptCacheTracker) putEntryLocked(shard *promptCacheShard, accountID string, fingerprint [32]byte, expiresAt time.Time, ttl time.Duration, lastAccess time.Time) {
+	if shard.entriesByAccount == nil {
+		shard.entriesByAccount = make(map[string]map[[32]byte]*promptCacheEntry)
+	}
+	if shard.accountOrder == nil {
+		shard.accountOrder = make(map[string]*list.List)
+	}
+	if shard.order == nil {
+		shard.order = list.New()
+	}
+	entries := shard.entriesByAccount[accountID]
+	if entries == nil {
+		entries = make(map[[32]byte]*promptCacheEntry)
+		shard.entriesByAccount[accountID] = entries
+	}
+	accountOrder := shard.accountOrder[accountID]
+	if accountOrder == nil {
+		accountOrder = list.New()
+		shard.accountOrder[accountID] = accountOrder
+	}
+	if entry := entries[fingerprint]; entry != nil {
+		entry.ExpiresAt = expiresAt
+		entry.TTL = ttl
+		entry.LastAccess = lastAccess
+		if entry.accountElem != nil {
+			accountOrder.MoveToFront(entry.accountElem)
+		}
+		if entry.shardElem != nil {
+			shard.order.MoveToFront(entry.shardElem)
+		}
+		return
+	}
+	entry := &promptCacheEntry{
+		Scope:       accountID,
+		Fingerprint: fingerprint,
+		ExpiresAt:   expiresAt,
+		TTL:         ttl,
+		LastAccess:  lastAccess,
+	}
+	entry.accountElem = accountOrder.PushFront(entry)
+	entry.shardElem = shard.order.PushFront(entry)
+	entries[fingerprint] = entry
+	t.entryCount.Add(1)
+}
+
+func (t *promptCacheTracker) removeEntryLocked(shard *promptCacheShard, accountID string, fingerprint [32]byte, expected *promptCacheEntry) bool {
+	entries := shard.entriesByAccount[accountID]
+	entry := entries[fingerprint]
+	if entry == nil || (expected != nil && entry != expected) {
+		return false
+	}
+	if order := shard.accountOrder[accountID]; order != nil && entry.accountElem != nil {
+		order.Remove(entry.accountElem)
+	}
+	if shard.order != nil && entry.shardElem != nil {
+		shard.order.Remove(entry.shardElem)
+	}
+	delete(entries, fingerprint)
+	entry.accountElem = nil
+	entry.shardElem = nil
+	t.entryCount.Add(-1)
+	t.markStateChanged()
+	if len(entries) == 0 {
+		delete(shard.entriesByAccount, accountID)
+		delete(shard.accountOrder, accountID)
+	}
+	return true
+}
+
 func (t *promptCacheTracker) pruneExpiredAccountLocked(shard *promptCacheShard, accountID string, now time.Time) {
 	entries := shard.entriesByAccount[accountID]
 	for fingerprint, entry := range entries {
 		if !entry.ExpiresAt.After(now) {
-			delete(entries, fingerprint)
-			t.entryCount.Add(-1)
+			t.removeEntryLocked(shard, accountID, fingerprint, entry)
 		}
-	}
-	if len(entries) == 0 {
-		delete(shard.entriesByAccount, accountID)
 	}
 }
 
 func (t *promptCacheTracker) enforceAccountLimitLocked(shard *promptCacheShard, accountID string, maxEntries int) {
 	entries := shard.entriesByAccount[accountID]
 	for len(entries) > maxEntries {
-		fingerprint, ok := oldestPromptCacheEntry(entries)
-		if !ok {
+		order := shard.accountOrder[accountID]
+		if order == nil || order.Back() == nil {
 			break
 		}
-		delete(entries, fingerprint)
-		t.entryCount.Add(-1)
-	}
-	if len(entries) == 0 {
-		delete(shard.entriesByAccount, accountID)
+		entry, _ := order.Back().Value.(*promptCacheEntry)
+		if entry == nil || !t.removeEntryLocked(shard, accountID, entry.Fingerprint, entry) {
+			break
+		}
+		entries = shard.entriesByAccount[accountID]
 	}
 }
 
@@ -436,25 +579,22 @@ func (t *promptCacheTracker) enforceGlobalLimit(maxEntries int) {
 	defer t.evictionMu.Unlock()
 
 	for t.entryCount.Load() > int64(maxEntries) {
-		var oldestAccount string
-		var oldestFingerprint [32]byte
+		oldestShard := -1
+		var oldestEntry *promptCacheEntry
 		var oldestTime time.Time
 		found := false
 		for i := range t.shards {
 			shard := &t.shards[i]
 			shard.mu.Lock()
-			for accountID, entries := range shard.entriesByAccount {
-				fingerprint, ok := oldestPromptCacheEntry(entries)
-				if !ok {
-					continue
-				}
-				entry := entries[fingerprint]
-				if !found || entry.LastAccess.Before(oldestTime) {
-					oldestAccount = accountID
-					oldestFingerprint = fingerprint
-					oldestTime = entry.LastAccess
-					found = true
-				}
+			var entry *promptCacheEntry
+			if shard.order != nil && shard.order.Back() != nil {
+				entry, _ = shard.order.Back().Value.(*promptCacheEntry)
+			}
+			if entry != nil && (!found || entry.LastAccess.Before(oldestTime)) {
+				oldestShard = i
+				oldestEntry = entry
+				oldestTime = entry.LastAccess
+				found = true
 			}
 			shard.mu.Unlock()
 		}
@@ -462,16 +602,11 @@ func (t *promptCacheTracker) enforceGlobalLimit(maxEntries int) {
 			return
 		}
 
-		shard := t.shardFor(oldestAccount)
+		shard := &t.shards[oldestShard]
 		shard.mu.Lock()
-		entries := shard.entriesByAccount[oldestAccount]
-		entry, exists := entries[oldestFingerprint]
-		if exists && entry.LastAccess.Equal(oldestTime) {
-			delete(entries, oldestFingerprint)
-			t.entryCount.Add(-1)
-			if len(entries) == 0 {
-				delete(shard.entriesByAccount, oldestAccount)
-			}
+		entry := shard.entriesByAccount[oldestEntry.Scope][oldestEntry.Fingerprint]
+		if entry == oldestEntry && entry.LastAccess.Equal(oldestTime) {
+			t.removeEntryLocked(shard, entry.Scope, entry.Fingerprint, entry)
 		}
 		shard.mu.Unlock()
 	}
@@ -498,8 +633,9 @@ func (t *promptCacheTracker) clampEntryTTLs(maxTTL time.Duration, now time.Time)
 	for i := range t.shards {
 		shard := &t.shards[i]
 		shard.mu.Lock()
-		for accountID, entries := range shard.entriesByAccount {
-			for fingerprint, entry := range entries {
+		changed := false
+		for _, entries := range shard.entriesByAccount {
+			for _, entry := range entries {
 				if entry.TTL <= maxTTL {
 					continue
 				}
@@ -507,11 +643,13 @@ func (t *promptCacheTracker) clampEntryTTLs(maxTTL time.Duration, now time.Time)
 				if deadline := now.Add(maxTTL); entry.ExpiresAt.After(deadline) {
 					entry.ExpiresAt = deadline
 				}
-				entries[fingerprint] = entry
+				changed = true
 			}
-			shard.entriesByAccount[accountID] = entries
 		}
 		shard.mu.Unlock()
+		if changed {
+			t.markStateChanged()
+		}
 	}
 }
 
@@ -540,11 +678,30 @@ func (t *promptCacheTracker) entry(accountID string, fingerprint [32]byte) (prom
 	shard.mu.Lock()
 	defer shard.mu.Unlock()
 	entry, ok := shard.entriesByAccount[accountID][fingerprint]
-	return entry, ok
+	if !ok || entry == nil {
+		return promptCacheEntry{}, false
+	}
+	return *entry, true
 }
 
 func (t *promptCacheTracker) RecordUsage(usage promptCacheUsage, tracked bool) {
 	if t == nil || !tracked {
+		return
+	}
+	diagnostic := promptCacheDiagnostic{Status: "miss", Source: "local"}
+	if usage.CacheReadInputTokens > 0 {
+		diagnostic.Status = "hit"
+	}
+	t.RecordDecision(usage, diagnostic)
+}
+
+func (t *promptCacheTracker) RecordDecision(usage promptCacheUsage, diagnostic promptCacheDiagnostic) {
+	if t == nil {
+		return
+	}
+	if diagnostic.Status == "skipped" || diagnostic.Status == "" {
+		t.cacheSkipped.Add(1)
+		t.recordMissReason(diagnostic.Reason)
 		return
 	}
 	t.trackedRequests.Add(1)
@@ -553,10 +710,24 @@ func (t *promptCacheTracker) RecordUsage(usage promptCacheUsage, tracked bool) {
 		t.cacheReadTokens.Add(uint64(usage.CacheReadInputTokens))
 	} else {
 		t.cacheMisses.Add(1)
+		t.recordMissReason(diagnostic.Reason)
 	}
 	if usage.CacheCreationInputTokens > 0 {
 		t.cacheCreationTokens.Add(uint64(usage.CacheCreationInputTokens))
 	}
+}
+
+func (t *promptCacheTracker) recordMissReason(reason string) {
+	reason = strings.TrimSpace(reason)
+	if t == nil || reason == "" {
+		return
+	}
+	t.diagnosticMu.Lock()
+	if t.missReasons == nil {
+		t.missReasons = make(map[string]uint64)
+	}
+	t.missReasons[reason]++
+	t.diagnosticMu.Unlock()
 }
 
 func (t *promptCacheTracker) Stats() promptCacheStats {
@@ -568,9 +739,16 @@ func (t *promptCacheTracker) Stats() promptCacheStats {
 		TrackedRequests:     t.trackedRequests.Load(),
 		CacheHits:           t.cacheHits.Load(),
 		CacheMisses:         t.cacheMisses.Load(),
+		CacheSkipped:        t.cacheSkipped.Load(),
 		CacheReadTokens:     t.cacheReadTokens.Load(),
 		CacheCreationTokens: t.cacheCreationTokens.Load(),
 	}
+	t.diagnosticMu.Lock()
+	stats.MissReasons = make(map[string]uint64, len(t.missReasons))
+	for reason, count := range t.missReasons {
+		stats.MissReasons[reason] = count
+	}
+	t.diagnosticMu.Unlock()
 	for i := range t.shards {
 		shard := &t.shards[i]
 		shard.mu.Lock()
@@ -591,7 +769,9 @@ func (t *promptCacheTracker) Clear() {
 		t.shards[i].mu.Lock()
 	}
 	for i := range t.shards {
-		t.shards[i].entriesByAccount = make(map[string]map[[32]byte]promptCacheEntry)
+		t.shards[i].entriesByAccount = make(map[string]map[[32]byte]*promptCacheEntry)
+		t.shards[i].accountOrder = make(map[string]*list.List)
+		t.shards[i].order = list.New()
 	}
 	t.entryCount.Store(0)
 	for i := len(t.shards) - 1; i >= 0; i-- {
@@ -602,20 +782,11 @@ func (t *promptCacheTracker) Clear() {
 	t.cacheMisses.Store(0)
 	t.cacheReadTokens.Store(0)
 	t.cacheCreationTokens.Store(0)
-}
-
-func oldestPromptCacheEntry(entries map[[32]byte]promptCacheEntry) ([32]byte, bool) {
-	var oldestFingerprint [32]byte
-	var oldestTime time.Time
-	found := false
-	for fingerprint, entry := range entries {
-		if !found || entry.LastAccess.Before(oldestTime) {
-			oldestFingerprint = fingerprint
-			oldestTime = entry.LastAccess
-			found = true
-		}
-	}
-	return oldestFingerprint, found
+	t.cacheSkipped.Store(0)
+	t.diagnosticMu.Lock()
+	t.missReasons = make(map[string]uint64)
+	t.diagnosticMu.Unlock()
+	t.markStateChanged()
 }
 
 type cacheablePromptBlock struct {
@@ -1067,10 +1238,42 @@ func resolvePromptCacheUsage(synthetic promptCacheUsage, upstream KiroTokenUsage
 	return reconcilePromptCacheUsage(usage, inputTokens), inputTokens
 }
 
-func buildClaudeUsageMap(inputTokens, outputTokens int, usage promptCacheUsage, includeCache bool) map[string]interface{} {
+func finalizePromptCacheDiagnostic(diagnostic promptCacheDiagnostic, upstream KiroTokenUsage, usage promptCacheUsage, inputTokens int) promptCacheDiagnostic {
+	if upstream.HasCacheBreakdown {
+		diagnostic = promptCacheDiagnostic{
+			Status:              "miss",
+			Reason:              "upstream_no_cache_read",
+			Source:              "upstream",
+			MatchedInputTokens:  usage.CacheReadInputTokens,
+			EligibleInputTokens: inputTokens,
+		}
+		if usage.CacheReadInputTokens > 0 {
+			diagnostic.Status = "hit"
+			diagnostic.Reason = ""
+			if usage.CacheCreationInputTokens > 0 {
+				diagnostic.Status = "partial_hit"
+			}
+		}
+		if inputTokens > 0 {
+			diagnostic.ReadEfficiency = float64(usage.CacheReadInputTokens) / float64(inputTokens)
+		}
+		return diagnostic
+	}
+
+	diagnostic.Source = "local"
+	if diagnostic.MatchedInputTokens > 0 {
+		diagnostic.ReadEfficiency = float64(usage.CacheReadInputTokens) / float64(diagnostic.MatchedInputTokens)
+	}
+	return diagnostic
+}
+
+func buildClaudeUsageMap(inputTokens, outputTokens, thinkingTokens int, usage promptCacheUsage, includeCache bool) map[string]interface{} {
 	result := map[string]interface{}{
 		"input_tokens":  billedClaudeInputTokens(inputTokens, usage),
 		"output_tokens": outputTokens,
+	}
+	if thinkingTokens > 0 {
+		result["thinking_tokens"] = thinkingTokens
 	}
 	if !includeCache {
 		return result

@@ -5,10 +5,25 @@ import (
 	"encoding/binary"
 	"errors"
 	"hash/crc32"
+	"io"
 	"strings"
 	"testing"
 	"time"
 )
+
+type closeTrackingEventStream struct {
+	reader *bytes.Reader
+	closed bool
+}
+
+func (b *closeTrackingEventStream) Read(p []byte) (int, error) {
+	return b.reader.Read(p)
+}
+
+func (b *closeTrackingEventStream) Close() error {
+	b.closed = true
+	return nil
+}
 
 func TestParseEventStreamValidCRCFrames(t *testing.T) {
 	stream := bytes.NewReader(bytes.Join([][]byte{
@@ -59,6 +74,27 @@ func TestParseEventStreamPreservesCacheUsageBreakdown(t *testing.T) {
 		got.UncachedInputTokens != 300 || got.CacheReadInputTokens != 500 || got.CacheCreationInputTokens != 200 ||
 		got.CacheCreation5mTokens != 150 || got.CacheCreation1hTokens != 50 {
 		t.Fatalf("unexpected cache usage: %+v", got)
+	}
+}
+
+func TestParseEventStreamPreservesThinkingUsage(t *testing.T) {
+	stream := bytes.NewReader(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{
+		"content": "hello",
+		"usage": map[string]interface{}{
+			"input_tokens":  10,
+			"output_tokens": 20,
+			"output_tokens_details": map[string]interface{}{
+				"reasoning_tokens": 7,
+			},
+		},
+	}))
+
+	var got KiroTokenUsage
+	if err := parseEventStream(stream, &KiroStreamCallback{OnUsage: func(usage KiroTokenUsage) { got = usage }}); err != nil {
+		t.Fatalf("parse stream: %v", err)
+	}
+	if !got.HasThinkingBreakdown || got.ThinkingTokens != 7 {
+		t.Fatalf("unexpected thinking usage: %+v", got)
 	}
 }
 
@@ -140,6 +176,30 @@ func TestStreamIdleReaderCancelsOnInactivity(t *testing.T) {
 	case <-timedOut:
 	case <-time.After(time.Second):
 		t.Fatal("idle reader did not fire")
+	}
+}
+
+func TestParseAndCloseEventStreamClosesBodyOnCallbackPanic(t *testing.T) {
+	body := &closeTrackingEventStream{
+		reader: bytes.NewReader(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "hello"})),
+	}
+	panicked := false
+	func() {
+		defer func() {
+			panicked = recover() != nil
+		}()
+		_ = parseAndCloseEventStream(body, time.Second, nil, &KiroStreamCallback{
+			OnText: func(string, bool) { panic("callback failed") },
+		})
+	}()
+	if !panicked {
+		t.Fatal("expected callback panic")
+	}
+	if !body.closed {
+		t.Fatal("upstream body was not closed after callback panic")
+	}
+	if _, err := body.Read(nil); err != nil && err != io.EOF {
+		t.Fatalf("unexpected tracking body state: %v", err)
 	}
 }
 

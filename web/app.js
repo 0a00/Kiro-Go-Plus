@@ -17,6 +17,12 @@
   const selectedAccounts = new Set();
   let filterKeyword = '';
   let filterStatus = 'all';
+  let accountViewMode = localStorage.getItem('kiro_account_view') || 'compact';
+  if (!['compact', 'detailed'].includes(accountViewMode)) accountViewMode = 'compact';
+  let accountSortMode = localStorage.getItem('kiro_account_sort') || 'status';
+  let accountPageSize = Number(localStorage.getItem('kiro_account_page_size')) || 50;
+  if (![25, 50, 100, 200].includes(accountPageSize)) accountPageSize = 50;
+  let accountPage = 1;
   let privacyModeEnabled = true;
   let promptRules = [];
   let builderIdSession = '';
@@ -36,6 +42,10 @@
   let customSelectObserver = null;
   let customSelectRefreshQueued = false;
   let requestRefreshTimer = null;
+  let currentTab = 'overview';
+  const settingsGroups = ['access', 'routing', 'generation', 'cache', 'diagnostics', 'integrations', 'security'];
+  let settingsGroup = localStorage.getItem('kiro_settings_group') || 'access';
+  if (!settingsGroups.includes(settingsGroup)) settingsGroup = 'access';
 
   // DOM helpers
   const $ = (id) => document.getElementById(id);
@@ -177,6 +187,7 @@
     document.documentElement.lang = currentLang;
     updateLangButtons();
     applyTheme(getThemePref());
+    updateCurrentPageTitle();
     refreshCustomSelects();
   }
   async function setLang(lang) {
@@ -776,7 +787,21 @@
     body.innerHTML = items.map(item => {
       const statusClass = item.status === 'success' ? 'badge-success' : 'badge-error';
       const tokens = (item.inputTokens || 0) + ' / ' + (item.outputTokens || 0);
+      const tokensTitle = t('requests.inputOutputTokens', item.inputTokens || 0, item.outputTokens || 0) +
+        (item.thinkingTokens ? ' · ' + t('requests.thinkingTokens') + ': ' + item.thinkingTokens : '') +
+        (item.webSearchRequests ? ' · ' + t('requests.webSearchRequests') + ': ' + item.webSearchRequests : '');
       const cache = (item.cacheReadInputTokens || 0) + ' / ' + (item.cacheCreationInputTokens || 0);
+      const cacheStatus = item.cacheStatus ? t('requests.cacheStatus.' + item.cacheStatus) : '';
+      const cacheReason = item.cacheMissReason ? t('requests.cacheReason.' + item.cacheMissReason) : '';
+      const cacheDetails = [];
+      if (cacheStatus) cacheDetails.push(cacheStatus);
+      if (cacheReason) cacheDetails.push(cacheReason);
+      if (item.cacheSource) cacheDetails.push(t('requests.cacheSource') + ': ' + item.cacheSource);
+      if (item.cacheMatchedInputTokens || item.cacheEligibleInputTokens) {
+        cacheDetails.push(t('requests.cacheMatched', item.cacheMatchedInputTokens || 0, item.cacheEligibleInputTokens || 0));
+      }
+      if (item.cacheReadEfficiency) cacheDetails.push(t('requests.cacheEfficiency') + ': ' + (item.cacheReadEfficiency * 100).toFixed(1) + '%');
+      const cacheTitle = cacheDetails.join(' · ');
       const account = item.accountEmail || item.accountId || '-';
       const err = item.error ? item.error : '';
 	  const requestId = item.requestId || '-';
@@ -800,10 +825,37 @@
         : '';
       const outcomeTitle = outcome + (Array.isArray(item.requestToolNames) && item.requestToolNames.length ? ' · ' + item.requestToolNames.join(', ') : '') + toolPayloadTitle;
       const upstreamActivityDuration = formatRequestDuration(item.upstreamFirstActivityMs);
+      const firstSSEEventDuration = formatRequestDuration(item.firstSseEventMs);
+      const firstThinkingDuration = formatRequestDuration(item.firstThinkingMs);
+      const firstVisibleTextDuration = formatRequestDuration(item.firstVisibleTextMs);
+      const firstToolOutputDuration = formatRequestDuration(item.firstToolOutputMs);
       const firstContentDuration = formatRequestDuration(item.firstContentMs);
+      const maxStreamGapDuration = formatRequestDuration(item.maxStreamGapMs);
       const toolAssemblyDuration = formatRequestDuration(item.toolAssemblyMs);
       const totalDuration = formatRequestDuration(item.durationMs);
-      const durationTitle = t('requests.upstreamActivity') + ': ' + upstreamActivityDuration + ' · ' + t('requests.firstContent') + ': ' + firstContentDuration + (item.toolAssemblyMs == null ? '' : ' · ' + t('requests.toolAssembly') + ': ' + toolAssemblyDuration) + ' · ' + t('requests.totalDuration') + ': ' + totalDuration;
+      const durationItems = [];
+      if (item.accountAttempts || item.accountSelectionMs !== undefined) {
+        const selectionParts = [formatRequestDuration(item.accountSelectionMs || 0)];
+        if (item.accountAttempts) selectionParts.push(t('requests.accountAttempts', item.accountAttempts));
+        if (item.routeAffinityHit) selectionParts.push(t('requests.affinityHit'));
+        durationItems.push([t('requests.accountSelection'), selectionParts.join(' · '), true]);
+      }
+      durationItems.push(...[
+        [t('requests.upstreamActivity'), upstreamActivityDuration, item.upstreamFirstActivityMs],
+        [t('requests.firstSseEvent'), firstSSEEventDuration, item.firstSseEventMs],
+        [t('requests.firstThinking'), firstThinkingDuration, item.firstThinkingMs],
+        [t('requests.firstVisibleText'), firstVisibleTextDuration, item.firstVisibleTextMs],
+        [t('requests.firstToolOutput'), firstToolOutputDuration, item.firstToolOutputMs],
+        [t('requests.firstContent'), firstContentDuration, item.firstContentMs],
+        [t('requests.maxStreamGap'), maxStreamGapDuration, item.maxStreamGapMs],
+        [t('requests.toolAssembly'), toolAssemblyDuration, item.toolAssemblyMs],
+        [t('requests.totalDuration'), totalDuration, item.durationMs]
+      ].filter(part => part[2] !== null && part[2] !== undefined));
+      if (item.heartbeatCount) durationItems.splice(Math.max(0, durationItems.length - 1), 0, [t('requests.heartbeats'), String(item.heartbeatCount), item.heartbeatCount]);
+      const durationTitle = durationItems.map(part => part[0] + ': ' + part[1]).join(' · ');
+      const durationLines = durationItems.map(part =>
+        '<span class="request-duration-line"><span class="request-duration-label">' + escapeHtml(part[0]) + '</span><strong>' + escapeHtml(part[1]) + '</strong></span>'
+      ).join('');
 	  const detailButton = item.detailAvailable
 		? '<button class="btn btn-outline btn-xs icon-btn" type="button" data-request-detail="' + escapeAttr(requestId) + '" title="' + escapeAttr(t('requests.viewDetail')) + '" aria-label="' + escapeAttr(t('requests.viewDetail')) + '"><i class="fa-solid fa-magnifying-glass" aria-hidden="true"></i></button>'
 		: '-';
@@ -816,14 +868,11 @@
         '<td>' + escapeHtml(maskEmail(account)) + '</td>' +
 		'<td>' + escapeHtml(item.endpoint || '-') + '</td>' +
         '<td><span class="badge ' + statusClass + '">' + escapeHtml(String(item.statusCode || '')) + '</span></td>' +
-        '<td>' + escapeHtml(tokens) + '</td>' +
-        '<td>' + escapeHtml(cache) + '</td>' +
+        '<td title="' + escapeAttr(tokensTitle) + '">' + escapeHtml(tokens) + (item.thinkingTokens ? '<div class="request-cell-meta">' + escapeHtml(t('requests.thinkingShort', item.thinkingTokens)) + '</div>' : '') + '</td>' +
+        '<td title="' + escapeAttr(cacheTitle) + '">' + escapeHtml(cache) + (cacheStatus ? '<div class="request-cell-meta">' + escapeHtml(cacheStatus) + '</div>' : '') + '</td>' +
         '<td title="' + escapeAttr(outcomeTitle) + '">' + escapeHtml(outcome) + '</td>' +
         '<td class="request-duration" title="' + escapeAttr(durationTitle) + '">' +
-          '<span class="request-duration-line"><span class="request-duration-label">' + escapeHtml(t('requests.upstreamActivity')) + '</span><strong>' + escapeHtml(upstreamActivityDuration) + '</strong></span>' +
-          '<span class="request-duration-line"><span class="request-duration-label">' + escapeHtml(t('requests.firstContent')) + '</span><strong>' + escapeHtml(firstContentDuration) + '</strong></span>' +
-          (item.toolAssemblyMs == null ? '' : '<span class="request-duration-line"><span class="request-duration-label">' + escapeHtml(t('requests.toolAssembly')) + '</span><strong>' + escapeHtml(toolAssemblyDuration) + '</strong></span>') +
-          '<span class="request-duration-line"><span class="request-duration-label">' + escapeHtml(t('requests.totalDuration')) + '</span><strong>' + escapeHtml(totalDuration) + '</strong></span>' +
+          durationLines +
         '</td>' +
         '<td class="request-error" title="' + escapeAttr(err) + '">' + escapeHtml(err) + '</td>' +
 		'<td class="request-detail-action">' + detailButton + '</td>' +
@@ -844,9 +893,45 @@
       return true;
     });
   }
+  function accountStatusRank(a) {
+    if (a.banStatus && a.banStatus !== 'ACTIVE') return 5;
+    if (!a.enabled) return 4;
+    if (!a.hasToken || (a.expiresAt && a.expiresAt < Date.now() / 1000)) return 3;
+    if ((a.errorRateEwma || 0) >= 0.5) return 2;
+    return 1;
+  }
+  function getSortedAccounts() {
+    const sorted = getFilteredAccounts().slice();
+    sorted.sort((a, b) => {
+      let diff = 0;
+      switch (accountSortMode) {
+        case 'email':
+          diff = String(a.email || '').localeCompare(String(b.email || ''));
+          break;
+        case 'usage':
+          diff = (Number(b.usagePercent) || 0) - (Number(a.usagePercent) || 0);
+          break;
+        case 'latency':
+          diff = (Number(a.latencyMsEwma) || Number.MAX_SAFE_INTEGER) - (Number(b.latencyMsEwma) || Number.MAX_SAFE_INTEGER);
+          break;
+        case 'failures':
+          diff = (Number(b.failureCount ?? b.errorCount) || 0) - (Number(a.failureCount ?? a.errorCount) || 0);
+          break;
+        case 'refresh':
+          diff = (Number(b.lastRefresh) || 0) - (Number(a.lastRefresh) || 0);
+          break;
+        default:
+          diff = accountStatusRank(a) - accountStatusRank(b);
+      }
+      if (diff !== 0) return diff;
+      return String(a.email || a.id || '').localeCompare(String(b.email || b.id || ''));
+    });
+    return sorted;
+  }
   function onFilterChange() {
     filterKeyword = $('filterSearch').value;
     filterStatus = $('filterStatusSelect').value;
+    accountPage = 1;
     renderAccounts();
   }
   function toggleSelectAll(checked) {
@@ -955,7 +1040,7 @@
   }
   function formatTime(ts) {
     if (!ts) return '-';
-    return new Date(ts * 1000).toLocaleString();
+    return new Date(ts * 1000).toLocaleString(currentLang === 'zh' ? 'zh-CN' : 'en-US');
   }
   function formatRequestDuration(value) {
     if (value === null || value === undefined || value === '') return '-';
@@ -982,15 +1067,104 @@
     });
   }
 
+  function compactAccountAction(action, id, icon, label, extraClass, extraAttrs) {
+    return '<button class="btn btn-icon btn-xs ' + (extraClass || 'btn-ghost') + '" type="button" data-action="' + action + '" data-id="' + escapeAttr(id) + '" ' + (extraAttrs || '') +
+      ' title="' + escapeAttr(label) + '" aria-label="' + escapeAttr(label) + '"><i class="fa-solid ' + icon + '" aria-hidden="true"></i></button>';
+  }
+
+  function renderCompactAccounts(items) {
+    const rows = items.map(a => {
+      const idAttr = escapeAttr(a.id);
+      const displayEmail = getDisplayEmail(a.email, a.id);
+      const isSelected = selectedAccounts.has(a.id);
+      const banned = a.banStatus && a.banStatus !== 'ACTIVE';
+      const usagePct = Math.max(0, (Number(a.usagePercent) || 0) * 100);
+      const successCount = Number(a.successCount ?? a.requestCount) || 0;
+      const failureCount = Number(a.failureCount ?? a.errorCount) || 0;
+      const latency = a.healthSamples > 0 ? formatRequestDuration(a.latencyMsEwma) : '-';
+      const errorRate = a.healthSamples > 0 ? ((Number(a.errorRateEwma) || 0) * 100).toFixed(1) + '%' : '-';
+      const affinityRate = a.dispatchCount > 0 ? ((Number(a.affinityHitRate) || 0) * 100).toFixed(0) + '%' : '-';
+      const usage = a.usageLimit > 0
+        ? (Number(a.usageCurrent) || 0).toFixed(1) + ' / ' + (Number(a.usageLimit) || 0).toFixed(0)
+        : '-';
+      const weight = a.weight >= 2 ? '<span class="badge badge-warning">' + escapeHtml(t('accounts.weightShort')) + ':' + a.weight + '</span>' : '';
+      const concurrency = a.maxConcurrency > 0 ? '<span class="badge badge-info">' + escapeHtml(t('accounts.concurrencyShort')) + ':' + a.maxConcurrency + '</span>' : '';
+      const actions = [
+        compactAccountAction('refresh', a.id, 'fa-arrows-rotate', t('accounts.refresh')),
+        compactAccountAction('detail', a.id, 'fa-circle-info', t('accounts.detail')),
+        compactAccountAction('test', a.id, 'fa-flask', t('accounts.test')),
+        compactAccountAction('copyJSON', a.id, 'fa-copy', t('accounts.copyJSON')),
+        !banned ? compactAccountAction('toggle', a.id, 'fa-power-off', a.enabled ? t('accounts.disable') : t('accounts.enable'), a.enabled ? 'btn-ghost' : 'btn-primary', 'data-enabled="' + (!a.enabled) + '"') : '',
+        a.authMethod === 'external_idp' ? compactAccountAction('switchProfile', a.id, 'fa-shuffle', t('kirosso.switchProfile')) : '',
+        compactAccountAction('delete', a.id, 'fa-trash-can', t('accounts.delete'), 'btn-ghost account-delete-action')
+      ].join('');
+
+      return '<tr class="account-compact-row' + (isSelected ? ' selected' : '') + '" data-id="' + idAttr + '">' +
+        '<td data-label=""><input type="checkbox" class="account-checkbox" ' + (isSelected ? 'checked' : '') + ' data-id="' + idAttr + '" aria-label="' + escapeAttr(t('accounts.selectAccount', displayEmail)) + '" /></td>' +
+        '<td data-label="' + escapeAttr(t('accounts.account')) + '"><div class="account-cell-content"><div class="account-compact-email">' + escapeHtml(displayEmail) + '</div><div class="account-compact-meta">' + getSubBadge(a.subscriptionType) + weight + concurrency + '<span class="badge badge-info">' + escapeHtml(formatAuthMethod(a.provider || a.authMethod)) + '</span></div></div></td>' +
+        '<td data-label="' + escapeAttr(t('accounts.status')) + '"><div class="account-compact-badges">' + getStatusBadge(a) + renderOverageBadge(a) + '</div></td>' +
+        '<td data-label="' + escapeAttr(t('accounts.mainQuota')) + '"><div class="account-cell-content"><strong>' + escapeHtml(usage) + '</strong><div class="account-cell-meta">' + (a.usageLimit > 0 ? usagePct.toFixed(1) + '%' : '-') + '</div></div></td>' +
+        '<td data-label="' + escapeAttr(t('accounts.health')) + '"><div class="account-cell-content"><strong>' + escapeHtml(latency) + '</strong><div class="account-cell-meta">' + escapeHtml(t('accounts.errorAffinity', errorRate, affinityRate)) + '</div></div></td>' +
+        '<td data-label="' + escapeAttr(t('accounts.outcomes')) + '"><div class="account-cell-content"><div><strong class="account-stat-value--success">' + escapeHtml(formatNum(successCount)) + '</strong> / <strong class="account-stat-value--danger">' + escapeHtml(formatNum(failureCount)) + '</strong></div><div class="account-cell-meta">' + escapeHtml(formatNum(a.totalTokens || 0)) + ' ' + escapeHtml(t('accounts.tokens')) + '</div></div></td>' +
+        '<td data-label="' + escapeAttr(t('accounts.expiry')) + '"><div class="account-cell-content"><strong>' + escapeHtml(formatTokenExpiry(a.expiresAt)) + '</strong><div class="account-cell-meta">' + escapeHtml(t('accounts.lastRefreshShort', formatTime(a.lastRefresh))) + '</div></div></td>' +
+        '<td class="account-compact-actions" data-label="' + escapeAttr(t('accounts.actions')) + '"><div class="account-action-buttons">' + actions + '</div></td>' +
+        '</tr>';
+    }).join('');
+
+    return '<div class="account-table-shell"><table class="account-table"><thead><tr>' +
+      '<th class="account-select-column"></th>' +
+      '<th>' + escapeHtml(t('accounts.account')) + '</th>' +
+      '<th>' + escapeHtml(t('accounts.status')) + '</th>' +
+      '<th>' + escapeHtml(t('accounts.mainQuota')) + '</th>' +
+      '<th>' + escapeHtml(t('accounts.health')) + '</th>' +
+      '<th>' + escapeHtml(t('accounts.outcomes')) + '</th>' +
+      '<th>' + escapeHtml(t('accounts.expiry')) + '</th>' +
+      '<th class="account-actions-column">' + escapeHtml(t('accounts.actions')) + '</th>' +
+      '</tr></thead><tbody>' + rows + '</tbody></table></div>';
+  }
+
+  function syncAccountListControls(total, start, end, totalPages) {
+    const summary = $('accountPageSummary');
+    if (summary) summary.textContent = total > 0 ? t('accounts.pageSummary', start + 1, end, total) : t('accounts.pageSummaryEmpty');
+    const previous = $('accountPagePrevious');
+    const next = $('accountPageNext');
+    if (previous) previous.disabled = accountPage <= 1;
+    if (next) next.disabled = accountPage >= totalPages;
+    qsa('[data-account-view]').forEach(btn => {
+      const active = btn.dataset.accountView === accountViewMode;
+      btn.classList.toggle('active', active);
+      btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+    });
+    if ($('accountSortSelect')) {
+      $('accountSortSelect').value = accountSortMode;
+      syncCustomSelect($('accountSortSelect'));
+    }
+    if ($('accountPageSizeSelect')) {
+      $('accountPageSizeSelect').value = String(accountPageSize);
+      syncCustomSelect($('accountPageSizeSelect'));
+    }
+  }
+
   function renderAccounts() {
     const container = $('accountsList');
     if (!container) return;
-    const filtered = getFilteredAccounts();
+    const filtered = getSortedAccounts();
+    const totalPages = Math.max(1, Math.ceil(filtered.length / accountPageSize));
+    accountPage = Math.min(Math.max(1, accountPage), totalPages);
+    const start = (accountPage - 1) * accountPageSize;
+    const end = Math.min(start + accountPageSize, filtered.length);
+    const pageItems = filtered.slice(start, end);
+    syncAccountListControls(filtered.length, start, end, totalPages);
     if (filtered.length === 0) {
       container.innerHTML = '<div class="empty-state">' + escapeHtml(t('accounts.empty')) + '</div>';
       return;
     }
-    container.innerHTML = filtered.map(a => {
+    if (accountViewMode === 'compact') {
+      container.innerHTML = renderCompactAccounts(pageItems);
+      updateBatchBar();
+      return;
+    }
+    container.innerHTML = pageItems.map(a => {
       const usagePct = (a.usagePercent || 0) * 100;
       const usageClass = usagePct > 90 ? 'critical' : usagePct > 70 ? 'high' : '';
       const trialPct = (a.trialUsagePercent || 0) * 100;
@@ -1067,6 +1241,7 @@
     }).join('');
     applyUsageBars(container);
     enhanceCustomSelects(container);
+    updateBatchBar();
   }
 
   function kiroProfileListHtml(profiles, current) {
@@ -1186,8 +1361,9 @@
   function flashCopySuccess(btn) {
     if (!btn) return;
     const html = btn.innerHTML, cls = btn.className;
+    const sizeClass = btn.classList.contains('btn-xs') ? 'btn-xs' : 'btn-sm';
     btn.disabled = true;
-    btn.className = 'btn btn-icon btn-sm btn-success';
+    btn.className = 'btn btn-icon ' + sizeClass + ' btn-success';
     btn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
     setTimeout(() => { btn.disabled = false; btn.className = cls; btn.innerHTML = html; }, 800);
   }
@@ -1707,6 +1883,7 @@
       loadLongToolConfig(),
       loadResponsesStorageConfig(),
       loadModelRegistryConfig(),
+      loadModelHealth(),
       loadHealthConfig(),
       loadThinkingConfig(),
       loadEndpointConfig(),
@@ -1981,7 +2158,9 @@
     const res = await api('/model-registry');
     const d = await res.json();
     $('modelNegativeCacheTTLSeconds').value = d.negativeCacheTtlSeconds || 3600;
-    $('modelRegistryJson').value = JSON.stringify(Array.isArray(d.models) ? d.models : [], null, 2);
+    const models = Array.isArray(d.models) ? d.models : [];
+    $('modelRegistryJson').value = JSON.stringify(models, null, 2);
+    if (!$('modelHealthModel').value.trim()) $('modelHealthModel').value = (models[0] && models[0].id) || 'claude-sonnet-4.6';
   }
   async function saveModelRegistryConfig() {
     const ttl = Math.round(Number($('modelNegativeCacheTTLSeconds').value) || 0);
@@ -2008,6 +2187,72 @@
     }
     toast(t('settings.modelRegistrySaved'), 'success');
     loadModelRegistryConfig();
+  }
+  async function loadModelHealth() {
+    const res = await api('/model-health');
+    const d = await res.json().catch(() => ({}));
+    renderModelHealth(Array.isArray(d.results) ? d.results : [], d.running === true);
+  }
+  function renderModelHealth(results, running) {
+    const el = $('modelHealthResults');
+    if (!el) return;
+    if (!results.length) {
+      el.innerHTML = '<div class="muted-text text-sm">' + escapeHtml(running ? t('settings.modelHealthRunning') : t('settings.modelHealthEmpty')) + '</div>';
+      return;
+    }
+    el.innerHTML = results.map(result => {
+      const status = result.status || 'unavailable';
+      const statusClass = status === 'healthy' ? 'badge-success' : status === 'degraded' ? 'badge-warning' : 'badge-error';
+      const capabilities = [
+        modelCapabilityText(t('settings.modelHealthText'), result.text),
+        modelCapabilityText(t('settings.modelHealthThinking'), result.thinking),
+        modelCapabilityText(t('settings.modelHealthTools'), result.tools)
+      ].filter(Boolean).join(' · ');
+      const errors = [result.text, result.thinking, result.tools].filter(item => item && item.error).map(item => item.error).join(' · ');
+      const advertised = result.advertised ? t('settings.modelHealthAdvertised') : t('settings.modelHealthNotAdvertised');
+      return '<div class="model-health-row" title="' + escapeAttr(errors) + '">' +
+        '<div class="model-health-model"><strong>' + escapeHtml(result.model || '-') + '</strong><div class="request-cell-meta">' + escapeHtml(result.kiroModelId || '-') + ' · ' + escapeHtml(advertised) + ' · ' + escapeHtml(formatTime(result.testedAt)) + '</div></div>' +
+        '<span class="badge ' + statusClass + '">' + escapeHtml(t('settings.modelHealthStatus.' + status)) + '</span>' +
+        '<div class="model-health-capabilities">' + escapeHtml(capabilities) + '</div>' +
+      '</div>';
+    }).join('');
+  }
+  function modelCapabilityText(label, capability) {
+    if (!capability || !capability.tested) return '';
+    const outcome = capability.supported ? t('common.success') : t('common.failed');
+    const latency = capability.latencyMs == null ? '' : ' ' + formatRequestDuration(capability.latencyMs);
+    return label + ': ' + outcome + latency;
+  }
+  async function testModelHealth() {
+    const model = $('modelHealthModel').value.trim();
+    const timeoutSeconds = Math.round(Number($('modelHealthTimeoutSeconds').value) || 0);
+    if (!model || timeoutSeconds < 10 || timeoutSeconds > 300) {
+      toast(t('settings.modelHealthInvalid'), 'warning');
+      return;
+    }
+    const btn = $('testModelHealthBtn');
+    btn.disabled = true;
+    btn.setAttribute('aria-busy', 'true');
+    try {
+      const res = await api('/model-health/test', {
+        method: 'POST',
+        body: JSON.stringify({
+          model,
+          testThinking: $('modelHealthThinking').checked,
+          testTools: $('modelHealthTools').checked,
+          timeoutSeconds
+        })
+      });
+      const d = await res.json().catch(() => ({}));
+      await loadModelHealth();
+      if (res.ok && d.success !== false) toast(t('settings.modelHealthCompleted'), 'success');
+      else toast((d.error || t('settings.modelHealthDegraded')), 'warning');
+    } catch (e) {
+      toast((e && e.message) || t('common.failed'), 'error');
+    } finally {
+      btn.disabled = false;
+      btn.removeAttribute('aria-busy');
+    }
   }
   async function loadHealthConfig() {
     const res = await api('/health-config');
@@ -2277,6 +2522,7 @@
     const res = await api('/prompt-cache');
     const d = await res.json();
     $('promptCacheEnabled').checked = d.enabled !== false;
+    $('promptCachePersistEnabled').checked = d.persistEnabled !== false;
     $('cacheNamespaceMode').value = d.namespaceMode === 'account_api_key' ? 'account_api_key' : 'account';
     const fallback = d.cacheReadEfficiency == null ? 0.87 : d.cacheReadEfficiency;
     $('cacheReadEfficiencyMin').value = Math.round(((d.cacheReadEfficiencyMin == null ? fallback : d.cacheReadEfficiencyMin) * 100));
@@ -2291,6 +2537,11 @@
     $('cacheStatHitRate').textContent = ((Number(stats.hitRate) || 0) * 100).toFixed(1) + '%';
     $('cacheStatReadTokens').textContent = formatNumber(stats.cacheReadTokens || 0);
     $('cacheStatCreationTokens').textContent = formatNumber(stats.cacheCreationTokens || 0);
+    $('cacheStatSkipped').textContent = formatNumber(stats.cacheSkipped || 0);
+    const missReasons = Object.entries(stats.missReasons || {}).sort((a, b) => b[1] - a[1]);
+    $('cacheStatMissReasons').textContent = missReasons.length
+      ? missReasons.slice(0, 3).map(([reason, count]) => t('requests.cacheReason.' + reason) + ' ' + formatNumber(count)).join(' · ')
+      : '-';
   }
   async function savePromptCacheConfig() {
     const efficiencyMinPct = Number($('cacheReadEfficiencyMin').value);
@@ -2316,6 +2567,7 @@
       method: 'POST',
       body: JSON.stringify({
         enabled: $('promptCacheEnabled').checked,
+        persistEnabled: $('promptCachePersistEnabled').checked,
         namespaceMode: $('cacheNamespaceMode').value,
         cacheReadEfficiencyMin: efficiencyMinPct / 100,
         cacheReadEfficiencyMax: efficiencyMaxPct / 100,
@@ -2331,6 +2583,7 @@
     }
     if (d.config) {
       $('promptCacheEnabled').checked = d.config.enabled !== false;
+      $('promptCachePersistEnabled').checked = d.config.persistEnabled !== false;
       $('cacheNamespaceMode').value = d.config.namespaceMode === 'account_api_key' ? 'account_api_key' : 'account';
       const fallback = d.config.cacheReadEfficiency == null ? 0.87 : d.config.cacheReadEfficiency;
       $('cacheReadEfficiencyMin').value = Math.round(((d.config.cacheReadEfficiencyMin == null ? fallback : d.config.cacheReadEfficiencyMin) * 100));
@@ -3756,11 +4009,41 @@
   }
   function closeUpdateModal() { closeDialog('updateModal'); }
 
-  // Tabs
+  // Navigation
+  function updateCurrentPageTitle() {
+    const title = $('currentPageTitle');
+    if (title) title.textContent = t('tabs.' + currentTab);
+  }
+
+  function switchSettingsGroup(group) {
+    if (!settingsGroups.includes(group)) group = 'access';
+    settingsGroup = group;
+    localStorage.setItem('kiro_settings_group', group);
+    qsa('.settings-nav-button').forEach(button => {
+      const active = button.dataset.settingsGroup === group;
+      button.classList.toggle('active', active);
+      button.setAttribute('aria-selected', String(active));
+      button.setAttribute('aria-current', active ? 'page' : 'false');
+      button.tabIndex = active ? 0 : -1;
+      if (active && window.innerWidth <= 960 && typeof button.scrollIntoView === 'function') {
+        button.scrollIntoView({ block: 'nearest', inline: 'center' });
+      }
+    });
+    qsa('.settings-card').forEach(card => {
+      card.classList.toggle('hidden', card.dataset.settingsGroup !== group);
+    });
+    closeAllCustomSelects();
+  }
+
   function switchTab(tab) {
+    const panel = $('tab' + tab.charAt(0).toUpperCase() + tab.slice(1));
+    if (!panel) return;
+    currentTab = tab;
     qsa('.tab').forEach(el => el.classList.toggle('active', el.dataset.tab === tab));
     qsa('.tab-content').forEach(c => c.classList.add('hidden'));
-    $('tab' + tab.charAt(0).toUpperCase() + tab.slice(1)).classList.remove('hidden');
+    panel.classList.remove('hidden');
+    updateCurrentPageTitle();
+    if (tab === 'settings') switchSettingsGroup(settingsGroup);
     if (requestRefreshTimer) {
       clearInterval(requestRefreshTimer);
       requestRefreshTimer = null;
@@ -3769,6 +4052,7 @@
       loadRequests();
       requestRefreshTimer = setInterval(loadRequests, 5000);
     }
+    window.scrollTo({ top: 0, behavior: 'auto' });
   }
 
   // Event wiring
@@ -3810,6 +4094,22 @@
     $('logoutBtn').addEventListener('click', logout);
 
     qsa('#tabBar .tab').forEach(tab => tab.addEventListener('click', () => switchTab(tab.dataset.tab)));
+    qsa('[data-navigate-tab]').forEach(button => button.addEventListener('click', () => switchTab(button.dataset.navigateTab)));
+    qsa('.settings-nav-button').forEach((button, index, buttons) => {
+      button.addEventListener('click', () => switchSettingsGroup(button.dataset.settingsGroup));
+      button.addEventListener('keydown', event => {
+        if (!['ArrowDown', 'ArrowUp', 'ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+        event.preventDefault();
+        let next = index;
+        if (event.key === 'Home') next = 0;
+        else if (event.key === 'End') next = buttons.length - 1;
+        else if (event.key === 'ArrowDown' || event.key === 'ArrowRight') next = (index + 1) % buttons.length;
+        else next = (index - 1 + buttons.length) % buttons.length;
+        buttons[next].focus();
+        switchSettingsGroup(buttons[next].dataset.settingsGroup);
+      });
+    });
+    switchSettingsGroup(settingsGroup);
 
     qsa('[data-copy]').forEach(btn => btn.addEventListener('click', async () => {
       const id = btn.dataset.copy;
@@ -3844,20 +4144,50 @@
 
     $('filterSearch').addEventListener('input', onFilterChange);
     $('filterStatusSelect').addEventListener('change', onFilterChange);
+    qsa('[data-account-view]').forEach(btn => btn.addEventListener('click', () => {
+      const mode = btn.dataset.accountView;
+      if (mode !== 'compact' && mode !== 'detailed') return;
+      accountViewMode = mode;
+      accountPage = 1;
+      localStorage.setItem('kiro_account_view', mode);
+      renderAccounts();
+    }));
+    $('accountSortSelect').addEventListener('change', e => {
+      accountSortMode = e.target.value || 'status';
+      accountPage = 1;
+      localStorage.setItem('kiro_account_sort', accountSortMode);
+      renderAccounts();
+    });
+    $('accountPageSizeSelect').addEventListener('change', e => {
+      const requested = Number(e.target.value);
+      accountPageSize = [25, 50, 100, 200].includes(requested) ? requested : 50;
+      accountPage = 1;
+      localStorage.setItem('kiro_account_page_size', String(accountPageSize));
+      renderAccounts();
+    });
+    $('accountPagePrevious').addEventListener('click', () => {
+      if (accountPage <= 1) return;
+      accountPage--;
+      renderAccounts();
+    });
+    $('accountPageNext').addEventListener('click', () => {
+      accountPage++;
+      renderAccounts();
+    });
 
     $('accountsList').addEventListener('click', e => {
       const cb = e.target.closest('.account-checkbox');
       if (cb) {
         toggleSelectAccount(cb.dataset.id);
-        const card = cb.closest('.account-card');
-        if (card) card.classList.toggle('selected', cb.checked);
+        const row = cb.closest('.account-card, .account-compact-row');
+        if (row) row.classList.toggle('selected', cb.checked);
         return;
       }
       const btn = e.target.closest('button[data-action]');
       if (!btn) return;
       const id = btn.dataset.id;
       const action = btn.dataset.action;
-      if (action === 'refresh') refreshAccount(id, btn.closest('.account-card'));
+      if (action === 'refresh') refreshAccount(id, btn.closest('.account-card, .account-compact-row'));
       else if (action === 'detail') showDetail(id);
       else if (action === 'copyJSON') copyAccountJSON(id, btn);
       else if (action === 'toggle') toggleAccount(id, btn.dataset.enabled === 'true');
@@ -3877,6 +4207,8 @@
     $('saveResponsesStorageBtn').addEventListener('click', saveResponsesStorageConfig);
     $('purgeResponsesStorageBtn').addEventListener('click', purgeResponsesStorage);
     $('saveModelRegistryBtn').addEventListener('click', saveModelRegistryConfig);
+    $('testModelHealthBtn').addEventListener('click', testModelHealth);
+    $('refreshModelHealthBtn').addEventListener('click', loadModelHealth);
     $('saveHealthBtn').addEventListener('click', saveHealthConfig);
     $('saveOverUsageBtn').addEventListener('click', saveOverUsageConfig);
     $('saveUpstreamProtectionBtn').addEventListener('click', saveUpstreamProtectionConfig);

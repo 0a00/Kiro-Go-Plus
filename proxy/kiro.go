@@ -228,6 +228,12 @@ type KiroPayload struct {
 	toolTruncationCount     int
 	toolRecoveryAttempts    int
 	toolRecoveryHintApplied bool
+	accountSelectionMs      int64
+	accountAttempts         int
+	routeAffinityHit        bool
+	requestTiming           *requestFirstContentTimer
+	promptCacheDiagnostic   promptCacheDiagnostic
+	hasCacheDiagnostic      bool
 	runtimeMu               sync.RWMutex
 	selectedEndpoint        string
 }
@@ -246,7 +252,84 @@ func (p *KiroPayload) beginStreamMetrics(startedAt time.Time) {
 	p.toolTruncationCount = 0
 	p.toolRecoveryAttempts = 0
 	p.toolRecoveryHintApplied = false
+	p.accountSelectionMs = 0
+	p.accountAttempts = 0
+	p.routeAffinityHit = false
+	p.promptCacheDiagnostic = promptCacheDiagnostic{}
+	p.hasCacheDiagnostic = false
 	p.streamMetricsMu.Unlock()
+}
+
+func (p *KiroPayload) recordAccountSelection(elapsed time.Duration, attempts int, affinityHit bool) {
+	if p == nil {
+		return
+	}
+	elapsedMs := elapsed.Milliseconds()
+	if elapsedMs < 0 {
+		elapsedMs = 0
+	}
+	p.streamMetricsMu.Lock()
+	p.accountSelectionMs += elapsedMs
+	if attempts > p.accountAttempts {
+		p.accountAttempts = attempts
+	}
+	if affinityHit {
+		p.routeAffinityHit = true
+	}
+	p.streamMetricsMu.Unlock()
+}
+
+func (p *KiroPayload) accountSelectionMetrics() (int64, int, bool) {
+	if p == nil {
+		return 0, 0, false
+	}
+	p.streamMetricsMu.Lock()
+	defer p.streamMetricsMu.Unlock()
+	return p.accountSelectionMs, p.accountAttempts, p.routeAffinityHit
+}
+
+func (p *KiroPayload) beginRequestTiming(startedAt time.Time) *requestFirstContentTimer {
+	if p == nil {
+		return newRequestFirstContentTimer(startedAt)
+	}
+	p.beginStreamMetrics(startedAt)
+	timer := newRequestFirstContentTimer(startedAt)
+	p.streamMetricsMu.Lock()
+	p.requestTiming = timer
+	p.streamMetricsMu.Unlock()
+	return timer
+}
+
+func (p *KiroPayload) requestTimingTracker() *requestFirstContentTimer {
+	if p == nil {
+		return nil
+	}
+	p.streamMetricsMu.Lock()
+	defer p.streamMetricsMu.Unlock()
+	return p.requestTiming
+}
+
+func (p *KiroPayload) setPromptCacheDiagnostic(diagnostic promptCacheDiagnostic) {
+	if p == nil {
+		return
+	}
+	p.streamMetricsMu.Lock()
+	p.promptCacheDiagnostic = diagnostic
+	p.hasCacheDiagnostic = true
+	p.streamMetricsMu.Unlock()
+}
+
+func (p *KiroPayload) applyPromptCacheDiagnostic(entry *requestLogEntry) {
+	if p == nil || entry == nil {
+		return
+	}
+	p.streamMetricsMu.Lock()
+	diagnostic := p.promptCacheDiagnostic
+	hasDiagnostic := p.hasCacheDiagnostic
+	p.streamMetricsMu.Unlock()
+	if hasDiagnostic {
+		diagnostic.Apply(entry)
+	}
 }
 
 func (p *KiroPayload) recordUpstreamActivity() {
@@ -438,7 +521,9 @@ type KiroTokenUsage struct {
 	CacheCreationInputTokens int
 	CacheCreation5mTokens    int
 	CacheCreation1hTokens    int
+	ThinkingTokens           int
 	HasCacheBreakdown        bool
+	HasThinkingBreakdown     bool
 	hasUncachedBreakdown     bool
 }
 
@@ -855,21 +940,20 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 
 		var streamIdleTimedOut atomic.Bool
 		idleTimeout := time.Duration(config.GetRetryConfig().StreamIdleTimeoutSeconds) * time.Second
-		idleReader := newStreamIdleReader(resp.Body, idleTimeout, func() {
-			streamIdleTimedOut.Store(true)
-			cancelRequest()
-		})
-		err = parseEventStream(idleReader, wrappedCallback)
-		idleReader.Stop()
-		resp.Body.Close()
-		stopAndRecordToolAssembly(payload, toolMonitor)
-		if firstTokenTimer != nil {
-			firstTokenTimer.Stop()
-		}
-		if actionableOutputTimer != nil {
-			actionableOutputTimer.Stop()
-		}
-		cancelRequest()
+		err = func() error {
+			defer stopAndRecordToolAssembly(payload, toolMonitor)
+			if firstTokenTimer != nil {
+				defer firstTokenTimer.Stop()
+			}
+			if actionableOutputTimer != nil {
+				defer actionableOutputTimer.Stop()
+			}
+			defer cancelRequest()
+			return parseAndCloseEventStream(resp.Body, idleTimeout, func() {
+				streamIdleTimedOut.Store(true)
+				cancelRequest()
+			}, wrappedCallback)
+		}()
 		if err == nil && meaningfulGate.hasInvalidCommittedToolUse() {
 			err = &EventStreamError{
 				Kind:    EventStreamInvalidPayload,
@@ -1135,6 +1219,17 @@ func parseEventStream(body io.Reader, callback *KiroStreamCallback) error {
 	return nil
 }
 
+// parseAndCloseEventStream guarantees that the upstream body and idle timer are
+// released even if a downstream streaming callback panics. The HTTP server may
+// recover that panic, so leaking the body here would otherwise retain sockets
+// and file descriptors across repeated failed requests.
+func parseAndCloseEventStream(body io.ReadCloser, idleTimeout time.Duration, onIdle func(), callback *KiroStreamCallback) error {
+	idleReader := newStreamIdleReader(body, idleTimeout, onIdle)
+	defer idleReader.Stop()
+	defer body.Close()
+	return parseEventStream(idleReader, callback)
+}
+
 func updateTokensFromEvent(event map[string]interface{}, currentInputTokens, currentOutputTokens int) (int, int) {
 	usage := updateTokenUsageFromEvent(event, KiroTokenUsage{
 		InputTokens:  currentInputTokens,
@@ -1157,6 +1252,22 @@ func updateTokenUsageFromEvent(event map[string]interface{}, current KiroTokenUs
 			"output_tokens", "completion_tokens", "total_output_tokens",
 		); ok {
 			current.OutputTokens = v
+		}
+		if v, ok := readTokenNumber(usage,
+			"thinkingTokens", "reasoningTokens", "thinking_tokens", "reasoning_tokens",
+		); ok {
+			current.ThinkingTokens = v
+			current.HasThinkingBreakdown = true
+		}
+		for _, key := range []string{"outputTokenDetails", "outputTokensDetails", "completionTokenDetails", "completionTokensDetails", "output_token_details", "output_tokens_details", "completion_token_details", "completion_tokens_details"} {
+			details, ok := usage[key].(map[string]interface{})
+			if !ok {
+				continue
+			}
+			if v, found := readTokenNumber(details, "thinkingTokens", "reasoningTokens", "thinking_tokens", "reasoning_tokens"); found {
+				current.ThinkingTokens = v
+				current.HasThinkingBreakdown = true
+			}
 		}
 
 		inputValue, hasExplicitInput := readTokenNumber(usage,

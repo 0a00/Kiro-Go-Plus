@@ -14,6 +14,7 @@ import (
 const tokenRefreshSkewSeconds int64 = 120
 const accountStatsSaveDelay = 750 * time.Millisecond
 const maxAccountWeight = 100
+const accountHealthEWMAAlpha = 0.2
 
 type accountCooldownKind string
 
@@ -22,6 +23,26 @@ const (
 	accountCooldownQuota     accountCooldownKind = "quota"
 	accountCooldownDisabled  accountCooldownKind = "disabled"
 )
+
+type accountHealthState struct {
+	LatencyMsEWMA float64
+	ErrorRateEWMA float64
+	Samples       uint64
+	Dispatches    uint64
+	AffinityHits  uint64
+	LastOutcomeAt time.Time
+}
+
+type AccountHealthSnapshot struct {
+	AccountID       string  `json:"accountId"`
+	LatencyMsEWMA   float64 `json:"latencyMsEwma"`
+	ErrorRateEWMA   float64 `json:"errorRateEwma"`
+	Samples         uint64  `json:"samples"`
+	Dispatches      uint64  `json:"dispatches"`
+	AffinityHits    uint64  `json:"affinityHits"`
+	AffinityHitRate float64 `json:"affinityHitRate"`
+	LastOutcomeAt   int64   `json:"lastOutcomeAt"`
+}
 
 // AccountPool 账号池
 type AccountPool struct {
@@ -41,6 +62,7 @@ type AccountPool struct {
 	affinity         map[string]routeAffinityEntry
 	modelNegative    map[modelAvailabilityKey]time.Time
 	lastSuccess      map[string]time.Time
+	healthStats      map[string]accountHealthState
 	refreshFailures  map[string]time.Time
 	refreshCursor    int
 	stateSaveMu      sync.Mutex
@@ -77,6 +99,7 @@ func GetPool() *AccountPool {
 			affinity:         make(map[string]routeAffinityEntry),
 			modelNegative:    make(map[modelAvailabilityKey]time.Time),
 			lastSuccess:      make(map[string]time.Time),
+			healthStats:      make(map[string]accountHealthState),
 			refreshFailures:  make(map[string]time.Time),
 			dirtyStats:       make(map[string]struct{}),
 			configGeneration: config.GetGeneration(),
@@ -609,6 +632,80 @@ func (p *AccountPool) RecordError(id string, isQuotaError bool) {
 	if updated {
 		p.scheduleAccountStatsSave()
 	}
+}
+
+// RecordAccountOutcome updates live latency and error EWMAs for diagnostics.
+// These values intentionally do not influence account selection.
+func (p *AccountPool) RecordAccountOutcome(id string, latency time.Duration, success bool) {
+	if p == nil || strings.TrimSpace(id) == "" {
+		return
+	}
+	latencyMs := float64(latency.Microseconds()) / 1000
+	if latencyMs < 0 {
+		latencyMs = 0
+	}
+	errorSample := 1.0
+	if success {
+		errorSample = 0
+	}
+	p.mu.Lock()
+	if p.healthStats == nil {
+		p.healthStats = make(map[string]accountHealthState)
+	}
+	state := p.healthStats[id]
+	if state.Samples == 0 {
+		state.LatencyMsEWMA = latencyMs
+		state.ErrorRateEWMA = errorSample
+	} else {
+		state.LatencyMsEWMA = accountHealthEWMAAlpha*latencyMs + (1-accountHealthEWMAAlpha)*state.LatencyMsEWMA
+		state.ErrorRateEWMA = accountHealthEWMAAlpha*errorSample + (1-accountHealthEWMAAlpha)*state.ErrorRateEWMA
+	}
+	state.Samples++
+	state.LastOutcomeAt = time.Now()
+	p.healthStats[id] = state
+	p.mu.Unlock()
+}
+
+func (p *AccountPool) recordDispatchLocked(id string, affinityHit bool) {
+	if id == "" {
+		return
+	}
+	if p.healthStats == nil {
+		p.healthStats = make(map[string]accountHealthState)
+	}
+	state := p.healthStats[id]
+	state.Dispatches++
+	if affinityHit {
+		state.AffinityHits++
+	}
+	p.healthStats[id] = state
+}
+
+func (p *AccountPool) AccountHealthSnapshots() map[string]AccountHealthSnapshot {
+	if p == nil {
+		return map[string]AccountHealthSnapshot{}
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	result := make(map[string]AccountHealthSnapshot, len(p.healthStats))
+	for id, state := range p.healthStats {
+		snapshot := AccountHealthSnapshot{
+			AccountID:     id,
+			LatencyMsEWMA: state.LatencyMsEWMA,
+			ErrorRateEWMA: state.ErrorRateEWMA,
+			Samples:       state.Samples,
+			Dispatches:    state.Dispatches,
+			AffinityHits:  state.AffinityHits,
+		}
+		if !state.LastOutcomeAt.IsZero() {
+			snapshot.LastOutcomeAt = state.LastOutcomeAt.Unix()
+		}
+		if state.Dispatches > 0 {
+			snapshot.AffinityHitRate = float64(state.AffinityHits) / float64(state.Dispatches)
+		}
+		result[id] = snapshot
+	}
+	return result
 }
 
 // RecordModelUnavailable temporarily excludes one account only for the rejected model.

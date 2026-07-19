@@ -181,6 +181,17 @@ func TestOpenAIToKiroAssistantToolCallsDoNotInjectPlaceholder(t *testing.T) {
 	}
 }
 
+func TestDecodeOpenAIToolArgumentsPreservesMalformedJSON(t *testing.T) {
+	const raw = `{"path":`
+	got := decodeOpenAIToolArguments(raw)
+	if got["_raw_arguments"] != raw {
+		t.Fatalf("malformed arguments were not preserved: %+v", got)
+	}
+	if empty := decodeOpenAIToolArguments("  "); len(empty) != 0 {
+		t.Fatalf("blank arguments should remain an empty object: %+v", empty)
+	}
+}
+
 func TestOpenAIConversationIDStableFromAnchor(t *testing.T) {
 	baseMessages := []OpenAIMessage{
 		{Role: "system", Content: "You are helpful"},
@@ -770,5 +781,33 @@ func TestOpenAIToolResultImageCarriedWhenFollowedByUser(t *testing.T) {
 	cur := payload.ConversationState.CurrentMessage.UserInputMessage
 	if len(cur.Images) != 0 {
 		t.Fatalf("tool image should not leak into a later user message, got %d on current", len(cur.Images))
+	}
+}
+
+func TestOpenAIUsageIncludesCacheAndReasoningDetails(t *testing.T) {
+	usage := buildOpenAIUsageMap(100, 40, 15, promptCacheUsage{
+		CacheReadInputTokens:     60,
+		CacheCreationInputTokens: 20,
+	})
+	promptDetails, ok := usage["prompt_tokens_details"].(map[string]int)
+	if !ok || promptDetails["cached_tokens"] != 60 || promptDetails["cache_creation_tokens"] != 20 {
+		t.Fatalf("unexpected prompt token details: %#v", usage["prompt_tokens_details"])
+	}
+	completionDetails, ok := usage["completion_tokens_details"].(map[string]int)
+	if !ok || completionDetails["reasoning_tokens"] != 15 {
+		t.Fatalf("unexpected completion token details: %#v", usage["completion_tokens_details"])
+	}
+}
+
+func TestResponsesUsageIncludesTokenDetails(t *testing.T) {
+	usage := buildResponsesUsage(120, 50, 18, promptCacheUsage{
+		CacheReadInputTokens:     70,
+		CacheCreationInputTokens: 10,
+	})
+	if usage.InputTokensDetails == nil || usage.InputTokensDetails.CachedTokens != 70 || usage.InputTokensDetails.CacheCreationTokens != 10 {
+		t.Fatalf("unexpected Responses input details: %+v", usage)
+	}
+	if usage.OutputTokensDetails == nil || usage.OutputTokensDetails.ReasoningTokens != 18 {
+		t.Fatalf("unexpected Responses output details: %+v", usage)
 	}
 }

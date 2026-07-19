@@ -186,15 +186,14 @@ func (h *Handler) handleResponsesNonStream(
 	req *ResponsesRequest, storedInput json.RawMessage, storeResponse bool,
 ) {
 	startedAt := time.Now()
-	payload.beginStreamMetrics(startedAt)
-	firstContent := newRequestFirstContentTimer(startedAt)
+	firstContent := payload.beginRequestTiming(startedAt)
 	attempts := h.newAccountAttemptController(payload.requestContext)
 	excluded := attempts.excluded
 	var lastErr error
 	var busyErr error
 
 	for {
-		account, guard, busy := h.acquireNextAccountForRequest(attempts, model, routeKey)
+		account, guard, busy := h.acquireNextAccountForRequest(attempts, model, routeKey, payload)
 		if busy != nil {
 			busyErr = busy
 			break
@@ -221,11 +220,12 @@ func (h *Handler) handleResponsesNonStream(
 		var inputTokens, outputTokens int
 		var credits float64
 		var realInputTokens int
+		var upstreamUsage KiroTokenUsage
 		var truncated bool
 
 		callback := &KiroStreamCallback{
 			OnText: func(text string, isThinking bool) {
-				firstContent.MarkText(text)
+				firstContent.MarkOutput(text, isThinking)
 				if isThinking {
 					reasoningContent += text
 				} else {
@@ -233,10 +233,11 @@ func (h *Handler) handleResponsesNonStream(
 				}
 			},
 			OnToolUse: func(tu KiroToolUse) {
-				firstContent.Mark()
+				firstContent.MarkToolOutput()
 				toolUses = append(toolUses, tu)
 			},
 			OnComplete:  func(inTok, outTok int) { inputTokens = inTok; outputTokens = outTok },
+			OnUsage:     func(usage KiroTokenUsage) { upstreamUsage = usage },
 			OnTruncated: func(string) { truncated = true },
 			OnCredits:   func(c float64) { credits = c },
 			OnContextUsage: func(pct float64) {
@@ -244,7 +245,7 @@ func (h *Handler) handleResponsesNonStream(
 			},
 		}
 
-		err := CallKiroAPI(account, payload, callback)
+		err := h.callKiroAPIWithHealth(account, payload, callback)
 		if err == nil {
 			h.pool.RecordUpstreamSuccess(account.ID, account.ProfileArn, model)
 		}
@@ -269,28 +270,43 @@ func (h *Handler) handleResponsesNonStream(
 		} else if inputTokens <= 0 {
 			inputTokens = estimatedInputTokens
 		}
+		cacheUsage, inputTokens := resolvePromptCacheUsage(promptCacheUsage{}, upstreamUsage, inputTokens, nil)
+		cacheDiagnostic := finalizePromptCacheDiagnostic(promptCacheDiagnostic{Status: "skipped", Reason: "no_cache_breakpoint", Source: "local"}, upstreamUsage, cacheUsage, inputTokens)
+		payload.setPromptCacheDiagnostic(cacheDiagnostic)
+		thinkingTokens := upstreamUsage.ThinkingTokens
+		if thinkingTokens <= 0 {
+			thinkingTokens = estimateApproxTokens(reasoningContent)
+		}
 		outputTokens = estimateOpenAIOutputTokens(finalContent, reasoningContent, toolUses)
 
 		h.recordSuccessForApiKey(payload.requestContext, apiKeyID, inputTokens, outputTokens, credits)
 		h.pool.RecordSuccess(account.ID)
 		h.pool.ClearModelUnavailable(account.ID, model)
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
-		h.recordRequestLogForPayload(payload, requestLogEntry{
-			Timestamp:      time.Now().Unix(),
-			Protocol:       "openai.responses",
-			Model:          model,
-			AccountID:      account.ID,
-			AccountEmail:   account.Email,
-			Status:         "success",
-			StatusCode:     200,
-			FirstContentMs: firstContent.Value(),
-			DurationMs:     requestDurationMs(startedAt),
-			InputTokens:    inputTokens,
-			OutputTokens:   outputTokens,
-			Credits:        credits,
-		})
+		entry := requestLogEntry{
+			Timestamp:                time.Now().Unix(),
+			Protocol:                 "openai.responses",
+			Model:                    model,
+			AccountID:                account.ID,
+			AccountEmail:             account.Email,
+			Status:                   "success",
+			StatusCode:               200,
+			FirstContentMs:           firstContent.Value(),
+			DurationMs:               requestDurationMs(startedAt),
+			InputTokens:              inputTokens,
+			OutputTokens:             outputTokens,
+			ThinkingTokens:           thinkingTokens,
+			CacheReadInputTokens:     cacheUsage.CacheReadInputTokens,
+			CacheCreationInputTokens: cacheUsage.CacheCreationInputTokens,
+			VisibleOutputChars:       outputCharCount(finalContent),
+			ThinkingOutputChars:      outputCharCount(reasoningContent),
+			ToolUseCount:             len(toolUses),
+			Credits:                  credits,
+		}
+		entry.DurationMs = requestDurationMs(startedAt)
+		h.recordRequestLogForPayload(payload, entry)
 
-		respObj := buildResponsesObject(respID, model, finalContent, reasoningContent, toolUses, inputTokens, outputTokens, req)
+		respObj := buildResponsesObject(respID, model, finalContent, reasoningContent, toolUses, inputTokens, outputTokens, thinkingTokens, cacheUsage, req)
 		if truncated {
 			markResponseIncomplete(respObj)
 		}
@@ -353,7 +369,7 @@ func (h *Handler) handleResponsesNonStream(
 
 func buildResponsesObject(
 	id, model, content, reasoning string, toolUses []KiroToolUse,
-	inputTokens, outputTokens int, req *ResponsesRequest,
+	inputTokens, outputTokens, thinkingTokens int, cacheUsage promptCacheUsage, req *ResponsesRequest,
 ) *ResponsesObject {
 	output := make([]ResponseOutputItem, 0, 2+len(toolUses))
 
@@ -414,7 +430,7 @@ func buildResponsesObject(
 		Status:             "completed",
 		Model:              model,
 		Output:             output,
-		Usage:              ResponsesUsage{InputTokens: inputTokens, OutputTokens: outputTokens, TotalTokens: inputTokens + outputTokens},
+		Usage:              buildResponsesUsage(inputTokens, outputTokens, thinkingTokens, cacheUsage),
 		PreviousResponseID: req.PreviousResponseID,
 		Metadata:           req.Metadata,
 	}
@@ -434,8 +450,7 @@ func (h *Handler) handleResponsesStream(
 	req *ResponsesRequest, storedInput json.RawMessage, storeResponse bool,
 ) {
 	startedAt := time.Now()
-	payload.beginStreamMetrics(startedAt)
-	firstContent := newRequestFirstContentTimer(startedAt)
+	firstContent := payload.beginRequestTiming(startedAt)
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -451,6 +466,7 @@ func (h *Handler) handleResponsesStream(
 		if err != nil {
 			return
 		}
+		firstContent.MarkSSEEvent(false)
 		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", eventName, string(data))
 		flusher.Flush()
 	}
@@ -483,7 +499,7 @@ func (h *Handler) handleResponsesStream(
 	responseStarted := false
 
 	for {
-		account, guard, busy := h.acquireNextAccountForRequest(attempts, model, routeKey)
+		account, guard, busy := h.acquireNextAccountForRequest(attempts, model, routeKey, payload)
 		if busy != nil {
 			busyErr = busy
 			break
@@ -513,6 +529,7 @@ func (h *Handler) handleResponsesStream(
 			outputTokens    int
 			credits         float64
 			realInputTokens int
+			upstreamUsage   KiroTokenUsage
 			truncated       bool
 		)
 
@@ -620,7 +637,7 @@ func (h *Handler) handleResponsesStream(
 
 		callback := &KiroStreamCallback{
 			OnText: func(text string, isThinking bool) {
-				firstContent.MarkText(text)
+				firstContent.MarkOutput(text, isThinking)
 				if text == "" {
 					return
 				}
@@ -651,7 +668,7 @@ func (h *Handler) handleResponsesStream(
 				responseStarted = true
 			},
 			OnToolUse: func(tu KiroToolUse) {
-				firstContent.Mark()
+				firstContent.MarkToolOutput()
 				finishReasoning()
 				if messageStarted {
 					send("response.content_part.done", map[string]interface{}{
@@ -719,6 +736,7 @@ func (h *Handler) handleResponsesStream(
 				responseStarted = true
 			},
 			OnComplete:  func(inTok, outTok int) { inputTokens = inTok; outputTokens = outTok },
+			OnUsage:     func(usage KiroTokenUsage) { upstreamUsage = usage },
 			OnTruncated: func(string) { truncated = true },
 			OnCredits:   func(c float64) { credits = c },
 			OnContextUsage: func(pct float64) {
@@ -726,7 +744,7 @@ func (h *Handler) handleResponsesStream(
 			},
 		}
 
-		err := CallKiroAPI(account, payload, callback)
+		err := h.callKiroAPIWithHealth(account, payload, callback)
 		if err == nil {
 			h.pool.RecordUpstreamSuccess(account.ID, account.ProfileArn, model)
 		}
@@ -809,28 +827,41 @@ func (h *Handler) handleResponsesStream(
 		} else if inputTokens <= 0 {
 			inputTokens = estimatedInputTokens
 		}
+		cacheUsage, inputTokens := resolvePromptCacheUsage(promptCacheUsage{}, upstreamUsage, inputTokens, nil)
+		cacheDiagnostic := finalizePromptCacheDiagnostic(promptCacheDiagnostic{Status: "skipped", Reason: "no_cache_breakpoint", Source: "local"}, upstreamUsage, cacheUsage, inputTokens)
+		payload.setPromptCacheDiagnostic(cacheDiagnostic)
+		thinkingTokens := upstreamUsage.ThinkingTokens
+		if thinkingTokens <= 0 {
+			thinkingTokens = estimateApproxTokens(reasoning)
+		}
 		outputTokens = estimateOpenAIOutputTokens(finalContent, reasoning, toolUses)
 
 		h.recordSuccessForApiKey(payload.requestContext, apiKeyID, inputTokens, outputTokens, credits)
 		h.pool.RecordSuccess(account.ID)
 		h.pool.ClearModelUnavailable(account.ID, model)
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
-		h.recordRequestLogForPayload(payload, requestLogEntry{
-			Timestamp:      time.Now().Unix(),
-			Protocol:       "openai.responses.stream",
-			Model:          model,
-			AccountID:      account.ID,
-			AccountEmail:   account.Email,
-			Status:         "success",
-			StatusCode:     200,
-			FirstContentMs: firstContent.Value(),
-			DurationMs:     requestDurationMs(startedAt),
-			InputTokens:    inputTokens,
-			OutputTokens:   outputTokens,
-			Credits:        credits,
-		})
+		entry := requestLogEntry{
+			Timestamp:                time.Now().Unix(),
+			Protocol:                 "openai.responses.stream",
+			Model:                    model,
+			AccountID:                account.ID,
+			AccountEmail:             account.Email,
+			Status:                   "success",
+			StatusCode:               200,
+			FirstContentMs:           firstContent.Value(),
+			DurationMs:               requestDurationMs(startedAt),
+			InputTokens:              inputTokens,
+			OutputTokens:             outputTokens,
+			ThinkingTokens:           thinkingTokens,
+			CacheReadInputTokens:     cacheUsage.CacheReadInputTokens,
+			CacheCreationInputTokens: cacheUsage.CacheCreationInputTokens,
+			VisibleOutputChars:       outputCharCount(finalContent),
+			ThinkingOutputChars:      outputCharCount(reasoning),
+			ToolUseCount:             len(toolUses),
+			Credits:                  credits,
+		}
 
-		respObj := buildResponsesObject(respID, model, finalContent, reasoning, toolUses, inputTokens, outputTokens, req)
+		respObj := buildResponsesObject(respID, model, finalContent, reasoning, toolUses, inputTokens, outputTokens, thinkingTokens, cacheUsage, req)
 		if truncated {
 			markResponseIncomplete(respObj)
 		}
@@ -853,8 +884,11 @@ func (h *Handler) handleResponsesStream(
 			"type":     completionEvent,
 			"response": respObj,
 		})
+		firstContent.MarkSSEEvent(false)
 		fmt.Fprintf(w, "data: [DONE]\n\n")
 		flusher.Flush()
+		entry.DurationMs = requestDurationMs(startedAt)
+		h.recordRequestLogForPayload(payload, entry)
 		return
 	}
 
@@ -865,7 +899,7 @@ func (h *Handler) handleResponsesStream(
 	if lastErr == nil {
 		if busyErr != nil {
 			h.recordFailure()
-			h.recordRequestLogForPayload(payload, requestLogEntry{
+			entry := requestLogEntry{
 				Timestamp:      time.Now().Unix(),
 				Protocol:       "openai.responses.stream",
 				Model:          model,
@@ -874,7 +908,7 @@ func (h *Handler) handleResponsesStream(
 				FirstContentMs: firstContent.Value(),
 				DurationMs:     requestDurationMs(startedAt),
 				Error:          busyErr.Error(),
-			})
+			}
 			h.recordDiagnosticFailureForPayload("openai.responses.stream", model, nil, 429, busyErr, payload)
 			send("response.failed", map[string]interface{}{
 				"type": "response.failed",
@@ -887,6 +921,8 @@ func (h *Handler) handleResponsesStream(
 					},
 				},
 			})
+			entry.DurationMs = requestDurationMs(startedAt)
+			h.recordRequestLogForPayload(payload, entry)
 			return
 		}
 		send("response.failed", map[string]interface{}{
@@ -904,7 +940,7 @@ func (h *Handler) handleResponsesStream(
 	}
 	mapped := mapDownstreamError(lastErr)
 	h.recordFailure()
-	h.recordRequestLogForPayload(payload, requestLogEntry{
+	entry := requestLogEntry{
 		Timestamp:      time.Now().Unix(),
 		Protocol:       "openai.responses.stream",
 		Model:          model,
@@ -913,7 +949,7 @@ func (h *Handler) handleResponsesStream(
 		FirstContentMs: firstContent.Value(),
 		DurationMs:     requestDurationMs(startedAt),
 		Error:          lastErr.Error(),
-	})
+	}
 	h.recordDiagnosticFailureForPayload("openai.responses.stream", model, nil, mapped.Status, lastErr, payload)
 	send("response.failed", map[string]interface{}{
 		"type": "response.failed",
@@ -926,4 +962,6 @@ func (h *Handler) handleResponsesStream(
 			},
 		},
 	})
+	entry.DurationMs = requestDurationMs(startedAt)
+	h.recordRequestLogForPayload(payload, entry)
 }

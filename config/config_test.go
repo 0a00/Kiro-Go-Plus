@@ -410,8 +410,8 @@ func TestPromptCacheDefaultsForLegacyConfig(t *testing.T) {
 	}
 
 	got := GetPromptCacheConfig()
-	if !got.Enabled || got.NamespaceMode != PromptCacheNamespaceAccount {
-		t.Fatalf("expected legacy cache policy enabled/account, got enabled=%v namespace=%q", got.Enabled, got.NamespaceMode)
+	if !got.Enabled || !got.PersistEnabled || got.NamespaceMode != PromptCacheNamespaceAccount {
+		t.Fatalf("expected legacy cache policy enabled/persisted/account, got enabled=%v persisted=%v namespace=%q", got.Enabled, got.PersistEnabled, got.NamespaceMode)
 	}
 	if got.CacheReadEfficiency != 0.87 {
 		t.Fatalf("expected default cacheReadEfficiency 0.87, got %v", got.CacheReadEfficiency)

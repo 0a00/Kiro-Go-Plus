@@ -404,6 +404,7 @@ func TestApiPromptCacheConfigUpdatesRuntimeTracker(t *testing.T) {
 	h := &Handler{promptCache: newPromptCacheTrackerWithSettings(time.Hour, 1)}
 	req := httptest.NewRequest(http.MethodPost, "/prompt-cache", strings.NewReader(`{
 		"enabled": false,
+		"persistEnabled": false,
 		"namespaceMode": "account_api_key",
 		"cacheReadEfficiencyMin": 0.5,
 		"cacheReadEfficiencyMax": 0.6,
@@ -419,8 +420,8 @@ func TestApiPromptCacheConfigUpdatesRuntimeTracker(t *testing.T) {
 		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
 	}
 	got := config.GetPromptCacheConfig()
-	if got.Enabled || got.NamespaceMode != config.PromptCacheNamespaceAccountAPIKey {
-		t.Fatalf("expected persisted disabled/account_api_key policy, got enabled=%v namespace=%q", got.Enabled, got.NamespaceMode)
+	if got.Enabled || got.PersistEnabled || got.NamespaceMode != config.PromptCacheNamespaceAccountAPIKey {
+		t.Fatalf("expected persisted disabled/non-persistent/account_api_key policy, got enabled=%v persisted=%v namespace=%q", got.Enabled, got.PersistEnabled, got.NamespaceMode)
 	}
 	if got.CacheReadEfficiencyMin != 0.5 || got.CacheReadEfficiencyMax != 0.6 {
 		t.Fatalf("expected persisted cache efficiency range 0.5-0.6, got %v-%v", got.CacheReadEfficiencyMin, got.CacheReadEfficiencyMax)
@@ -1016,6 +1017,9 @@ func TestClaudeLiveToolStreamEmitsArgumentDeltasBeforeCompletion(t *testing.T) {
 	if entries[0].ToolAssemblyMs == nil || *entries[0].ToolAssemblyMs < 30 {
 		t.Fatalf("tool assembly duration was not captured: %+v", entries[0])
 	}
+	if entries[0].FirstSSEEventMs == nil || entries[0].FirstToolOutputMs == nil || entries[0].MaxStreamGapMs == nil || *entries[0].MaxStreamGapMs < 30 {
+		t.Fatalf("split SSE/tool timing was not captured: %+v", entries[0])
+	}
 }
 
 func TestClaudeLiveThinkingDoesNotRetryAfterDownstreamCommit(t *testing.T) {
@@ -1277,6 +1281,9 @@ func TestClaudePlainStreamEmitsIndependentHeartbeatBeforeContent(t *testing.T) {
 	entries := h.requestLog.list(1)
 	if len(entries) != 1 || entries[0].FirstContentMs == nil || *entries[0].FirstContentMs < 10 {
 		t.Fatalf("heartbeat was counted as first content: %+v", entries)
+	}
+	if entries[0].FirstSSEEventMs == nil || entries[0].HeartbeatCount < 1 || entries[0].MaxStreamGapMs == nil {
+		t.Fatalf("heartbeat stream metrics were not captured: %+v", entries[0])
 	}
 }
 

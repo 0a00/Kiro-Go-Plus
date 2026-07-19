@@ -127,7 +127,15 @@ func (c *accountAttemptController) stopErr() error {
 	return nil
 }
 
-func (h *Handler) acquireNextAccountForRequest(controller *accountAttemptController, model, routeKey string) (*config.Account, *accountpool.UpstreamRequestGuard, *accountpool.UpstreamBusyError) {
+func (h *Handler) acquireNextAccountForRequest(controller *accountAttemptController, model, routeKey string, payloads ...*KiroPayload) (account *config.Account, guard *accountpool.UpstreamRequestGuard, busyResult *accountpool.UpstreamBusyError) {
+	startedAt := time.Now()
+	defer func() {
+		if len(payloads) == 0 || payloads[0] == nil {
+			return
+		}
+		affinityHit := guard != nil && guard.AffinityHit()
+		payloads[0].recordAccountSelection(time.Since(startedAt), controller.attempts, affinityHit)
+	}()
 	for controller.next() {
 		account, guard, busy := h.acquireAccountForModel(model, routeKey, controller.excluded)
 		if account != nil {
@@ -331,4 +339,13 @@ func (h *Handler) acquireAccountForModel(model, routeKey string, excluded map[st
 		return nil, nil, busy
 	}
 	return nil, nil, &accountpool.UpstreamBusyError{Model: model, RetryAfter: time.Second, Description: err.Error()}
+}
+
+func (h *Handler) callKiroAPIWithHealth(account *config.Account, payload *KiroPayload, callback *KiroStreamCallback) error {
+	startedAt := time.Now()
+	err := CallKiroAPI(account, payload, callback)
+	if h != nil && h.pool != nil && account != nil {
+		h.pool.RecordAccountOutcome(account.ID, time.Since(startedAt), err == nil)
+	}
+	return err
 }

@@ -916,6 +916,9 @@ func TestAcquireForModelRouteAffinityPrefersRememberedAccount(t *testing.T) {
 	if err != nil || first == nil || guard == nil {
 		t.Fatalf("expected first acquire, first=%#v guard=%#v err=%v", first, guard, err)
 	}
+	if guard.AffinityHit() {
+		t.Fatal("first dispatch must not report an affinity hit")
+	}
 	guard.Release()
 
 	second, guard2, err2 := p.AcquireForModel("claude-sonnet-4.5", "conversation-1", nil)
@@ -925,6 +928,32 @@ func TestAcquireForModelRouteAffinityPrefersRememberedAccount(t *testing.T) {
 	defer guard2.Release()
 	if second.ID != first.ID {
 		t.Fatalf("expected route affinity to keep account %q, got %q", first.ID, second.ID)
+	}
+	if !guard2.AffinityHit() {
+		t.Fatal("remembered route did not report an affinity hit")
+	}
+	health := p.AccountHealthSnapshots()[first.ID]
+	if health.Dispatches != 2 || health.AffinityHits != 1 || health.AffinityHitRate != 0.5 {
+		t.Fatalf("unexpected affinity diagnostics: %+v", health)
+	}
+}
+
+func TestRecordAccountOutcomeTracksLatencyAndErrorEWMA(t *testing.T) {
+	p := newTestPool(config.Account{ID: "a", Enabled: true})
+	p.RecordAccountOutcome("a", 100*time.Millisecond, true)
+	p.RecordAccountOutcome("a", 300*time.Millisecond, false)
+	health := p.AccountHealthSnapshots()["a"]
+	if health.Samples != 2 {
+		t.Fatalf("samples = %d, want 2", health.Samples)
+	}
+	if health.LatencyMsEWMA < 139 || health.LatencyMsEWMA > 141 {
+		t.Fatalf("latency EWMA = %v, want 140", health.LatencyMsEWMA)
+	}
+	if health.ErrorRateEWMA < 0.19 || health.ErrorRateEWMA > 0.21 {
+		t.Fatalf("error EWMA = %v, want 0.2", health.ErrorRateEWMA)
+	}
+	if health.LastOutcomeAt <= 0 {
+		t.Fatalf("last outcome timestamp missing: %+v", health)
 	}
 }
 

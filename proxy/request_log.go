@@ -35,16 +35,33 @@ type requestLogEntry struct {
 	AccountID                string   `json:"accountId,omitempty"`
 	AccountEmail             string   `json:"accountEmail,omitempty"`
 	Endpoint                 string   `json:"endpoint,omitempty"`
+	AccountSelectionMs       int64    `json:"accountSelectionMs,omitempty"`
+	AccountAttempts          int      `json:"accountAttempts,omitempty"`
+	RouteAffinityHit         bool     `json:"routeAffinityHit,omitempty"`
 	Status                   string   `json:"status"`
 	StatusCode               int      `json:"statusCode"`
 	UpstreamFirstActivityMs  *int64   `json:"upstreamFirstActivityMs,omitempty"`
+	FirstSSEEventMs          *int64   `json:"firstSseEventMs,omitempty"`
+	FirstThinkingMs          *int64   `json:"firstThinkingMs,omitempty"`
+	FirstVisibleTextMs       *int64   `json:"firstVisibleTextMs,omitempty"`
+	FirstToolOutputMs        *int64   `json:"firstToolOutputMs,omitempty"`
 	FirstContentMs           *int64   `json:"firstContentMs,omitempty"`
+	MaxStreamGapMs           *int64   `json:"maxStreamGapMs,omitempty"`
+	HeartbeatCount           int      `json:"heartbeatCount,omitempty"`
 	ToolAssemblyMs           *int64   `json:"toolAssemblyMs,omitempty"`
 	DurationMs               int64    `json:"durationMs"`
 	InputTokens              int      `json:"inputTokens,omitempty"`
 	OutputTokens             int      `json:"outputTokens,omitempty"`
+	ThinkingTokens           int      `json:"thinkingTokens,omitempty"`
 	CacheReadInputTokens     int      `json:"cacheReadInputTokens,omitempty"`
 	CacheCreationInputTokens int      `json:"cacheCreationInputTokens,omitempty"`
+	CacheStatus              string   `json:"cacheStatus,omitempty"`
+	CacheMissReason          string   `json:"cacheMissReason,omitempty"`
+	CacheSource              string   `json:"cacheSource,omitempty"`
+	CacheMatchedInputTokens  int      `json:"cacheMatchedInputTokens,omitempty"`
+	CacheEligibleInputTokens int      `json:"cacheEligibleInputTokens,omitempty"`
+	CacheReadEfficiency      float64  `json:"cacheReadEfficiency,omitempty"`
+	WebSearchRequests        int      `json:"webSearchRequests,omitempty"`
 	VisibleOutputChars       int      `json:"visibleOutputChars,omitempty"`
 	ThinkingOutputChars      int      `json:"thinkingOutputChars,omitempty"`
 	RequestToolCount         int      `json:"requestToolCount,omitempty"`
@@ -360,6 +377,9 @@ func (h *Handler) recordRequestLogForPayload(payload *KiroPayload, entry request
 		entry.ToolFragmentCount = toolFragmentCount
 		entry.ToolTruncationCount = toolTruncationCount
 		entry.ToolRecoveryAttempts = toolRecoveryAttempts
+		entry.AccountSelectionMs, entry.AccountAttempts, entry.RouteAffinityHit = payload.accountSelectionMetrics()
+		payload.requestTimingTracker().Apply(&entry)
+		payload.applyPromptCacheDiagnostic(&entry)
 		entry.DetailAvailable = h.recordRequestDetailForContext(payload.requestContext, entry)
 	}
 	h.recordRequestLog(entry)
@@ -380,43 +400,141 @@ func requestDurationMs(start time.Time) int64 {
 }
 
 type requestFirstContentTimer struct {
-	startedAt time.Time
-	elapsedMs atomic.Int64
+	startedAt          time.Time
+	firstContentMs     atomic.Int64
+	firstSSEEventMs    atomic.Int64
+	firstThinkingMs    atomic.Int64
+	firstVisibleTextMs atomic.Int64
+	firstToolOutputMs  atomic.Int64
+	lastSSEEventNanos  atomic.Int64
+	maxStreamGapMs     atomic.Int64
+	heartbeatCount     atomic.Int64
 }
 
 func newRequestFirstContentTimer(startedAt time.Time) *requestFirstContentTimer {
 	timer := &requestFirstContentTimer{startedAt: startedAt}
-	timer.elapsedMs.Store(-1)
+	timer.firstContentMs.Store(-1)
+	timer.firstSSEEventMs.Store(-1)
+	timer.firstThinkingMs.Store(-1)
+	timer.firstVisibleTextMs.Store(-1)
+	timer.firstToolOutputMs.Store(-1)
+	timer.lastSSEEventNanos.Store(-1)
+	timer.maxStreamGapMs.Store(-1)
 	return timer
 }
 
 func (t *requestFirstContentTimer) MarkText(text string) {
+	t.MarkVisibleText(text)
+}
+
+func (t *requestFirstContentTimer) MarkOutput(text string, isThinking bool) {
+	if isThinking {
+		t.MarkThinking(text)
+		return
+	}
+	t.MarkVisibleText(text)
+}
+
+func (t *requestFirstContentTimer) MarkThinking(text string) {
 	if strings.TrimSpace(text) == "" {
 		return
 	}
-	t.Mark()
+	t.markFirst(&t.firstThinkingMs)
+	t.markFirst(&t.firstContentMs)
+}
+
+func (t *requestFirstContentTimer) MarkVisibleText(text string) {
+	if strings.TrimSpace(text) == "" {
+		return
+	}
+	t.markFirst(&t.firstVisibleTextMs)
+	t.markFirst(&t.firstContentMs)
 }
 
 func (t *requestFirstContentTimer) Mark() {
+	t.MarkToolOutput()
+}
+
+func (t *requestFirstContentTimer) MarkToolOutput() {
 	if t == nil {
+		return
+	}
+	t.markFirst(&t.firstToolOutputMs)
+	t.markFirst(&t.firstContentMs)
+}
+
+func (t *requestFirstContentTimer) MarkSSEEvent(heartbeat bool) {
+	if t == nil {
+		return
+	}
+	now := time.Now()
+	elapsed := now.Sub(t.startedAt).Milliseconds()
+	if elapsed < 0 {
+		elapsed = 0
+	}
+	t.firstSSEEventMs.CompareAndSwap(-1, elapsed)
+	if heartbeat {
+		t.heartbeatCount.Add(1)
+	}
+	elapsedNanos := now.Sub(t.startedAt).Nanoseconds()
+	previous := t.lastSSEEventNanos.Swap(elapsedNanos)
+	if previous >= 0 {
+		gapMs := (elapsedNanos - previous) / int64(time.Millisecond)
+		if gapMs < 0 {
+			gapMs = 0
+		}
+		for {
+			current := t.maxStreamGapMs.Load()
+			if gapMs <= current || t.maxStreamGapMs.CompareAndSwap(current, gapMs) {
+				break
+			}
+		}
+	}
+}
+
+func (t *requestFirstContentTimer) markFirst(target *atomic.Int64) {
+	if t == nil || target == nil {
 		return
 	}
 	elapsed := time.Since(t.startedAt).Milliseconds()
 	if elapsed < 0 {
 		elapsed = 0
 	}
-	t.elapsedMs.CompareAndSwap(-1, elapsed)
+	target.CompareAndSwap(-1, elapsed)
 }
 
 func (t *requestFirstContentTimer) Value() *int64 {
 	if t == nil {
 		return nil
 	}
-	elapsed := t.elapsedMs.Load()
+	elapsed := t.firstContentMs.Load()
 	if elapsed < 0 {
 		return nil
 	}
 	return &elapsed
+}
+
+func (t *requestFirstContentTimer) Apply(entry *requestLogEntry) {
+	if t == nil || entry == nil {
+		return
+	}
+	setRequestTimingValue(&entry.FirstContentMs, t.firstContentMs.Load())
+	setRequestTimingValue(&entry.FirstSSEEventMs, t.firstSSEEventMs.Load())
+	setRequestTimingValue(&entry.FirstThinkingMs, t.firstThinkingMs.Load())
+	setRequestTimingValue(&entry.FirstVisibleTextMs, t.firstVisibleTextMs.Load())
+	setRequestTimingValue(&entry.FirstToolOutputMs, t.firstToolOutputMs.Load())
+	setRequestTimingValue(&entry.MaxStreamGapMs, t.maxStreamGapMs.Load())
+	if entry.HeartbeatCount == 0 {
+		entry.HeartbeatCount = int(t.heartbeatCount.Load())
+	}
+}
+
+func setRequestTimingValue(target **int64, elapsed int64) {
+	if target == nil || *target != nil || elapsed < 0 {
+		return
+	}
+	value := elapsed
+	*target = &value
 }
 
 func outputCharCount(text string) int {

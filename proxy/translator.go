@@ -227,6 +227,7 @@ type ClaudeServerToolUsage struct {
 type ClaudeUsage struct {
 	InputTokens              int                       `json:"input_tokens"`
 	OutputTokens             int                       `json:"output_tokens"`
+	ThinkingTokens           int                       `json:"thinking_tokens,omitempty"`
 	CacheCreationInputTokens int                       `json:"cache_creation_input_tokens,omitempty"`
 	CacheReadInputTokens     int                       `json:"cache_read_input_tokens,omitempty"`
 	CacheCreation            *ClaudeCacheCreationUsage `json:"cache_creation,omitempty"`
@@ -1336,9 +1337,48 @@ type OpenAIChoice struct {
 }
 
 type OpenAIUsage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
+	PromptTokens            int                            `json:"prompt_tokens"`
+	CompletionTokens        int                            `json:"completion_tokens"`
+	TotalTokens             int                            `json:"total_tokens"`
+	PromptTokensDetails     *OpenAIPromptTokensDetails     `json:"prompt_tokens_details,omitempty"`
+	CompletionTokensDetails *OpenAICompletionTokensDetails `json:"completion_tokens_details,omitempty"`
+}
+
+type OpenAIPromptTokensDetails struct {
+	CachedTokens        int `json:"cached_tokens"`
+	CacheCreationTokens int `json:"cache_creation_tokens,omitempty"`
+}
+
+type OpenAICompletionTokensDetails struct {
+	ReasoningTokens int `json:"reasoning_tokens"`
+}
+
+func buildOpenAIUsage(inputTokens, outputTokens, thinkingTokens int, cacheUsage promptCacheUsage) OpenAIUsage {
+	return OpenAIUsage{
+		PromptTokens:     inputTokens,
+		CompletionTokens: outputTokens,
+		TotalTokens:      inputTokens + outputTokens,
+		PromptTokensDetails: &OpenAIPromptTokensDetails{
+			CachedTokens:        cacheUsage.CacheReadInputTokens,
+			CacheCreationTokens: cacheUsage.CacheCreationInputTokens,
+		},
+		CompletionTokensDetails: &OpenAICompletionTokensDetails{ReasoningTokens: thinkingTokens},
+	}
+}
+
+func buildOpenAIUsageMap(inputTokens, outputTokens, thinkingTokens int, cacheUsage promptCacheUsage) map[string]interface{} {
+	return map[string]interface{}{
+		"prompt_tokens":     inputTokens,
+		"completion_tokens": outputTokens,
+		"total_tokens":      inputTokens + outputTokens,
+		"prompt_tokens_details": map[string]int{
+			"cached_tokens":         cacheUsage.CacheReadInputTokens,
+			"cache_creation_tokens": cacheUsage.CacheCreationInputTokens,
+		},
+		"completion_tokens_details": map[string]int{
+			"reasoning_tokens": thinkingTokens,
+		},
+	}
 }
 
 // ==================== OpenAI -> Kiro 转换 ====================
@@ -1405,15 +1445,10 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 
 			var toolUses []KiroToolUse
 			for _, tc := range msg.ToolCalls {
-				var input map[string]interface{}
-				json.Unmarshal([]byte(tc.Function.Arguments), &input)
-				if input == nil {
-					input = make(map[string]interface{})
-				}
 				toolUses = append(toolUses, KiroToolUse{
 					ToolUseID: tc.ID,
 					Name:      tc.Function.Name,
-					Input:     input,
+					Input:     decodeOpenAIToolArguments(tc.Function.Arguments),
 				})
 			}
 
@@ -1552,6 +1587,17 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 	truncatePayloadToLimit(payload, systemPrompt != "")
 
 	return payload
+}
+
+func decodeOpenAIToolArguments(raw string) map[string]interface{} {
+	if strings.TrimSpace(raw) == "" {
+		return map[string]interface{}{}
+	}
+	var input map[string]interface{}
+	if err := json.Unmarshal([]byte(raw), &input); err != nil || input == nil {
+		return map[string]interface{}{"_raw_arguments": raw}
+	}
+	return input
 }
 
 func extractOpenAIUserContent(content interface{}) (string, []KiroImage) {
@@ -2556,11 +2602,7 @@ func KiroToOpenAIResponse(content string, toolUses []KiroToolUse, inputTokens, o
 			Message:      msg,
 			FinishReason: finishReason,
 		}},
-		Usage: OpenAIUsage{
-			PromptTokens:     inputTokens,
-			CompletionTokens: outputTokens,
-			TotalTokens:      inputTokens + outputTokens,
-		},
+		Usage: buildOpenAIUsage(inputTokens, outputTokens, 0, promptCacheUsage{}),
 	}
 }
 

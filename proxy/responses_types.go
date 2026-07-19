@@ -60,9 +60,33 @@ type ResponseContentPart struct {
 }
 
 type ResponsesUsage struct {
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
-	TotalTokens  int `json:"total_tokens"`
+	InputTokens         int                           `json:"input_tokens"`
+	OutputTokens        int                           `json:"output_tokens"`
+	TotalTokens         int                           `json:"total_tokens"`
+	InputTokensDetails  *ResponsesInputTokensDetails  `json:"input_tokens_details,omitempty"`
+	OutputTokensDetails *ResponsesOutputTokensDetails `json:"output_tokens_details,omitempty"`
+}
+
+type ResponsesInputTokensDetails struct {
+	CachedTokens        int `json:"cached_tokens"`
+	CacheCreationTokens int `json:"cache_creation_tokens,omitempty"`
+}
+
+type ResponsesOutputTokensDetails struct {
+	ReasoningTokens int `json:"reasoning_tokens"`
+}
+
+func buildResponsesUsage(inputTokens, outputTokens, thinkingTokens int, cacheUsage promptCacheUsage) ResponsesUsage {
+	return ResponsesUsage{
+		InputTokens:  inputTokens,
+		OutputTokens: outputTokens,
+		TotalTokens:  inputTokens + outputTokens,
+		InputTokensDetails: &ResponsesInputTokensDetails{
+			CachedTokens:        cacheUsage.CacheReadInputTokens,
+			CacheCreationTokens: cacheUsage.CacheCreationInputTokens,
+		},
+		OutputTokensDetails: &ResponsesOutputTokensDetails{ReasoningTokens: thinkingTokens},
+	}
 }
 
 type ResponsesError struct {

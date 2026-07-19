@@ -23,12 +23,12 @@ Kiro-Go Plus preserves Kiro-Go's API and deployment compatibility while adding p
 - Token controls: bounded enabled/adaptive thinking, configurable default thinking/output/context budgets, and client-value precedence
 - Streaming validation: AWS EventStream length and CRC validation, idle timeout, and truncated-response detection
 - Authentication: Builder ID, IAM Identity Center, Kiro hosted SSO, Microsoft 365 / Entra ID, SSO Token, API key, and native/KAM JSON import; `ksk_` keys discover and validate their data-plane region before persistence
-- Prompt Cache accounting: configurable creation/read ranges, 5m/1h TTLs, sharded LRU, API-key isolation, and statistics
-- Extensions: dynamic model discovery, Web Search, external token counting, and Responses history
-- Operations: account inventory diagnostics, persisted request metadata, optional complete logs with sanitized request/output, retries and stream timing, diagnostic events, webhook alerts, `/health`, and `/ready`
+- Prompt Cache accounting: configurable creation/read ranges, 5m/1h TTLs, sharded LRU, API-key isolation, optional restart-safe fingerprint persistence, hit statistics, and miss-reason diagnostics
+- Extensions: dynamic model discovery with text/thinking/tool capability self-tests, Web Search, external token counting, and Responses history
+- Operations: account inventory diagnostics with latency/error EWMAs and affinity rates, persisted request metadata, account-selection and first SSE/thinking/text/tool timing, maximum event gaps, optional complete logs with sanitized request/output, retries and stream timelines, diagnostic events, webhook alerts, `/health`, and `/ready`
 - Networking: global and per-account HTTP / SOCKS5 proxies
 
-Prompt Cache simulates and reports Anthropic cache usage. It does not cache model response bodies.
+Prompt Cache simulates and reports Anthropic cache usage. It does not cache model response bodies. Persistence stores only versioned prompt fingerprints and metadata with `0600` permissions. Live account health metrics are diagnostic and do not alter routing.
 
 Token-budget precedence is: explicit request values, per-model registry values, global Web defaults, then automatic model detection. Supported request overrides include `max_tokens`, `max_completion_tokens`, `max_output_tokens`, `context_window`, and `max_input_tokens` where applicable. Dynamic model entries may also set `maxToolTokens` for long-tool guidance and fallback decisions.
 

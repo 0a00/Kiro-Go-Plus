@@ -81,49 +81,83 @@
 
   <!-- Main app -->
   <div id="mainPage" class="hidden">
-    <header class="app-header">
-      <div class="app-header-inner">
-        <div class="brand-wrap">
-          <div class="brand">
-            <img class="brand-icon" src="/admin/favicon.ico" alt="" />
-            <span class="brand-text">Kiro-Go Plus</span>
-          </div>
+    <aside class="app-sidebar">
+      <div class="sidebar-brand">
+        <div class="brand">
+          <img class="brand-icon" src="/admin/favicon.ico" alt="" />
+          <span class="brand-text">Kiro-Go Plus</span>
         </div>
-        <nav class="header-nav" aria-label="" data-i18n-aria-label="aria.sections">
-          <div class="tabs" id="tabBar">
-            <button type="button" class="tab active" data-tab="accounts"><i class="fa-solid fa-users tab-icon"></i><span
-                data-i18n="tabs.accounts"></span></button>
-            <button type="button" class="tab" data-tab="settings"><i class="fa-solid fa-sliders tab-icon"></i><span
-                data-i18n="tabs.settings"></span></button>
-            <button type="button" class="tab" data-tab="requests"><i class="fa-solid fa-list-check tab-icon"></i><span
-                data-i18n="tabs.requests"></span></button>
-            <button type="button" class="tab" data-tab="api"><i class="fa-solid fa-plug tab-icon"></i><span
-                data-i18n="tabs.api"></span></button>
-          </div>
-        </nav>
-        <div class="topbar-actions flex-wrap justify-end">
-          <div class="lang-switch" id="mainLangSwitch" role="group" aria-label="" data-i18n-aria-label="lang.label">
-            <button class="lang-btn" data-lang="zh" type="button" data-i18n="lang.zh"></button>
-            <button class="lang-btn" data-lang="en" type="button" data-i18n="lang.en"></button>
-          </div>
-          <button id="mainThemeToggle" class="icon-btn theme-toggle" type="button" aria-label=""
-            data-i18n-title="theme.toggle" data-i18n-aria-label="theme.toggle" data-theme="system">
-            <i class="fa-solid fa-circle-half-stroke theme-ico-system"></i>
-            <i class="fa-solid fa-sun theme-ico-light"></i>
-            <i class="fa-solid fa-moon theme-ico-dark"></i>
-          </button>
-          <span class="divider" aria-hidden="true"></span>
-          <button class="btn btn-outline btn-sm" id="logoutBtn">
-            <i class="fa-solid fa-right-from-bracket"></i>
-            <span data-i18n="common.logout"></span>
-          </button>
-        </div>
+        <span class="sidebar-brand-mark" aria-hidden="true"><i class="fa-solid fa-wave-square"></i></span>
       </div>
-    </header>
+      <nav class="sidebar-nav" id="tabBar" aria-label="" data-i18n-aria-label="aria.sections">
+        <div class="nav-group">
+          <span class="nav-group-label" data-i18n="nav.workspace"></span>
+          <div class="nav-group-items">
+            <button type="button" class="tab active" data-tab="overview"><i class="fa-solid fa-chart-line tab-icon"></i><span data-i18n="tabs.overview"></span></button>
+            <button type="button" class="tab" data-tab="accounts"><i class="fa-solid fa-users tab-icon"></i><span data-i18n="tabs.accounts"></span></button>
+            <button type="button" class="tab" data-tab="requests"><i class="fa-solid fa-list-check tab-icon"></i><span data-i18n="tabs.requests"></span></button>
+          </div>
+        </div>
+        <div class="nav-group">
+          <span class="nav-group-label" data-i18n="nav.system"></span>
+          <div class="nav-group-items">
+            <button type="button" class="tab" data-tab="api"><i class="fa-solid fa-plug tab-icon"></i><span data-i18n="tabs.api"></span></button>
+            <button type="button" class="tab" data-tab="settings"><i class="fa-solid fa-sliders tab-icon"></i><span data-i18n="tabs.settings"></span></button>
+          </div>
+        </div>
+      </nav>
+      <div class="sidebar-footer">
+        <div class="sidebar-footer-line"><span class="status-dot"></span><span data-i18n="status.running"></span></div>
+        <span class="sidebar-footer-caption">Kiro-Go Plus</span>
+      </div>
+    </aside>
 
-    <div class="container">
-      <!-- Stats summary -->
-      <div class="stats-grid">
+    <div class="app-workspace">
+      <header class="app-header">
+        <div class="app-header-inner">
+          <div class="app-mobile-brand">
+            <div class="brand">
+              <img class="brand-icon" src="/admin/favicon.ico" alt="" />
+              <span class="brand-text">Kiro-Go Plus</span>
+            </div>
+          </div>
+          <div class="page-context">
+            <span class="page-context-kicker">Kiro-Go Plus</span>
+            <h1 id="currentPageTitle" data-i18n="tabs.overview"></h1>
+          </div>
+          <div class="topbar-actions">
+            <div class="lang-switch" id="mainLangSwitch" role="group" aria-label="" data-i18n-aria-label="lang.label">
+              <button class="lang-btn" data-lang="zh" type="button" data-i18n="lang.zh"></button>
+              <button class="lang-btn" data-lang="en" type="button" data-i18n="lang.en"></button>
+            </div>
+            <button id="mainThemeToggle" class="icon-btn theme-toggle" type="button" aria-label=""
+              data-i18n-title="theme.toggle" data-i18n-aria-label="theme.toggle" data-theme="system">
+              <i class="fa-solid fa-circle-half-stroke theme-ico-system"></i>
+              <i class="fa-solid fa-sun theme-ico-light"></i>
+              <i class="fa-solid fa-moon theme-ico-dark"></i>
+            </button>
+            <span class="divider" aria-hidden="true"></span>
+            <button class="btn btn-outline btn-sm" id="logoutBtn">
+              <i class="fa-solid fa-right-from-bracket"></i>
+              <span data-i18n="common.logout"></span>
+            </button>
+          </div>
+        </div>
+      </header>
+
+      <main class="container">
+        <!-- Overview tab -->
+        <div id="tabOverview" class="tab-content">
+          <div class="page-heading">
+            <div>
+              <span class="eyebrow" data-i18n="overview.eyebrow"></span>
+              <h2 data-i18n="overview.title"></h2>
+            </div>
+            <div class="service-state"><span class="status-dot"></span><span data-i18n="status.running"></span></div>
+          </div>
+
+          <!-- Stats summary -->
+          <div class="stats-grid">
         <div class="stat-card">
           <div class="stat-card-title" data-i18n="stats.accounts"></div>
           <div class="stat-body">
@@ -172,12 +206,41 @@
             <i class="fa-solid fa-circle-xmark stat-icon stat-icon--danger" aria-hidden="true"></i>
           </div>
         </div>
-      </div>
+          </div>
 
-      <div id="accountInventorySummary" class="request-summary account-inventory-summary" aria-live="polite"></div>
+          <div class="overview-grid">
+            <section class="card overview-inventory-card">
+              <div class="card-header">
+                <div>
+                  <span class="card-kicker" data-i18n="overview.accountHealth"></span>
+                  <h3 class="card-title" data-i18n="overview.inventoryTitle"></h3>
+                </div>
+                <button class="btn btn-outline btn-sm" type="button" data-navigate-tab="accounts">
+                  <i class="fa-solid fa-arrow-up-right-from-square" aria-hidden="true"></i>
+                  <span data-i18n="overview.openAccounts"></span>
+                </button>
+              </div>
+              <div id="accountInventorySummary" class="request-summary account-inventory-summary" aria-live="polite"></div>
+            </section>
+            <section class="card overview-actions-card">
+              <div class="card-header">
+                <div>
+                  <span class="card-kicker" data-i18n="overview.quickAccess"></span>
+                  <h3 class="card-title" data-i18n="overview.actionsTitle"></h3>
+                </div>
+              </div>
+              <div class="quick-actions">
+                <button class="quick-action" type="button" data-navigate-tab="accounts"><i class="fa-solid fa-users"></i><span data-i18n="tabs.accounts"></span><i class="fa-solid fa-chevron-right quick-action-arrow"></i></button>
+                <button class="quick-action" type="button" data-navigate-tab="requests"><i class="fa-solid fa-list-check"></i><span data-i18n="tabs.requests"></span><i class="fa-solid fa-chevron-right quick-action-arrow"></i></button>
+                <button class="quick-action" type="button" data-navigate-tab="api"><i class="fa-solid fa-plug"></i><span data-i18n="tabs.api"></span><i class="fa-solid fa-chevron-right quick-action-arrow"></i></button>
+                <button class="quick-action" type="button" data-navigate-tab="settings"><i class="fa-solid fa-sliders"></i><span data-i18n="tabs.settings"></span><i class="fa-solid fa-chevron-right quick-action-arrow"></i></button>
+              </div>
+            </section>
+          </div>
+        </div>
 
       <!-- Accounts tab -->
-      <div id="tabAccounts" class="tab-content">
+      <div id="tabAccounts" class="tab-content hidden">
         <div class="card">
           <div class="card-header">
             <span class="card-title" data-i18n="accounts.title"></span>
@@ -219,6 +282,46 @@
               <option value="disabled" data-i18n="filter.disabled"></option>
               <option value="banned" data-i18n="filter.banned"></option>
             </select>
+          </div>
+
+          <div class="account-list-controls">
+            <div class="segmented-control account-view-control" role="group" data-i18n-aria-label="accounts.viewMode">
+              <button class="segment active" type="button" data-account-view="compact" data-i18n-title="accounts.compactView" data-i18n-aria-label="accounts.compactView">
+                <i class="fa-solid fa-table-list" aria-hidden="true"></i>
+              </button>
+              <button class="segment" type="button" data-account-view="detailed" data-i18n-title="accounts.detailedView" data-i18n-aria-label="accounts.detailedView">
+                <i class="fa-solid fa-table-cells-large" aria-hidden="true"></i>
+              </button>
+            </div>
+            <label class="account-control-field">
+              <span data-i18n="accounts.sortBy"></span>
+              <select id="accountSortSelect" data-i18n-aria-label="accounts.sortBy">
+                <option value="status" data-i18n="accounts.sortStatus"></option>
+                <option value="email" data-i18n="accounts.sortEmail"></option>
+                <option value="usage" data-i18n="accounts.sortUsage"></option>
+                <option value="latency" data-i18n="accounts.sortLatency"></option>
+                <option value="failures" data-i18n="accounts.sortFailures"></option>
+                <option value="refresh" data-i18n="accounts.sortRefresh"></option>
+              </select>
+            </label>
+            <label class="account-control-field">
+              <span data-i18n="accounts.pageSize"></span>
+              <select id="accountPageSizeSelect" data-i18n-aria-label="accounts.pageSize">
+                <option value="25">25</option>
+                <option value="50">50</option>
+                <option value="100">100</option>
+                <option value="200">200</option>
+              </select>
+            </label>
+            <div class="account-pagination" id="accountPagination">
+              <button class="btn btn-icon btn-sm btn-ghost" id="accountPagePrevious" type="button" data-i18n-title="accounts.previousPage" data-i18n-aria-label="accounts.previousPage">
+                <i class="fa-solid fa-chevron-left" aria-hidden="true"></i>
+              </button>
+              <span id="accountPageSummary" class="account-page-summary"></span>
+              <button class="btn btn-icon btn-sm btn-ghost" id="accountPageNext" type="button" data-i18n-title="accounts.nextPage" data-i18n-aria-label="accounts.nextPage">
+                <i class="fa-solid fa-chevron-right" aria-hidden="true"></i>
+              </button>
+            </div>
           </div>
 
           <div id="accountsList"></div>
@@ -266,8 +369,25 @@
 
       <!-- Settings tab -->
       <div id="tabSettings" class="tab-content hidden">
+        <div class="settings-layout">
+          <aside class="settings-nav" aria-label="" data-i18n-aria-label="settings.categoriesLabel">
+            <div class="settings-nav-heading">
+              <span class="eyebrow" data-i18n="settings.categoriesEyebrow"></span>
+              <h2 data-i18n="settings.categoriesTitle"></h2>
+            </div>
+            <div class="settings-nav-list" role="tablist">
+              <button class="settings-nav-button active" type="button" data-settings-group="access" role="tab"><i class="fa-solid fa-shield-halved"></i><span data-i18n="settings.categoryAccess"></span></button>
+              <button class="settings-nav-button" type="button" data-settings-group="routing" role="tab"><i class="fa-solid fa-route"></i><span data-i18n="settings.categoryRouting"></span></button>
+              <button class="settings-nav-button" type="button" data-settings-group="generation" role="tab"><i class="fa-solid fa-wand-magic-sparkles"></i><span data-i18n="settings.categoryGeneration"></span></button>
+              <button class="settings-nav-button" type="button" data-settings-group="cache" role="tab"><i class="fa-solid fa-database"></i><span data-i18n="settings.categoryCache"></span></button>
+              <button class="settings-nav-button" type="button" data-settings-group="diagnostics" role="tab"><i class="fa-solid fa-chart-line"></i><span data-i18n="settings.categoryDiagnostics"></span></button>
+              <button class="settings-nav-button" type="button" data-settings-group="integrations" role="tab"><i class="fa-solid fa-puzzle-piece"></i><span data-i18n="settings.categoryIntegrations"></span></button>
+              <button class="settings-nav-button" type="button" data-settings-group="security" role="tab"><i class="fa-solid fa-lock"></i><span data-i18n="settings.categorySecurity"></span></button>
+            </div>
+          </aside>
+          <div class="settings-panels">
         <!-- API settings -->
-        <div class="card">
+        <div class="card settings-card" data-settings-group="access">
           <div class="card-header"><span class="card-title" data-i18n="settings.apiSettings"></span></div>
           <div class="form-group">
             <label class="flex items-center gap-2">
@@ -292,7 +412,7 @@
         </div>
 
         <!-- Runtime settings -->
-        <div class="card">
+        <div class="card settings-card" data-settings-group="access">
           <div class="card-header"><span class="card-title" data-i18n="settings.runtimeSettings"></span></div>
           <div class="form-group">
             <label data-i18n="settings.listenAddress"></label>
@@ -325,7 +445,7 @@
         </div>
 
         <!-- Routing settings -->
-        <div class="card">
+        <div class="card settings-card" data-settings-group="routing">
           <div class="card-header"><span class="card-title" data-i18n="settings.routingSettings"></span></div>
           <div class="form-group">
             <label data-i18n="settings.loadBalancingMode"></label>
@@ -340,7 +460,7 @@
         </div>
 
         <!-- Auto refresh settings -->
-        <div class="card">
+        <div class="card settings-card" data-settings-group="routing">
           <div class="card-header"><span class="card-title" data-i18n="settings.autoRefresh"></span></div>
           <div class="form-group">
             <label class="flex items-center gap-2">
@@ -405,7 +525,7 @@
         </div>
 
         <!-- Retry policy -->
-        <div class="card">
+        <div class="card settings-card" data-settings-group="routing">
           <div class="card-header"><span class="card-title" data-i18n="settings.retryPolicy"></span></div>
           <div class="form-group">
             <label data-i18n="settings.retryAccountAttempts"></label>
@@ -456,7 +576,7 @@
         </div>
 
         <!-- Long tool protection -->
-        <div class="card">
+        <div class="card settings-card" data-settings-group="generation">
           <div class="card-header"><span class="card-title" data-i18n="settings.longToolProtection"></span></div>
           <div class="form-group">
             <label class="flex items-center gap-2">
@@ -493,7 +613,7 @@
         </div>
 
         <!-- Responses storage -->
-        <div class="card">
+        <div class="card settings-card" data-settings-group="cache">
           <div class="card-header"><span class="card-title" data-i18n="settings.responsesStorage"></span></div>
           <div class="form-group">
             <label class="flex items-center gap-2">
@@ -531,7 +651,7 @@
         </div>
 
         <!-- Dynamic model registry -->
-        <div class="card">
+        <div class="card settings-card" data-settings-group="generation">
           <div class="card-header"><span class="card-title" data-i18n="settings.modelRegistry"></span></div>
           <div class="form-group">
             <label data-i18n="settings.modelNegativeCacheTtl"></label>
@@ -544,10 +664,33 @@
             <small data-i18n="settings.modelRegistryHint"></small>
           </div>
           <button class="btn btn-primary" id="saveModelRegistryBtn" data-i18n="settings.saveModelRegistry"></button>
+          <div class="form-group model-health-controls">
+            <label data-i18n="settings.modelHealthModel"></label>
+            <div class="input-row">
+              <input type="text" id="modelHealthModel" placeholder="claude-sonnet-4.6" />
+              <input type="number" id="modelHealthTimeoutSeconds" min="10" max="300" step="10" value="90"
+                data-i18n-aria-label="settings.modelHealthTimeout" />
+            </div>
+          </div>
+          <div class="input-row">
+            <label><input type="checkbox" id="modelHealthThinking" checked /> <span data-i18n="settings.modelHealthThinking"></span></label>
+            <label><input type="checkbox" id="modelHealthTools" checked /> <span data-i18n="settings.modelHealthTools"></span></label>
+          </div>
+          <div class="flex gap-2 flex-wrap">
+            <button class="btn btn-outline" id="testModelHealthBtn" type="button">
+              <i class="fa-solid fa-stethoscope" aria-hidden="true"></i>
+              <span data-i18n="settings.testModelHealth"></span>
+            </button>
+            <button class="btn btn-outline icon-btn" id="refreshModelHealthBtn" type="button"
+              data-i18n-title="settings.refreshModelHealth" data-i18n-aria-label="settings.refreshModelHealth">
+              <i class="fa-solid fa-arrows-rotate" aria-hidden="true"></i>
+            </button>
+          </div>
+          <div id="modelHealthResults" class="model-health-results" aria-live="polite"></div>
         </div>
 
         <!-- Health and alerts -->
-        <div class="card">
+        <div class="card settings-card" data-settings-group="routing">
           <div class="card-header"><span class="card-title" data-i18n="settings.healthAlerts"></span></div>
           <div class="form-group">
             <label data-i18n="settings.healthMinAccounts"></label>
@@ -579,7 +722,7 @@
         </div>
 
         <!-- Usage settings -->
-        <div class="card">
+        <div class="card settings-card" data-settings-group="access">
           <div class="card-header"><span class="card-title" data-i18n="settings.usageSettings"></span></div>
           <div class="form-group">
             <label class="flex items-center gap-2">
@@ -592,7 +735,7 @@
         </div>
 
         <!-- Upstream protection settings -->
-        <div class="card">
+        <div class="card settings-card" data-settings-group="routing">
           <div class="card-header"><span class="card-title" data-i18n="settings.upstreamProtection"></span></div>
           <div class="form-group">
             <label class="flex items-center gap-2">
@@ -640,7 +783,7 @@
         </div>
 
         <!-- Prompt cache settings -->
-        <div class="card">
+        <div class="card settings-card" data-settings-group="cache">
           <div class="card-header"><span class="card-title" data-i18n="settings.promptCache"></span></div>
           <div class="form-group">
             <label class="flex items-center gap-2">
@@ -648,6 +791,13 @@
               <span data-i18n="settings.promptCacheEnabled"></span>
             </label>
             <small data-i18n="settings.promptCacheSimulationHint"></small>
+          </div>
+          <div class="form-group">
+            <label class="flex items-center gap-2">
+              <span class="switch"><input type="checkbox" id="promptCachePersistEnabled" /><span class="slider"></span></span>
+              <span data-i18n="settings.promptCachePersistEnabled"></span>
+            </label>
+            <small data-i18n="settings.promptCachePersistHint"></small>
           </div>
           <div class="form-group">
             <label data-i18n="settings.cacheNamespaceMode"></label>
@@ -686,6 +836,8 @@
             <span><strong id="cacheStatHitRate">0%</strong> <span data-i18n="settings.cacheStatsHitRate"></span></span>
             <span><strong id="cacheStatReadTokens">0</strong> <span data-i18n="settings.cacheStatsReadTokens"></span></span>
             <span><strong id="cacheStatCreationTokens">0</strong> <span data-i18n="settings.cacheStatsCreationTokens"></span></span>
+            <span><strong id="cacheStatSkipped">0</strong> <span data-i18n="settings.cacheStatsSkipped"></span></span>
+            <span><strong id="cacheStatMissReasons">-</strong> <span data-i18n="settings.cacheStatsMissReasons"></span></span>
           </div>
           <div class="flex gap-2 flex-wrap">
             <button class="btn btn-primary" id="savePromptCacheBtn" data-i18n="settings.savePromptCache"></button>
@@ -697,7 +849,7 @@
         </div>
 
         <!-- Diagnostics settings -->
-        <div class="card">
+        <div class="card settings-card" data-settings-group="diagnostics">
           <div class="card-header"><span class="card-title" data-i18n="settings.diagnostics"></span></div>
           <div class="form-group">
             <label class="flex items-center gap-2">
@@ -725,7 +877,7 @@
         </div>
 
         <!-- Request log settings -->
-        <div class="card">
+        <div class="card settings-card" data-settings-group="diagnostics">
           <div class="card-header"><span class="card-title" data-i18n="settings.requestLog"></span></div>
           <div class="form-group">
             <label data-i18n="settings.requestLogMaxEntries"></label>
@@ -757,7 +909,7 @@
         </div>
 
         <!-- Count tokens provider settings -->
-        <div class="card">
+        <div class="card settings-card" data-settings-group="integrations">
           <div class="card-header"><span class="card-title" data-i18n="settings.countTokensProvider"></span></div>
           <div class="form-group">
             <label class="flex items-center gap-2">
@@ -787,7 +939,7 @@
         </div>
 
         <!-- WebSearch settings -->
-        <div class="card">
+        <div class="card settings-card" data-settings-group="integrations">
           <div class="card-header"><span class="card-title" data-i18n="settings.webSearch"></span></div>
           <div class="form-group">
             <label class="flex items-center gap-2">
@@ -800,7 +952,7 @@
         </div>
 
         <!-- Thinking settings -->
-        <div class="card">
+        <div class="card settings-card" data-settings-group="generation">
           <div class="card-header"><span class="card-title" data-i18n="settings.thinkingSettings"></span></div>
           <div class="form-group">
             <label data-i18n="settings.thinkingSuffix"></label>
@@ -879,7 +1031,7 @@
         </div>
 
         <!-- Endpoint settings -->
-        <div class="card">
+        <div class="card settings-card" data-settings-group="routing">
           <div class="card-header"><span class="card-title" data-i18n="settings.endpointSettings"></span></div>
           <div class="form-group">
             <label data-i18n="settings.preferredEndpoint"></label>
@@ -904,7 +1056,7 @@
         </div>
 
         <!-- Admin password -->
-        <div class="card">
+        <div class="card settings-card" data-settings-group="security">
           <div class="card-header"><span class="card-title" data-i18n="settings.adminPassword"></span></div>
           <div class="form-group">
             <label data-i18n="settings.newPassword"></label>
@@ -914,7 +1066,7 @@
         </div>
 
         <!-- Outbound proxy -->
-        <div class="card">
+        <div class="card settings-card" data-settings-group="integrations">
           <div class="card-header"><span class="card-title" data-i18n="settings.proxySettings"></span></div>
           <div class="form-group">
             <label data-i18n="settings.proxyType"></label>
@@ -947,7 +1099,7 @@
         </div>
 
         <!-- Prompt filter -->
-        <div class="card">
+        <div class="card settings-card" data-settings-group="security">
           <div class="card-header"><span class="card-title" data-i18n="settings.promptFilter"></span></div>
           <div class="form-group">
             <label class="font-semibold pb-2 block" data-i18n="settings.builtinFilters"></label>
@@ -991,9 +1143,11 @@
         </div>
 
         <!-- Statistics reset -->
-        <div class="card">
+        <div class="card settings-card" data-settings-group="diagnostics">
           <div class="card-header"><span class="card-title" data-i18n="settings.statistics"></span></div>
           <button class="btn btn-danger" id="resetStatsBtn" data-i18n="settings.resetStats"></button>
+        </div>
+          </div>
         </div>
       </div>
 
@@ -1069,7 +1223,7 @@
           <p class="api-hint"><i class="fa-solid fa-key"></i><span data-i18n="api.statsHint"></span></p>
         </section>
       </div>
-    </div>
+      </main>
 
     <!-- Footer -->
     <footer class="app-footer" aria-label="" data-i18n-aria-label="aria.footer">
@@ -1107,6 +1261,7 @@
         </div>
       </div>
     </footer>
+    </div>
   </div>
 
   <!-- Modals -->

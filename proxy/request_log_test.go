@@ -17,7 +17,9 @@ import (
 func TestRequestLogPersistenceRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "request_log.json")
 	upstreamActivityMs := int64(45)
+	firstSSEEventMs := int64(60)
 	firstContentMs := int64(123)
+	maxStreamGapMs := int64(75)
 	toolAssemblyMs := int64(78)
 	log, err := newPersistentRequestLog(2, path)
 	if err != nil {
@@ -29,7 +31,10 @@ func TestRequestLogPersistenceRoundTrip(t *testing.T) {
 		Protocol:                "three",
 		Timestamp:               3,
 		UpstreamFirstActivityMs: &upstreamActivityMs,
+		FirstSSEEventMs:         &firstSSEEventMs,
 		FirstContentMs:          &firstContentMs,
+		MaxStreamGapMs:          &maxStreamGapMs,
+		HeartbeatCount:          2,
 		ToolAssemblyMs:          &toolAssemblyMs,
 	})
 	if err := log.Flush(); err != nil {
@@ -61,6 +66,9 @@ func TestRequestLogPersistenceRoundTrip(t *testing.T) {
 	if got[0].UpstreamFirstActivityMs == nil || *got[0].UpstreamFirstActivityMs != upstreamActivityMs || got[0].ToolAssemblyMs == nil || *got[0].ToolAssemblyMs != toolAssemblyMs {
 		t.Fatalf("stream diagnostics were not restored: %+v", got[0])
 	}
+	if got[0].FirstSSEEventMs == nil || *got[0].FirstSSEEventMs != firstSSEEventMs || got[0].MaxStreamGapMs == nil || *got[0].MaxStreamGapMs != maxStreamGapMs || got[0].HeartbeatCount != 2 {
+		t.Fatalf("SSE diagnostics were not restored: %+v", got[0])
+	}
 	if got[1].FirstContentMs != nil {
 		t.Fatalf("legacy entry should not gain first-content latency: %+v", got[1])
 	}
@@ -89,6 +97,25 @@ func TestRequestFirstContentTimerIgnoresBlankAndKeepsFirstValue(t *testing.T) {
 	timer.Mark()
 	if got := timer.Value(); got == nil || *got != *first {
 		t.Fatalf("first-content latency changed: first=%v got=%v", first, got)
+	}
+}
+
+func TestRequestStreamTimingSeparatesOutputsAndSSEMetrics(t *testing.T) {
+	timer := newRequestFirstContentTimer(time.Now())
+	timer.MarkSSEEvent(false)
+	timer.MarkThinking("thinking")
+	time.Sleep(2 * time.Millisecond)
+	timer.MarkSSEEvent(true)
+	timer.MarkVisibleText("visible")
+	timer.MarkToolOutput()
+
+	entry := requestLogEntry{}
+	timer.Apply(&entry)
+	if entry.FirstSSEEventMs == nil || entry.FirstThinkingMs == nil || entry.FirstVisibleTextMs == nil || entry.FirstToolOutputMs == nil || entry.FirstContentMs == nil {
+		t.Fatalf("missing split stream timing: %+v", entry)
+	}
+	if entry.HeartbeatCount != 1 || entry.MaxStreamGapMs == nil || *entry.MaxStreamGapMs < 1 {
+		t.Fatalf("missing SSE gap or heartbeat metrics: %+v", entry)
 	}
 }
 

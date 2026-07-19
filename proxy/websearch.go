@@ -210,28 +210,34 @@ func (h *Handler) handleClaudeWebSearch(ctx context.Context, w http.ResponseWrit
 	if trace := requestDetailTraceFromContext(ctx); trace != nil {
 		trace.recordText(output, false)
 	}
-	firstContent.MarkText(output)
+	firstContent.MarkVisibleText(output)
 	outputTokens := estimateApproxTokens(output)
 	if trace := requestDetailTraceFromContext(ctx); trace != nil {
 		trace.recordComplete(estimatedInputTokens, outputTokens)
 	}
 	h.recordSuccessForApiKey(ctx, apiKeyID, estimatedInputTokens, outputTokens, 0)
-	h.recordRequestLogForContext(ctx, requestLogEntry{
-		Timestamp:      time.Now().Unix(),
-		Protocol:       "claude.web_search",
-		Model:          req.Model,
-		Status:         "success",
-		StatusCode:     200,
-		FirstContentMs: firstContent.Value(),
-		DurationMs:     requestDurationMs(startedAt),
-		InputTokens:    estimatedInputTokens,
-		OutputTokens:   outputTokens,
-	})
+	entry := requestLogEntry{
+		Timestamp:         time.Now().Unix(),
+		Protocol:          "claude.web_search",
+		Model:             req.Model,
+		Status:            "success",
+		StatusCode:        200,
+		FirstContentMs:    firstContent.Value(),
+		DurationMs:        requestDurationMs(startedAt),
+		InputTokens:       estimatedInputTokens,
+		OutputTokens:      outputTokens,
+		WebSearchRequests: 1,
+	}
 
 	if req.Stream {
-		h.sendWebSearchSSE(w, req.Model, query, results, estimatedInputTokens, outputTokens)
+		h.sendWebSearchSSEWithTiming(w, req.Model, query, results, estimatedInputTokens, outputTokens, firstContent)
+		entry.DurationMs = requestDurationMs(startedAt)
+		firstContent.Apply(&entry)
+		h.recordRequestLogForContext(ctx, entry)
 		return
 	}
+	firstContent.Apply(&entry)
+	h.recordRequestLogForContext(ctx, entry)
 	resp := buildWebSearchClaudeResponse(req.Model, query, output, results, estimatedInputTokens, outputTokens)
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	json.NewEncoder(w).Encode(resp)
@@ -479,6 +485,10 @@ func buildWebSearchClaudeResponse(model, query, summary string, results *webSear
 }
 
 func (h *Handler) sendWebSearchSSE(w http.ResponseWriter, model, query string, results *webSearchResults, inputTokens, outputTokens int) {
+	h.sendWebSearchSSEWithTiming(w, model, query, results, inputTokens, outputTokens, nil)
+}
+
+func (h *Handler) sendWebSearchSSEWithTiming(w http.ResponseWriter, model, query string, results *webSearchResults, inputTokens, outputTokens int, timing *requestFirstContentTimer) {
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -490,7 +500,11 @@ func (h *Handler) sendWebSearchSSE(w http.ResponseWriter, model, query string, r
 	msgID := "msg_" + uuid.New().String()
 	toolUseID := "srvtoolu_" + uuid.New().String()
 	summary := webSearchSummary(query, results)
-	h.sendSSE(w, flusher, "message_start", map[string]interface{}{
+	send := func(event string, data interface{}) {
+		timing.MarkSSEEvent(event == "ping")
+		h.sendSSE(w, flusher, event, data)
+	}
+	send("message_start", map[string]interface{}{
 		"type": "message_start",
 		"message": map[string]interface{}{
 			"id":            msgID,
@@ -503,7 +517,7 @@ func (h *Handler) sendWebSearchSSE(w http.ResponseWriter, model, query string, r
 			"usage":         map[string]int{"input_tokens": inputTokens, "output_tokens": 0},
 		},
 	})
-	h.sendSSE(w, flusher, "content_block_start", map[string]interface{}{
+	send("content_block_start", map[string]interface{}{
 		"type":  "content_block_start",
 		"index": 0,
 		"content_block": map[string]interface{}{
@@ -513,8 +527,8 @@ func (h *Handler) sendWebSearchSSE(w http.ResponseWriter, model, query string, r
 			"input": map[string]string{"query": query},
 		},
 	})
-	h.sendSSE(w, flusher, "content_block_stop", map[string]interface{}{"type": "content_block_stop", "index": 0})
-	h.sendSSE(w, flusher, "content_block_start", map[string]interface{}{
+	send("content_block_stop", map[string]interface{}{"type": "content_block_stop", "index": 0})
+	send("content_block_start", map[string]interface{}{
 		"type":  "content_block_start",
 		"index": 1,
 		"content_block": map[string]interface{}{
@@ -523,8 +537,8 @@ func (h *Handler) sendWebSearchSSE(w http.ResponseWriter, model, query string, r
 			"content":     webSearchResultBlocks(results),
 		},
 	})
-	h.sendSSE(w, flusher, "content_block_stop", map[string]interface{}{"type": "content_block_stop", "index": 1})
-	h.sendSSE(w, flusher, "content_block_start", map[string]interface{}{
+	send("content_block_stop", map[string]interface{}{"type": "content_block_stop", "index": 1})
+	send("content_block_start", map[string]interface{}{
 		"type":  "content_block_start",
 		"index": 2,
 		"content_block": map[string]interface{}{
@@ -532,7 +546,7 @@ func (h *Handler) sendWebSearchSSE(w http.ResponseWriter, model, query string, r
 			"text": "",
 		},
 	})
-	h.sendSSE(w, flusher, "content_block_delta", map[string]interface{}{
+	send("content_block_delta", map[string]interface{}{
 		"type":  "content_block_delta",
 		"index": 2,
 		"delta": map[string]string{
@@ -540,8 +554,8 @@ func (h *Handler) sendWebSearchSSE(w http.ResponseWriter, model, query string, r
 			"text": summary,
 		},
 	})
-	h.sendSSE(w, flusher, "content_block_stop", map[string]interface{}{"type": "content_block_stop", "index": 2})
-	h.sendSSE(w, flusher, "message_delta", map[string]interface{}{
+	send("content_block_stop", map[string]interface{}{"type": "content_block_stop", "index": 2})
+	send("message_delta", map[string]interface{}{
 		"type":  "message_delta",
 		"delta": map[string]interface{}{"stop_reason": "end_turn"},
 		"usage": map[string]interface{}{
@@ -551,7 +565,7 @@ func (h *Handler) sendWebSearchSSE(w http.ResponseWriter, model, query string, r
 			},
 		},
 	})
-	h.sendSSE(w, flusher, "message_stop", map[string]interface{}{"type": "message_stop"})
+	send("message_stop", map[string]interface{}{"type": "message_stop"})
 }
 
 func webSearchResultBlocks(results *webSearchResults) []map[string]interface{} {

@@ -188,6 +188,7 @@ type UpstreamProtectionConfig struct {
 // PromptCacheConfig controls local prompt/KV cache simulation for usage reporting.
 type PromptCacheConfig struct {
 	Enabled                bool    `json:"enabled"`
+	PersistEnabled         bool    `json:"persistEnabled"`
 	NamespaceMode          string  `json:"namespaceMode"`
 	CacheReadEfficiency    float64 `json:"cacheReadEfficiency"`
 	CacheReadEfficiencyMin float64 `json:"cacheReadEfficiencyMin"`
@@ -446,6 +447,7 @@ type Config struct {
 
 	// Prompt/KV cache simulation settings.
 	PromptCacheEnabled        bool    `json:"promptCacheEnabled"`
+	PromptCachePersistEnabled bool    `json:"promptCachePersistEnabled"`
 	PromptCacheNamespaceMode  string  `json:"promptCacheNamespaceMode,omitempty"`
 	CacheReadEfficiency       float64 `json:"cacheReadEfficiency"`
 	CacheReadEfficiencyMin    float64 `json:"cacheReadEfficiencyMin"`
@@ -539,6 +541,7 @@ func loadLocked() error {
 				Accounts:                  []Account{},
 				UpstreamProtection:        defaultUpstreamProtectionConfig(),
 				PromptCacheEnabled:        defaultPromptCacheConfig().Enabled,
+				PromptCachePersistEnabled: defaultPromptCacheConfig().PersistEnabled,
 				PromptCacheNamespaceMode:  defaultPromptCacheConfig().NamespaceMode,
 				CacheReadEfficiency:       defaultPromptCacheConfig().CacheReadEfficiency,
 				CacheReadEfficiencyMin:    defaultPromptCacheConfig().CacheReadEfficiencyMin,
@@ -589,6 +592,9 @@ func loadLocked() error {
 	}
 	if !rawConfigHasKey(data, "promptCacheEnabled") {
 		c.PromptCacheEnabled = defaultPromptCacheConfig().Enabled
+	}
+	if !rawConfigHasKey(data, "promptCachePersistEnabled") {
+		c.PromptCachePersistEnabled = defaultPromptCacheConfig().PersistEnabled
 	}
 	if !rawConfigHasKey(data, "promptCacheNamespaceMode") {
 		c.PromptCacheNamespaceMode = defaultPromptCacheConfig().NamespaceMode
@@ -940,6 +946,7 @@ func normalizeUpstreamProtectionLocked() {
 func defaultPromptCacheConfig() PromptCacheConfig {
 	return PromptCacheConfig{
 		Enabled:                true,
+		PersistEnabled:         true,
 		NamespaceMode:          PromptCacheNamespaceAccount,
 		CacheReadEfficiency:    0.87,
 		CacheReadEfficiencyMin: 0.87,
@@ -1588,6 +1595,7 @@ func GetPromptCacheConfig() PromptCacheConfig {
 	}
 	out := PromptCacheConfig{
 		Enabled:                cfg.PromptCacheEnabled,
+		PersistEnabled:         cfg.PromptCachePersistEnabled,
 		NamespaceMode:          cfg.PromptCacheNamespaceMode,
 		CacheReadEfficiency:    cfg.CacheReadEfficiency,
 		CacheReadEfficiencyMin: cfg.CacheReadEfficiencyMin,
@@ -1638,6 +1646,7 @@ func UpdatePromptCacheSettings(settings PromptCacheConfig) error {
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
 	cfg.PromptCacheEnabled = settings.Enabled
+	cfg.PromptCachePersistEnabled = settings.PersistEnabled
 	cfg.PromptCacheNamespaceMode = settings.NamespaceMode
 	cfg.CacheReadEfficiencyMin = settings.CacheReadEfficiencyMin
 	cfg.CacheReadEfficiencyMax = settings.CacheReadEfficiencyMax

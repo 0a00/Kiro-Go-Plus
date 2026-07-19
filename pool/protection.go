@@ -53,11 +53,16 @@ func (e *UpstreamBusyError) Error() string {
 
 // UpstreamRequestGuard releases an acquired local upstream slot.
 type UpstreamRequestGuard struct {
-	p          *AccountPool
-	accountID  string
-	profileArn string
-	model      string
-	released   atomic.Bool
+	p           *AccountPool
+	accountID   string
+	profileArn  string
+	model       string
+	affinityHit bool
+	released    atomic.Bool
+}
+
+func (g *UpstreamRequestGuard) AffinityHit() bool {
+	return g != nil && g.affinityHit
 }
 
 func (g *UpstreamRequestGuard) Release() {
@@ -72,7 +77,13 @@ func (g *UpstreamRequestGuard) Release() {
 func (p *AccountPool) AcquireForModel(model, routeKey string, excluded map[string]bool) (*config.Account, *UpstreamRequestGuard, error) {
 	up := config.GetUpstreamProtectionConfig()
 	if !up.Enabled {
-		return p.GetNextForModelExcluding(model, excluded), nil, nil
+		account := p.GetNextForModelExcluding(model, excluded)
+		if account != nil {
+			p.mu.Lock()
+			p.recordDispatchLocked(account.ID, false)
+			p.mu.Unlock()
+		}
+		return account, nil, nil
 	}
 	allowOverUsage := config.GetAllowOverUsage()
 	routingMode := config.GetRoutingConfig().LoadBalancingMode
@@ -97,6 +108,8 @@ func (p *AccountPool) AcquireForModel(model, routeKey string, excluded map[strin
 		if entry, ok := p.affinity[routeKey]; ok {
 			if acc := p.findSelectableAccountLocked(entry.accountID, model, excluded, now, allowOverUsage); acc != nil {
 				if guard, busy := p.tryAcquireSlotLocked(acc, modelKey, up, now); guard != nil {
+					guard.affinityHit = true
+					p.recordDispatchLocked(acc.ID, true)
 					p.rememberRouteAffinityLocked(routeKey, acc.ID, now, up)
 					return cloneAccount(acc), guard, nil
 				} else if busy != nil {
@@ -111,6 +124,7 @@ func (p *AccountPool) AcquireForModel(model, routeKey string, excluded map[strin
 	for _, idx := range selectionIndexes {
 		acc := &p.accounts[idx]
 		if guard, busy := p.tryAcquireSlotLocked(acc, modelKey, up, now); guard != nil {
+			p.recordDispatchLocked(acc.ID, false)
 			p.commitWeightedSelectionLocked(acc.ID, selectionIndexes, routingMode)
 			p.rememberRouteAffinityLocked(routeKey, acc.ID, now, up)
 			return cloneAccount(acc), guard, nil
@@ -208,11 +222,34 @@ func (p *AccountPool) ProtectionSnapshot() map[string]interface{} {
 	defer p.mu.RUnlock()
 
 	now := time.Now()
-	accounts := make([]map[string]interface{}, 0, len(p.accountUpstream))
-	for accountID, state := range p.accountUpstream {
+	accounts := make([]map[string]interface{}, 0, len(p.accounts))
+	seenAccounts := make(map[string]bool, len(p.accounts))
+	for i := range p.accounts {
+		accountID := p.accounts[i].ID
+		if accountID == "" || seenAccounts[accountID] {
+			continue
+		}
+		seenAccounts[accountID] = true
+		state := p.accountUpstream[accountID]
+		health := p.healthStats[accountID]
+		affinityHitRate := 0.0
+		if health.Dispatches > 0 {
+			affinityHitRate = float64(health.AffinityHits) / float64(health.Dispatches)
+		}
+		lastOutcomeAt := int64(0)
+		if !health.LastOutcomeAt.IsZero() {
+			lastOutcomeAt = health.LastOutcomeAt.Unix()
+		}
 		accounts = append(accounts, map[string]interface{}{
-			"accountId": accountID,
-			"inFlight":  state.inFlight,
+			"accountId":       accountID,
+			"inFlight":        state.inFlight,
+			"latencyMsEwma":   health.LatencyMsEWMA,
+			"errorRateEwma":   health.ErrorRateEWMA,
+			"samples":         health.Samples,
+			"dispatches":      health.Dispatches,
+			"affinityHits":    health.AffinityHits,
+			"affinityHitRate": affinityHitRate,
+			"lastOutcomeAt":   lastOutcomeAt,
 		})
 	}
 	sort.Slice(accounts, func(i, j int) bool {

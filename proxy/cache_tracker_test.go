@@ -228,6 +228,37 @@ func TestPromptCacheReadEfficiencyRangeScalesWithinBounds(t *testing.T) {
 	}
 }
 
+func TestPromptCacheDetailedMissReasons(t *testing.T) {
+	tracker := newPromptCacheTracker(time.Hour)
+	var fingerprint [32]byte
+	fingerprint[0] = 1
+	profile := &promptCacheProfile{
+		Model:            "claude-sonnet-4.5",
+		TotalInputTokens: 2048,
+		Breakpoints: []promptCacheBreakpoint{{
+			Fingerprint: fingerprint, CumulativeTokens: 2048, TTL: time.Hour,
+		}},
+	}
+
+	usage, diagnostic := tracker.ComputeDetailed("acct", profile)
+	if usage.CacheReadInputTokens != 0 || diagnostic.Status != "miss" || diagnostic.Reason != "empty_namespace" {
+		t.Fatalf("unexpected empty-namespace diagnostic: usage=%+v diagnostic=%+v", usage, diagnostic)
+	}
+	tracker.RecordDecision(usage, diagnostic)
+	stats := tracker.Stats()
+	if stats.CacheMisses != 1 || stats.MissReasons["empty_namespace"] != 1 {
+		t.Fatalf("unexpected diagnostic stats: %+v", stats)
+	}
+
+	short := *profile
+	short.TotalInputTokens = 100
+	short.Breakpoints = []promptCacheBreakpoint{{Fingerprint: fingerprint, CumulativeTokens: 100, TTL: time.Hour}}
+	_, diagnostic = tracker.ComputeDetailed("acct", &short)
+	if diagnostic.Status != "skipped" || diagnostic.Reason != "below_minimum_tokens" {
+		t.Fatalf("unexpected below-threshold diagnostic: %+v", diagnostic)
+	}
+}
+
 func TestPromptCacheEfficiencyIsStableWithinWindow(t *testing.T) {
 	var fingerprint [32]byte
 	fingerprint[0] = 42
@@ -437,7 +468,7 @@ func TestBuildClaudeUsageMapIncludesCacheFields(t *testing.T) {
 		CacheCreation1hInputTokens: 20,
 	}
 
-	m := buildClaudeUsageMap(100, 50, usage, true)
+	m := buildClaudeUsageMap(100, 50, 12, usage, true)
 
 	if got := m["input_tokens"]; got != 50 {
 		t.Fatalf("expected billed input tokens 50, got %#v", got)
@@ -447,6 +478,9 @@ func TestBuildClaudeUsageMapIncludesCacheFields(t *testing.T) {
 	}
 	if got := m["cache_read_input_tokens"]; got != 20 {
 		t.Fatalf("expected cache read tokens 20, got %#v", got)
+	}
+	if got := m["thinking_tokens"]; got != 12 {
+		t.Fatalf("expected thinking tokens 12, got %#v", got)
 	}
 	creation, ok := m["cache_creation"].(map[string]int)
 	if !ok {

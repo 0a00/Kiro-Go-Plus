@@ -77,25 +77,28 @@ func (w *requestDetailFlushingWriter) Flush() {
 }
 
 type requestDetail struct {
-	Version         int                    `json:"version"`
-	RequestID       string                 `json:"requestId"`
-	Timestamp       int64                  `json:"timestamp"`
-	Protocol        string                 `json:"protocol"`
-	Model           string                 `json:"model,omitempty"`
-	APIKeyID        string                 `json:"apiKeyId,omitempty"`
-	APIKeyName      string                 `json:"apiKeyName,omitempty"`
-	AccountID       string                 `json:"accountId,omitempty"`
-	AccountEmail    string                 `json:"accountEmail,omitempty"`
-	Endpoint        string                 `json:"endpoint,omitempty"`
-	Status          string                 `json:"status"`
-	StatusCode      int                    `json:"statusCode"`
-	DurationMs      int64                  `json:"durationMs"`
-	Request         requestDetailRequest   `json:"request"`
-	Response        requestDetailResponse  `json:"response"`
-	Attempts        []requestDetailAttempt `json:"attempts,omitempty"`
-	Timeline        []requestDetailEvent   `json:"timeline,omitempty"`
-	DroppedEvents   int                    `json:"droppedEvents,omitempty"`
-	TruncatedFields []string               `json:"truncatedFields,omitempty"`
+	Version            int                    `json:"version"`
+	RequestID          string                 `json:"requestId"`
+	Timestamp          int64                  `json:"timestamp"`
+	Protocol           string                 `json:"protocol"`
+	Model              string                 `json:"model,omitempty"`
+	APIKeyID           string                 `json:"apiKeyId,omitempty"`
+	APIKeyName         string                 `json:"apiKeyName,omitempty"`
+	AccountID          string                 `json:"accountId,omitempty"`
+	AccountEmail       string                 `json:"accountEmail,omitempty"`
+	Endpoint           string                 `json:"endpoint,omitempty"`
+	AccountSelectionMs int64                  `json:"accountSelectionMs,omitempty"`
+	AccountAttempts    int                    `json:"accountAttempts,omitempty"`
+	RouteAffinityHit   bool                   `json:"routeAffinityHit,omitempty"`
+	Status             string                 `json:"status"`
+	StatusCode         int                    `json:"statusCode"`
+	DurationMs         int64                  `json:"durationMs"`
+	Request            requestDetailRequest   `json:"request"`
+	Response           requestDetailResponse  `json:"response"`
+	Attempts           []requestDetailAttempt `json:"attempts,omitempty"`
+	Timeline           []requestDetailEvent   `json:"timeline,omitempty"`
+	DroppedEvents      int                    `json:"droppedEvents,omitempty"`
+	TruncatedFields    []string               `json:"truncatedFields,omitempty"`
 }
 
 type requestDetailRequest struct {
@@ -118,6 +121,7 @@ type requestDetailResponse struct {
 	Tools                    []requestDetailToolUse `json:"tools,omitempty"`
 	InputTokens              int                    `json:"inputTokens,omitempty"`
 	OutputTokens             int                    `json:"outputTokens,omitempty"`
+	ThinkingTokens           int                    `json:"thinkingTokens,omitempty"`
 	UncachedInputTokens      int                    `json:"uncachedInputTokens,omitempty"`
 	CacheReadInputTokens     int                    `json:"cacheReadInputTokens,omitempty"`
 	CacheCreationInputTokens int                    `json:"cacheCreationInputTokens,omitempty"`
@@ -1006,6 +1010,9 @@ func (t *requestDetailTrace) finalize(entry requestLogEntry) (requestDetail, boo
 	if usage.OutputTokens == 0 {
 		usage.OutputTokens = entry.OutputTokens
 	}
+	if usage.ThinkingTokens == 0 {
+		usage.ThinkingTokens = entry.ThinkingTokens
+	}
 	if usage.CacheReadInputTokens == 0 {
 		usage.CacheReadInputTokens = entry.CacheReadInputTokens
 	}
@@ -1013,23 +1020,26 @@ func (t *requestDetailTrace) finalize(entry requestLogEntry) (requestDetail, boo
 		usage.CacheCreationInputTokens = entry.CacheCreationInputTokens
 	}
 	detail := requestDetail{
-		Version:       requestDetailStateVersion,
-		RequestID:     requestID,
-		Timestamp:     t.startedAt.Unix(),
-		Protocol:      protocol,
-		Model:         entry.Model,
-		APIKeyID:      entry.APIKeyID,
-		APIKeyName:    entry.APIKeyName,
-		AccountID:     entry.AccountID,
-		AccountEmail:  redactRequestDetailText(entry.AccountEmail),
-		Endpoint:      entry.Endpoint,
-		Status:        entry.Status,
-		StatusCode:    entry.StatusCode,
-		DurationMs:    entry.DurationMs,
-		Request:       t.request,
-		Attempts:      append([]requestDetailAttempt(nil), t.attempts...),
-		Timeline:      append([]requestDetailEvent(nil), t.timeline...),
-		DroppedEvents: t.droppedEvents,
+		Version:            requestDetailStateVersion,
+		RequestID:          requestID,
+		Timestamp:          t.startedAt.Unix(),
+		Protocol:           protocol,
+		Model:              entry.Model,
+		APIKeyID:           entry.APIKeyID,
+		APIKeyName:         entry.APIKeyName,
+		AccountID:          entry.AccountID,
+		AccountEmail:       redactRequestDetailText(entry.AccountEmail),
+		Endpoint:           entry.Endpoint,
+		AccountSelectionMs: entry.AccountSelectionMs,
+		AccountAttempts:    entry.AccountAttempts,
+		RouteAffinityHit:   entry.RouteAffinityHit,
+		Status:             entry.Status,
+		StatusCode:         entry.StatusCode,
+		DurationMs:         entry.DurationMs,
+		Request:            t.request,
+		Attempts:           append([]requestDetailAttempt(nil), t.attempts...),
+		Timeline:           append([]requestDetailEvent(nil), t.timeline...),
+		DroppedEvents:      t.droppedEvents,
 		Response: requestDetailResponse{
 			VisibleOutput:            t.visible.string(),
 			VisibleOutputBytes:       t.visible.total,
@@ -1040,6 +1050,7 @@ func (t *requestDetailTrace) finalize(entry requestLogEntry) (requestDetail, boo
 			Tools:                    tools,
 			InputTokens:              usage.InputTokens,
 			OutputTokens:             usage.OutputTokens,
+			ThinkingTokens:           usage.ThinkingTokens,
 			UncachedInputTokens:      usage.UncachedInputTokens,
 			CacheReadInputTokens:     usage.CacheReadInputTokens,
 			CacheCreationInputTokens: usage.CacheCreationInputTokens,
