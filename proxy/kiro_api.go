@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"kiro-go/auth"
 	"kiro-go/config"
 	"kiro-go/internal/httpbody"
 	"kiro-go/logger"
@@ -241,7 +242,65 @@ func shouldProbeFallbackProfileRegions(account *config.Account) bool {
 	if account == nil || strings.TrimSpace(account.Region) == "" {
 		return true
 	}
-	return strings.EqualFold(strings.TrimSpace(account.AuthMethod), "external_idp")
+	return strings.EqualFold(strings.TrimSpace(account.AuthMethod), "external_idp") || isEnterpriseIDCAccount(account)
+}
+
+func isEnterpriseIDCAccount(account *config.Account) bool {
+	if account == nil {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(account.Provider), "Enterprise") {
+		return true
+	}
+	return strings.EqualFold(strings.TrimSpace(account.AuthMethod), "idc") &&
+		strings.TrimSpace(account.StartUrl) != "" &&
+		!auth.IsBuilderIDStartURL(account.StartUrl)
+}
+
+func kiroManagementRegionCandidates(account *config.Account) []string {
+	seen := make(map[string]bool)
+	regions := make([]string, 0, len(defaultKiroProfileRegions)+2)
+	add := func(region string) {
+		region = strings.TrimSpace(region)
+		if !validKiroRegion(region) || seen[region] {
+			return
+		}
+		seen[region] = true
+		regions = append(regions, region)
+	}
+	add(kiroRegion(account))
+	if !isEnterpriseIDCAccount(account) {
+		return regions
+	}
+	if account != nil {
+		add(account.Region)
+	}
+	if configured := strings.TrimSpace(os.Getenv("KIRO_PROFILE_REGIONS")); configured != "" {
+		for _, region := range strings.Split(configured, ",") {
+			add(region)
+		}
+	} else {
+		for _, region := range defaultKiroProfileRegions {
+			add(region)
+		}
+	}
+	return regions
+}
+
+func shouldTryNextManagementRegion(ctx context.Context, err error) bool {
+	if err == nil || (ctx != nil && ctx.Err() != nil) {
+		return false
+	}
+	if upstreamErr, ok := asUpstreamError(err); ok {
+		switch upstreamErr.Kind {
+		case UpstreamErrorAuthRevoked, UpstreamErrorTokenExpired, UpstreamErrorSuspended,
+			UpstreamErrorClientRequest, UpstreamErrorCanceled:
+			return false
+		default:
+			return true
+		}
+	}
+	return true
 }
 
 // GetUsageLimits 获取账户使用量和订阅信息
@@ -253,9 +312,29 @@ func GetUsageLimitsContext(ctx context.Context, account *config.Account) (*Usage
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	regions := kiroManagementRegionCandidates(account)
+	var lastErr error
+	for index, region := range regions {
+		result, err := getUsageLimitsForRegion(ctx, account, region)
+		if err == nil {
+			return result, nil
+		}
+		lastErr = err
+		if index+1 >= len(regions) || !shouldTryNextManagementRegion(ctx, err) {
+			break
+		}
+		logger.Warnf("[GetUsageLimits] region %s failed; trying fallback: %v", region, err)
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("no valid Kiro management region")
+	}
+	return nil, lastErr
+}
+
+func getUsageLimitsForRegion(ctx context.Context, account *config.Account, region string) (*UsageLimitsResponse, error) {
 
 	url := fmt.Sprintf("%s/getUsageLimits?origin=AI_EDITOR&resourceType=AGENTIC_REQUEST&isEmailRequired=true", kiroRestAPIBase)
-	url = regionalizeURL(url, account)
+	url = regionalizeURLForRegion(url, region)
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
@@ -298,7 +377,27 @@ func GetUserInfoContext(ctx context.Context, account *config.Account) (*UserInfo
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	url := regionalizeURL(fmt.Sprintf("%s/GetUserInfo", kiroRestAPIBase), account)
+	regions := kiroManagementRegionCandidates(account)
+	var lastErr error
+	for index, region := range regions {
+		result, err := getUserInfoForRegion(ctx, account, region)
+		if err == nil {
+			return result, nil
+		}
+		lastErr = err
+		if index+1 >= len(regions) || !shouldTryNextManagementRegion(ctx, err) {
+			break
+		}
+		logger.Warnf("[GetUserInfo] region %s failed; trying fallback: %v", region, err)
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("no valid Kiro management region")
+	}
+	return nil, lastErr
+}
+
+func getUserInfoForRegion(ctx context.Context, account *config.Account, region string) (*UserInfoResponse, error) {
+	url := regionalizeURLForRegion(fmt.Sprintf("%s/GetUserInfo", kiroRestAPIBase), region)
 
 	payload := `{"origin":"KIRO_IDE"}`
 	req, err := http.NewRequestWithContext(ctx, "POST", url, strings.NewReader(payload))
@@ -885,6 +984,18 @@ func RefreshAccountInfoContext(ctx context.Context, account *config.Account) (*c
 		info.Email = usage.UserInfo.Email
 		info.UserId = usage.UserInfo.UserId
 	}
+	if isEnterpriseIDCAccount(account) && (strings.TrimSpace(info.Email) == "" || strings.TrimSpace(info.UserId) == "") {
+		if userInfo, userErr := GetUserInfoContext(ctx, account); userErr == nil {
+			if info.Email == "" {
+				info.Email = userInfo.Email
+			}
+			if info.UserId == "" {
+				info.UserId = userInfo.UserId
+			}
+		} else {
+			logger.Debugf("[RefreshAccountInfo] GetUserInfo fallback failed for %s: %v", account.Email, userErr)
+		}
+	}
 
 	// 解析订阅信息
 	if usage.SubscriptionInfo != nil {
@@ -896,10 +1007,12 @@ func RefreshAccountInfoContext(ctx context.Context, account *config.Account) (*c
 		if titleOrName == "" {
 			titleOrName = usage.SubscriptionInfo.SubscriptionType
 		}
-		info.SubscriptionType = parseSubscriptionType(titleOrName)
-		info.SubscriptionTitle = usage.SubscriptionInfo.SubscriptionTitle
-		if info.SubscriptionTitle == "" {
-			info.SubscriptionTitle = usage.SubscriptionInfo.SubscriptionName
+		if strings.TrimSpace(titleOrName) != "" {
+			info.SubscriptionType = parseSubscriptionType(titleOrName)
+			info.SubscriptionTitle = usage.SubscriptionInfo.SubscriptionTitle
+			if info.SubscriptionTitle == "" {
+				info.SubscriptionTitle = usage.SubscriptionInfo.SubscriptionName
+			}
 		}
 		logger.Debugf("[RefreshAccountInfo] Subscription: type=%s, title=%s, name=%s, parsed=%s",
 			usage.SubscriptionInfo.SubscriptionType,

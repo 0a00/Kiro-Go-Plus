@@ -10,6 +10,7 @@ import (
 	"kiro-go/internal/httpbody"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -27,6 +28,16 @@ type IamSsoSession struct {
 	ExpiresAt    time.Time
 }
 
+type IamSsoLoginResult struct {
+	AccessToken  string
+	RefreshToken string
+	ClientID     string
+	ClientSecret string
+	Region       string
+	StartURL     string
+	ExpiresIn    int
+}
+
 var (
 	sessions   = make(map[string]*IamSsoSession)
 	sessionsMu sync.RWMutex
@@ -42,6 +53,10 @@ var scopes = []string{
 
 // StartIamSsoLogin 发起 IAM SSO 登录
 func StartIamSsoLogin(startUrl, region string) (sessionID, authorizeUrl string, expiresIn int, err error) {
+	startUrl = NormalizeStartURL(startUrl)
+	if startUrl == "" {
+		return "", "", 0, fmt.Errorf("start URL is required")
+	}
 	if region == "" {
 		region = "us-east-1"
 	}
@@ -97,25 +112,35 @@ func StartIamSsoLogin(startUrl, region string) (sessionID, authorizeUrl string, 
 
 // CompleteIamSsoLogin 完成 IAM SSO 登录
 func CompleteIamSsoLogin(sessionID, callbackUrl string) (accessToken, refreshToken, clientID, clientSecret, region string, expiresIn int, err error) {
+	result, err := CompleteIamSsoLoginWithMetadata(sessionID, callbackUrl)
+	if err != nil {
+		return "", "", "", "", "", 0, err
+	}
+	return result.AccessToken, result.RefreshToken, result.ClientID, result.ClientSecret, result.Region, result.ExpiresIn, nil
+}
+
+// CompleteIamSsoLoginWithMetadata retains the start URL needed to identify and
+// later re-authenticate enterprise IAM Identity Center accounts.
+func CompleteIamSsoLoginWithMetadata(sessionID, callbackUrl string) (*IamSsoLoginResult, error) {
 	sessionsMu.RLock()
 	session, ok := sessions[sessionID]
 	sessionsMu.RUnlock()
 
 	if !ok {
-		return "", "", "", "", "", 0, fmt.Errorf("会话不存在或已过期")
+		return nil, fmt.Errorf("会话不存在或已过期")
 	}
 
 	if time.Now().After(session.ExpiresAt) {
 		sessionsMu.Lock()
 		delete(sessions, sessionID)
 		sessionsMu.Unlock()
-		return "", "", "", "", "", 0, fmt.Errorf("会话已过期")
+		return nil, fmt.Errorf("会话已过期")
 	}
 
 	// 解析回调 URL
 	parsedUrl, err := url.Parse(callbackUrl)
 	if err != nil {
-		return "", "", "", "", "", 0, fmt.Errorf("无效的回调 URL")
+		return nil, fmt.Errorf("无效的回调 URL")
 	}
 
 	code := parsedUrl.Query().Get("code")
@@ -123,20 +148,20 @@ func CompleteIamSsoLogin(sessionID, callbackUrl string) (accessToken, refreshTok
 	errorParam := parsedUrl.Query().Get("error")
 
 	if errorParam != "" {
-		return "", "", "", "", "", 0, fmt.Errorf("授权失败: %s", errorParam)
+		return nil, fmt.Errorf("授权失败: %s", errorParam)
 	}
 
 	if state != session.State {
-		return "", "", "", "", "", 0, fmt.Errorf("状态不匹配，可能存在安全风险")
+		return nil, fmt.Errorf("状态不匹配，可能存在安全风险")
 	}
 
 	if code == "" {
-		return "", "", "", "", "", 0, fmt.Errorf("未收到授权码")
+		return nil, fmt.Errorf("未收到授权码")
 	}
 
 	// 用 code 换取 token
 	oidcBase := fmt.Sprintf("https://oidc.%s.amazonaws.com", session.Region)
-	accessToken, refreshToken, expiresIn, err = exchangeToken(
+	accessToken, refreshToken, expiresIn, err := exchangeToken(
 		oidcBase,
 		session.ClientID,
 		session.ClientSecret,
@@ -145,7 +170,7 @@ func CompleteIamSsoLogin(sessionID, callbackUrl string) (accessToken, refreshTok
 		session.RedirectUri,
 	)
 	if err != nil {
-		return "", "", "", "", "", 0, err
+		return nil, err
 	}
 
 	// 清理会话
@@ -153,7 +178,15 @@ func CompleteIamSsoLogin(sessionID, callbackUrl string) (accessToken, refreshTok
 	delete(sessions, sessionID)
 	sessionsMu.Unlock()
 
-	return accessToken, refreshToken, session.ClientID, session.ClientSecret, session.Region, expiresIn, nil
+	return &IamSsoLoginResult{
+		AccessToken:  accessToken,
+		RefreshToken: refreshToken,
+		ClientID:     session.ClientID,
+		ClientSecret: session.ClientSecret,
+		Region:       strings.TrimSpace(session.Region),
+		StartURL:     NormalizeStartURL(session.StartUrl),
+		ExpiresIn:    expiresIn,
+	}, nil
 }
 
 func registerOIDCClient(oidcBase, startUrl, redirectUri string) (clientID, clientSecret string, err error) {

@@ -2662,8 +2662,12 @@ func applyAccountInfo(account *Account, info AccountInfo) {
 	if info.UserId != "" {
 		account.UserId = info.UserId
 	}
-	account.SubscriptionType = info.SubscriptionType
-	account.SubscriptionTitle = info.SubscriptionTitle
+	if info.SubscriptionType != "" {
+		account.SubscriptionType = info.SubscriptionType
+	}
+	if info.SubscriptionTitle != "" {
+		account.SubscriptionTitle = info.SubscriptionTitle
+	}
 	account.DaysRemaining = info.DaysRemaining
 	account.UsageCurrent = info.UsageCurrent
 	account.UsageLimit = info.UsageLimit

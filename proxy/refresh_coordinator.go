@@ -26,11 +26,12 @@ type coordinatedRefreshCall struct {
 }
 
 type tokenRefreshCoordinator struct {
-	mu       sync.Mutex
-	inFlight map[string]*coordinatedRefreshCall
-	active   int
-	waiting  int
-	notify   chan struct{}
+	mu                   sync.Mutex
+	inFlight             map[string]*coordinatedRefreshCall
+	active               int
+	waiting              int
+	notify               chan struct{}
+	upstreamBlockedUntil time.Time
 }
 
 type credentialPersistRequest struct {
@@ -49,6 +50,8 @@ var sharedTokenRefreshCoordinator = &tokenRefreshCoordinator{
 	inFlight: make(map[string]*coordinatedRefreshCall),
 	notify:   make(chan struct{}),
 }
+
+const refreshUpstreamBlockCooldown = 30 * time.Second
 
 func (c *tokenRefreshCoordinator) Refresh(account *config.Account, force bool) error {
 	return c.RefreshContext(context.Background(), account, force)
@@ -73,6 +76,9 @@ func (c *tokenRefreshCoordinator) RefreshContext(ctx context.Context, account *c
 	}
 	if !force && tokenStillValid(account, config.GetAutoRefreshConfig().TokenRefreshBeforeSeconds) {
 		return nil
+	}
+	if err := c.refreshUpstreamBlockError(); err != nil {
+		return err
 	}
 
 	key := strings.TrimSpace(account.ID)
@@ -129,6 +135,10 @@ func (c *tokenRefreshCoordinator) wait(ctx context.Context, account *config.Acco
 }
 
 func (c *tokenRefreshCoordinator) execute(account *config.Account, refreshConfig config.AutoRefreshConfig) coordinatedRefreshResult {
+	if err := c.refreshUpstreamBlockError(); err != nil {
+		c.dropQueuedRefresh()
+		return coordinatedRefreshResult{err: err}
+	}
 	timeout := time.Duration(refreshConfig.RefreshTaskTimeoutSeconds) * time.Second
 	if timeout < 10*time.Second {
 		timeout = time.Minute
@@ -141,6 +151,9 @@ func (c *tokenRefreshCoordinator) execute(account *config.Account, refreshConfig
 	defer c.releaseSlot()
 
 	accessToken, refreshToken, expiresAt, profileArn, err := auth.RefreshTokenContext(ctx, account)
+	if auth.IsRefreshUpstreamBlocked(err) {
+		c.markRefreshUpstreamBlocked(refreshUpstreamBlockCooldown)
+	}
 	result := coordinatedRefreshResult{
 		accessToken: accessToken, refreshToken: refreshToken,
 		expiresAt: expiresAt, profileArn: profileArn, err: err,
@@ -155,6 +168,37 @@ func (c *tokenRefreshCoordinator) execute(account *config.Account, refreshConfig
 		result.err = err
 	}
 	return result
+}
+
+func (c *tokenRefreshCoordinator) dropQueuedRefresh() {
+	c.mu.Lock()
+	if c.waiting > 0 {
+		c.waiting--
+	}
+	c.mu.Unlock()
+}
+
+func (c *tokenRefreshCoordinator) refreshUpstreamBlockError() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	remaining := time.Until(c.upstreamBlockedUntil)
+	if remaining <= 0 {
+		c.upstreamBlockedUntil = time.Time{}
+		return nil
+	}
+	return fmt.Errorf("%w; retry in %s", auth.ErrRefreshUpstreamBlocked, remaining.Round(time.Second))
+}
+
+func (c *tokenRefreshCoordinator) markRefreshUpstreamBlocked(duration time.Duration) {
+	if duration <= 0 {
+		duration = refreshUpstreamBlockCooldown
+	}
+	c.mu.Lock()
+	until := time.Now().Add(duration)
+	if until.After(c.upstreamBlockedUntil) {
+		c.upstreamBlockedUntil = until
+	}
+	c.mu.Unlock()
 }
 
 func (c *tokenRefreshCoordinator) acquireSlot(ctx context.Context) error {
@@ -297,7 +341,9 @@ func classifyRefreshFailure(endpoint string, err error) *UpstreamError {
 	}
 	kind := UpstreamErrorTokenExpired
 	lower := strings.ToLower(message)
-	if strings.Contains(lower, "invalid_grant") || strings.Contains(lower, "bad credentials") || strings.Contains(lower, "revoked") {
+	if auth.IsRefreshUpstreamBlocked(err) {
+		kind = UpstreamErrorEndpointUnavailable
+	} else if strings.Contains(lower, "invalid_grant") || strings.Contains(lower, "bad credentials") || strings.Contains(lower, "revoked") {
 		kind = UpstreamErrorAuthRevoked
 	}
 	return &UpstreamError{

@@ -629,6 +629,12 @@ func (h *Handler) refreshOneAccount(account *config.Account, autoRefresh config.
 		(account.AccessToken == "" || (account.ExpiresAt > 0 && now > account.ExpiresAt-tokenRefreshBefore))
 	if needsTokenRefresh {
 		if err := h.refreshAccountToken(account); err != nil {
+			if auth.IsRefreshUpstreamBlocked(err) {
+				logger.Debugf("[BackgroundRefresh] Shared authentication upstream block for %s: %v", account.Email, err)
+				result.Reason = "authentication refresh upstream temporarily blocked"
+				result.Err = err
+				return result
+			}
 			logger.Warnf("[BackgroundRefresh] Token refresh failed for %s: %v", account.Email, err)
 			result.Status = "failed"
 			result.Reason = "token refresh failed"
@@ -4581,7 +4587,7 @@ func (h *Handler) apiCompleteIamSso(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	accessToken, refreshToken, clientID, clientSecret, region, expiresIn, err := auth.CompleteIamSsoLogin(req.SessionID, req.CallbackUrl)
+	login, err := auth.CompleteIamSsoLoginWithMetadata(req.SessionID, req.CallbackUrl)
 	if err != nil {
 		w.WriteHeader(400)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
@@ -4589,19 +4595,21 @@ func (h *Handler) apiCompleteIamSso(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 获取用户信息
-	email, _, _ := auth.GetUserInfo(accessToken)
+	email, _, _ := auth.GetUserInfo(login.AccessToken)
 
 	// 创建账号
 	account := config.Account{
 		ID:           auth.GenerateAccountID(),
 		Email:        email,
-		AccessToken:  accessToken,
-		RefreshToken: refreshToken,
-		ClientID:     clientID,
-		ClientSecret: clientSecret,
+		AccessToken:  login.AccessToken,
+		RefreshToken: login.RefreshToken,
+		ClientID:     login.ClientID,
+		ClientSecret: login.ClientSecret,
 		AuthMethod:   "idc",
-		Region:       region,
-		ExpiresAt:    time.Now().Unix() + int64(expiresIn),
+		Provider:     "Enterprise",
+		Region:       login.Region,
+		StartUrl:     login.StartURL,
+		ExpiresAt:    time.Now().Unix() + int64(login.ExpiresIn),
 		Enabled:      true,
 		MachineId:    config.GenerateMachineId(),
 	}
@@ -4808,6 +4816,10 @@ type importCredentialsRequest struct {
 	Provider      string       `json:"provider"`
 	IDP           string       `json:"idp"`
 	Region        string       `json:"region"`
+	AuthRegion    string       `json:"authRegion"`
+	AuthRegionAlt string       `json:"auth_region"`
+	StartUrl      string       `json:"startUrl"`
+	StartUrlAlt   string       `json:"start_url"`
 	ExpiresAt     int64        `json:"expiresAt"`
 	ProfileArn    string       `json:"profileArn"`
 	TokenEndpoint string       `json:"tokenEndpoint"`
@@ -4824,6 +4836,10 @@ type importCredentialsRequest struct {
 		ClientSecret  string       `json:"clientSecret"`
 		AuthMethod    string       `json:"authMethod"`
 		Region        string       `json:"region"`
+		AuthRegion    string       `json:"authRegion"`
+		AuthRegionAlt string       `json:"auth_region"`
+		StartUrl      string       `json:"startUrl"`
+		StartUrlAlt   string       `json:"start_url"`
 		ExpiresAt     int64        `json:"expiresAt"`
 		ProfileArn    string       `json:"profileArn"`
 		TokenEndpoint string       `json:"tokenEndpoint"`
@@ -4966,6 +4982,18 @@ func normalizeNestedCredentialImport(req importCredentialsRequest) importCredent
 	if req.Region == "" {
 		req.Region = creds.Region
 	}
+	if req.AuthRegion == "" {
+		req.AuthRegion = creds.AuthRegion
+	}
+	if req.AuthRegionAlt == "" {
+		req.AuthRegionAlt = creds.AuthRegionAlt
+	}
+	if req.StartUrl == "" {
+		req.StartUrl = creds.StartUrl
+	}
+	if req.StartUrlAlt == "" {
+		req.StartUrlAlt = creds.StartUrlAlt
+	}
 	if req.ExpiresAt == 0 {
 		req.ExpiresAt = creds.ExpiresAt
 	}
@@ -4982,6 +5010,27 @@ func normalizeNestedCredentialImport(req importCredentialsRequest) importCredent
 		req.Scopes = creds.Scopes
 	}
 	return req
+}
+
+func normalizeImportedIDCMetadata(req *importCredentialsRequest) {
+	if req == nil || !strings.EqualFold(strings.TrimSpace(req.AuthMethod), "idc") {
+		return
+	}
+	if region := strings.TrimSpace(req.AuthRegion); region != "" {
+		req.Region = region
+	} else if region := strings.TrimSpace(req.AuthRegionAlt); region != "" {
+		req.Region = region
+	}
+	if strings.TrimSpace(req.StartUrl) == "" {
+		req.StartUrl = strings.TrimSpace(req.StartUrlAlt)
+	}
+	if strings.TrimSpace(req.StartUrl) == "" {
+		req.StartUrl = auth.ExtractStartURLFromClientSecret(req.ClientSecret)
+	}
+	req.StartUrl = auth.NormalizeStartURL(req.StartUrl)
+	if req.StartUrl != "" && !auth.IsBuilderIDStartURL(req.StartUrl) {
+		req.Provider = "Enterprise"
+	}
 }
 
 func applyImportedAccountMetadata(account *config.Account, req importCredentialsRequest) {
@@ -5143,6 +5192,7 @@ func (h *Handler) prepareCredentialsAccount(req importCredentialsRequest) (confi
 func (h *Handler) prepareCredentialsAccountContext(ctx context.Context, req importCredentialsRequest) (config.Account, *credentialImportError) {
 	req = normalizeNestedCredentialImport(req)
 	req.AuthMethod = normalizeImportAuthMethod(req.AuthMethod, req.ClientID, req.ClientSecret, req.KiroApiKey, req.TokenEndpoint)
+	normalizeImportedIDCMetadata(&req)
 	if req.AuthMethod == "api_key" {
 		if req.KiroApiKey == "" {
 			req.KiroApiKey = strings.TrimSpace(req.AccessToken)
@@ -5238,7 +5288,7 @@ func (h *Handler) prepareCredentialsAccountContext(ctx context.Context, req impo
 		tempAccount := &config.Account{
 			RefreshToken: req.RefreshToken, ClientID: req.ClientID,
 			ClientSecret: req.ClientSecret, AuthMethod: req.AuthMethod,
-			Region: req.Region, TokenEndpoint: req.TokenEndpoint,
+			Region: req.Region, StartUrl: req.StartUrl, TokenEndpoint: req.TokenEndpoint,
 			IssuerURL: req.IssuerURL, Scopes: string(req.Scopes),
 		}
 		var newRefreshToken string
@@ -5262,6 +5312,8 @@ func (h *Handler) prepareCredentialsAccountContext(ctx context.Context, req impo
 	}
 	if req.Provider == "" && req.AuthMethod == "external_idp" {
 		req.Provider = "AzureAD"
+	} else if req.Provider == "" && req.AuthMethod == "idc" {
+		req.Provider = "BuilderId"
 	}
 
 	// 创建账号
@@ -5275,6 +5327,7 @@ func (h *Handler) prepareCredentialsAccountContext(ctx context.Context, req impo
 		AuthMethod:    req.AuthMethod,
 		Provider:      req.Provider,
 		Region:        req.Region,
+		StartUrl:      req.StartUrl,
 		ExpiresAt:     expiresAt,
 		Enabled:       true,
 		MachineId:     config.GenerateMachineId(),
@@ -5317,8 +5370,12 @@ func applyProbedAccountInfo(account *config.Account, info *config.AccountInfo) {
 	if info.UserId != "" {
 		account.UserId = info.UserId
 	}
-	account.SubscriptionType = info.SubscriptionType
-	account.SubscriptionTitle = info.SubscriptionTitle
+	if info.SubscriptionType != "" {
+		account.SubscriptionType = info.SubscriptionType
+	}
+	if info.SubscriptionTitle != "" {
+		account.SubscriptionTitle = info.SubscriptionTitle
+	}
 	account.DaysRemaining = info.DaysRemaining
 	account.UsageCurrent = info.UsageCurrent
 	account.UsageLimit = info.UsageLimit

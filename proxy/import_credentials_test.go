@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -398,6 +399,70 @@ func TestApiImportCredentialsAcceptsKiroAPIKeyWithoutRefreshToken(t *testing.T) 
 	}
 	if got.Email != "api-key--key" {
 		t.Fatalf("expected masked API key label, got %q", got.Email)
+	}
+}
+
+func TestApiImportCredentialsRecoversEnterpriseIDCMetadata(t *testing.T) {
+	cfgFile := filepath.Join(t.TempDir(), "config.json")
+	if err := config.Init(cfgFile); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	defer installCleanAuthClient(t)()
+
+	serialized := `{"initiateLoginUri":"https://d-1234567890.awsapps.com/start/"}`
+	secretPayload := `{"serialized":` + strconv.Quote(serialized) + `}`
+	clientSecret := "header." + base64.RawURLEncoding.EncodeToString([]byte(secretPayload)) + ".signature"
+	accessPayload := `{"email":"enterprise@example.com"}`
+	accessToken := "header." + base64.RawURLEncoding.EncodeToString([]byte(accessPayload)) + ".signature"
+
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"accessToken":  accessToken,
+			"refreshToken": "rotated-refresh",
+			"expiresIn":    3600,
+		})
+	}))
+	defer fake.Close()
+
+	oldOIDC := authOidcURL()
+	auth.SetOIDCTokenURLForTest(func(region string) string {
+		if region != "eu-north-1" {
+			t.Errorf("OIDC refresh region = %q, want eu-north-1", region)
+		}
+		return fake.URL
+	})
+	defer auth.SetOIDCTokenURLForTest(oldOIDC)
+
+	body := fmt.Sprintf(`{
+		"credentials": {
+			"refreshToken": "refresh-token",
+			"clientId": "client-id",
+			"clientSecret": %s,
+			"authMethod": "idc",
+			"region": "us-east-1",
+			"authRegion": "eu-north-1"
+		}
+	}`, strconv.Quote(clientSecret))
+	rec := httptest.NewRecorder()
+	(&Handler{pool: accountpool.GetPool()}).apiImportCredentials(
+		rec,
+		httptest.NewRequest(http.MethodPost, "/auth/credentials", strings.NewReader(body)),
+	)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 on enterprise import, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	accounts := config.GetAccounts()
+	if len(accounts) != 1 {
+		t.Fatalf("account count = %d, want 1", len(accounts))
+	}
+	account := accounts[0]
+	if account.Region != "eu-north-1" || account.StartUrl != "https://d-1234567890.awsapps.com/start" {
+		t.Fatalf("enterprise IDC metadata was not retained: %+v", account)
+	}
+	if account.Provider != "Enterprise" || account.AuthMethod != "idc" {
+		t.Fatalf("unexpected enterprise classification: method=%q provider=%q", account.AuthMethod, account.Provider)
 	}
 }
 

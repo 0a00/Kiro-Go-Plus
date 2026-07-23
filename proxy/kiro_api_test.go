@@ -94,6 +94,13 @@ func TestKiroProfileRegionCandidates(t *testing.T) {
 			account: &config.Account{AuthMethod: "idc", Region: "ap-southeast-2"},
 			want:    []string{"ap-southeast-2"},
 		},
+		{
+			name: "enterprise account probes management fallbacks",
+			account: &config.Account{
+				AuthMethod: "idc", Provider: "Enterprise", Region: "eu-north-1",
+			},
+			want: []string{"eu-north-1", "us-east-1", "eu-central-1"},
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -101,6 +108,101 @@ func TestKiroProfileRegionCandidates(t *testing.T) {
 				t.Fatalf("candidate regions = %v, want %v", got, test.want)
 			}
 		})
+	}
+}
+
+func TestGetUsageLimitsEnterpriseFallsBackAcrossRegions(t *testing.T) {
+	var hosts []string
+	kiroRestHttpStore.Store(&http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		hosts = append(hosts, request.URL.Host)
+		if request.URL.Host == "q.eu-north-1.amazonaws.com" {
+			return &http.Response{
+				StatusCode: http.StatusForbidden,
+				Body:       io.NopCloser(strings.NewReader(`{"message":"not available in this region"}`)),
+				Header:     make(http.Header),
+			}, nil
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"userInfo":{"email":"enterprise@example.com","userId":"user-1"}}`)),
+			Header:     make(http.Header),
+		}, nil
+	})})
+	t.Cleanup(func() { InitKiroHttpClient("") })
+
+	usage, err := GetUsageLimitsContext(context.Background(), &config.Account{
+		AccessToken: "token", AuthMethod: "idc", Provider: "Enterprise", Region: "eu-north-1",
+	})
+	if err != nil {
+		t.Fatalf("enterprise region fallback failed: %v", err)
+	}
+	if usage.UserInfo == nil || usage.UserInfo.Email != "enterprise@example.com" {
+		t.Fatalf("unexpected usage response: %+v", usage)
+	}
+	want := []string{"q.eu-north-1.amazonaws.com", "codewhisperer.us-east-1.amazonaws.com"}
+	if !reflect.DeepEqual(hosts, want) {
+		t.Fatalf("usage hosts = %v, want %v", hosts, want)
+	}
+}
+
+func TestGetUsageLimitsEnterpriseDoesNotFallbackOnAuthenticationFailure(t *testing.T) {
+	var calls int32
+	kiroRestHttpStore.Store(&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		atomic.AddInt32(&calls, 1)
+		return &http.Response{
+			StatusCode: http.StatusUnauthorized,
+			Body:       io.NopCloser(strings.NewReader(`{"message":"token expired"}`)),
+			Header:     make(http.Header),
+		}, nil
+	})})
+	t.Cleanup(func() { InitKiroHttpClient("") })
+
+	_, err := GetUsageLimitsContext(context.Background(), &config.Account{
+		AccessToken: "expired", AuthMethod: "idc", Provider: "Enterprise", Region: "eu-north-1",
+	})
+	if err == nil {
+		t.Fatal("expected authentication failure")
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("authentication failure should not probe more regions, calls=%d", got)
+	}
+}
+
+func TestRefreshEnterpriseAccountUsesGetUserInfoFallback(t *testing.T) {
+	var paths []string
+	kiroRestHttpStore.Store(&http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		paths = append(paths, request.URL.Path)
+		body := `{
+			"subscriptionInfo":{"subscriptionTitle":"Kiro Pro"},
+			"usageBreakdownList":[{"currentUsage":12,"usageLimit":100}]
+		}`
+		if request.URL.Path == "/GetUserInfo" {
+			body = `{"email":"enterprise@example.com","userId":"enterprise-user"}`
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Header:     make(http.Header),
+		}, nil
+	})})
+	t.Cleanup(func() { InitKiroHttpClient("") })
+
+	info, err := RefreshAccountInfoContext(context.Background(), &config.Account{
+		Email: "old@example.com", AccessToken: "token", AuthMethod: "idc",
+		Provider: "Enterprise", Region: "us-east-1",
+	})
+	if err != nil {
+		t.Fatalf("refresh enterprise account: %v", err)
+	}
+	if info.Email != "enterprise@example.com" || info.UserId != "enterprise-user" {
+		t.Fatalf("GetUserInfo fallback was not applied: %+v", info)
+	}
+	if info.SubscriptionType != "PRO" || info.UsageLimit != 100 {
+		t.Fatalf("usage metadata mismatch: %+v", info)
+	}
+	want := []string{"/getUsageLimits", "/GetUserInfo"}
+	if !reflect.DeepEqual(paths, want) {
+		t.Fatalf("request paths = %v, want %v", paths, want)
 	}
 }
 

@@ -744,6 +744,40 @@ func TestBatchAccountStatusAndInfoUpdatesPreserveCredentials(t *testing.T) {
 	}
 }
 
+func TestAccountInfoBatchPreservesSubscriptionOnEmptyResponse(t *testing.T) {
+	if err := Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	if err := AddAccount(Account{
+		ID:                "enterprise-power",
+		Enabled:           true,
+		SubscriptionType:  "POWER",
+		SubscriptionTitle: "KIRO POWER",
+		UsageCurrent:      800,
+		UsageLimit:        1000,
+	}); err != nil {
+		t.Fatalf("add account: %v", err)
+	}
+
+	if err := UpdateAccountInfoBatch(map[string]AccountInfo{
+		"enterprise-power": {LastRefresh: 12345},
+	}); err != nil {
+		t.Fatalf("update account info: %v", err)
+	}
+
+	accounts := GetAccounts()
+	if len(accounts) != 1 {
+		t.Fatalf("account count = %d, want 1", len(accounts))
+	}
+	account := accounts[0]
+	if account.SubscriptionType != "POWER" || account.SubscriptionTitle != "KIRO POWER" {
+		t.Fatalf("empty subscription response cleared existing metadata: %+v", account)
+	}
+	if account.LastRefresh != 12345 {
+		t.Fatalf("last refresh = %d, want 12345", account.LastRefresh)
+	}
+}
+
 func TestPrivacySensitiveDefaultsAndProxyValidation(t *testing.T) {
 	if err := Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatalf("init config: %v", err)
