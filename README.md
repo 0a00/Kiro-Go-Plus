@@ -126,6 +126,16 @@ curl http://127.0.0.1:8080/v1/chat/completions \
   -d '{"model":"claude-sonnet-4.5","messages":[{"role":"user","content":"Hello"}]}'
 ```
 
+Read-only usage, profile, and recent request logs for the current key:
+
+```bash
+curl -H "Authorization: Bearer ${KIRO_API_KEY}" http://127.0.0.1:8080/api/stats
+curl -H "Authorization: Bearer ${KIRO_API_KEY}" http://127.0.0.1:8080/api/me
+curl -H "Authorization: Bearer ${KIRO_API_KEY}" 'http://127.0.0.1:8080/api/logs?limit=100'
+```
+
+These endpoints only return data owned by the current key and remain readable after the key is disabled or exhausted. `/v1/stats` is a compatibility alias for `/api/stats` and no longer exposes global account-pool statistics.
+
 ## Microsoft 365 / Entra ID SSO
 
 Kiro hosted SSO uses the fixed callback `http://localhost:3128`. Compose publishes this port on the host loopback interface only.

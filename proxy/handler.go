@@ -981,12 +981,6 @@ func truncateAutoRefreshError(err error) string {
 	return msg
 }
 
-// validateApiKey 验证 API Key（Bool 包装，旧签名仍被部分调用方使用）
-func (h *Handler) validateApiKey(r *http.Request) bool {
-	_, err := h.authenticate(r)
-	return err == nil
-}
-
 // authenticateForClaude runs authenticate and writes a Claude-style error on failure.
 // Returns the request with the matched API key injected into context, or nil if auth failed.
 func (h *Handler) authenticateForClaude(w http.ResponseWriter, r *http.Request) *http.Request {
@@ -1113,6 +1107,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// Claude Code 遥测端点 - 直接返回 200 OK
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.Write([]byte(`{"status":"ok"}`))
+	case (path == "/api/stats" || path == "/v1/stats") && r.Method == http.MethodGet:
+		h.handleCustomerStats(w, r)
+	case path == "/api/me" && r.Method == http.MethodGet:
+		h.handleCustomerMe(w, r)
+	case path == "/api/logs" && r.Method == http.MethodGet:
+		h.handleCustomerLogs(w, r)
 
 	// 管理端点
 	case path == "/admin" || path == "/admin/":
@@ -1127,16 +1127,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleHealth(w, r)
 	case path == "/ready":
 		h.handleReady(w, r)
-
-	// 统计端点（需要 API Key 鉴权）
-	case path == "/v1/stats":
-		if !h.validateApiKey(r) {
-			w.Header().Set("Content-Type", "application/json; charset=utf-8")
-			w.WriteHeader(401)
-			json.NewEncoder(w).Encode(map[string]string{"error": "Invalid or missing API key"})
-			return
-		}
-		h.handleStats(w, r)
 
 	default:
 		http.Error(w, "Not Found", 404)
@@ -1192,23 +1182,6 @@ func (h *Handler) handleReady(w http.ResponseWriter, r *http.Request) {
 		"availableRatio": ratio,
 		"reason":         reason,
 		"version":        config.Version,
-	})
-}
-
-// handleStats 统计数据（需要 API Key 鉴权）
-func (h *Handler) handleStats(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"status":          "ok",
-		"version":         config.Version,
-		"accounts":        h.pool.Count(),
-		"available":       h.pool.AvailableCount(),
-		"totalRequests":   h.totalRequests.Load(),
-		"successRequests": h.successRequests.Load(),
-		"failedRequests":  h.failedRequests.Load(),
-		"totalTokens":     h.totalTokens.Load(),
-		"totalCredits":    h.getCredits(),
-		"uptime":          time.Now().Unix() - h.startTime,
 	})
 }
 

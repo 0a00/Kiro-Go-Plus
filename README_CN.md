@@ -126,6 +126,16 @@ curl http://127.0.0.1:8080/v1/chat/completions \
   -d '{"model":"claude-sonnet-4.5","messages":[{"role":"user","content":"你好"}]}'
 ```
 
+当前 Key 的只读用量、自助信息和最近请求日志：
+
+```bash
+curl -H "Authorization: Bearer ${KIRO_API_KEY}" http://127.0.0.1:8080/api/stats
+curl -H "Authorization: Bearer ${KIRO_API_KEY}" http://127.0.0.1:8080/api/me
+curl -H "Authorization: Bearer ${KIRO_API_KEY}" 'http://127.0.0.1:8080/api/logs?limit=100'
+```
+
+这些接口仅返回当前 Key 的数据，Key 被禁用或额度耗尽后仍可查询。`/v1/stats` 是 `/api/stats` 的兼容别名，不再暴露全局账号池统计。
+
 ## Microsoft 365 / Entra ID SSO
 
 Kiro 托管 SSO 使用固定回调地址 `http://localhost:3128`。Compose 只在宿主机回环地址发布该端口。

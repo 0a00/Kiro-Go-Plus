@@ -314,6 +314,27 @@ func (l *requestLog) list(limit int) []requestLogEntry {
 	return out
 }
 
+func (l *requestLog) listForAPIKey(apiKeyID string, limit int) []requestLogEntry {
+	apiKeyID = strings.TrimSpace(apiKeyID)
+	if l == nil || apiKeyID == "" || limit <= 0 {
+		return []requestLogEntry{}
+	}
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	out := make([]requestLogEntry, 0, limit)
+	for i := len(l.entries) - 1; i >= 0 && len(out) < limit; i-- {
+		if l.entries[i].APIKeyID != apiKeyID {
+			continue
+		}
+		entry := l.entries[i]
+		if entry.RequestToolNames != nil {
+			entry.RequestToolNames = append([]string(nil), entry.RequestToolNames...)
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
 func (h *Handler) recordRequestLog(entry requestLogEntry) {
 	if h == nil {
 		return
