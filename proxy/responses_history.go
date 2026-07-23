@@ -93,7 +93,10 @@ func storedResponseHistoryBytes(response *ResponsesObject) int {
 	if response == nil {
 		return 0
 	}
-	size := len(response.StoredInput) + len(response.Instructions)
+	size := len(response.StoredInput) + len(response.Instructions) + len(response.StoredToolChoice)
+	if tools, err := json.Marshal(response.StoredTools); err == nil {
+		size += len(tools)
+	}
 	if output, err := json.Marshal(response.Output); err == nil {
 		size += len(output)
 	}
@@ -117,18 +120,19 @@ func outputToMessages(items []ResponseOutputItem) []OpenAIMessage {
 				continue
 			}
 			out = append(out, OpenAIMessage{Role: role, Content: text})
-		case "function_call":
+		case "function_call", "custom_tool_call":
 			tc := ToolCall{ID: item.CallID, Type: "function"}
 			if tc.ID == "" {
 				tc.ID = item.ID
 			}
 			tc.Function.Name = item.Name
-			tc.Function.Arguments = item.Arguments
-			out = append(out, OpenAIMessage{
-				Role:      "assistant",
-				Content:   "",
-				ToolCalls: []ToolCall{tc},
-			})
+			if item.Type == "custom_tool_call" {
+				arguments, _ := json.Marshal(map[string]interface{}{"input": item.Input})
+				tc.Function.Arguments = string(arguments)
+			} else {
+				tc.Function.Arguments = item.Arguments
+			}
+			appendResponsesAssistantToolCall(&out, tc)
 		}
 	}
 	return out

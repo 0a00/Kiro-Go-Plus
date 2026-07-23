@@ -95,6 +95,8 @@ func saveResponse(resp *ResponsesObject) error {
 		IncompleteDetails:  resp.IncompleteDetails,
 		Instructions:       resp.Instructions,
 		StoredInput:        resp.StoredInput,
+		StoredTools:        cloneOpenAITools(resp.StoredTools),
+		StoredToolChoice:   cloneRawMessage(resp.StoredToolChoice),
 		StoredAt:           resp.StoredAt,
 		OwnerAPIKeyID:      resp.OwnerAPIKeyID,
 	}
@@ -184,6 +186,8 @@ func loadResponseDocument(id, ownerAPIKeyID string, enforceOwner bool) (*Respons
 		IncompleteDetails:  doc.IncompleteDetails,
 		Instructions:       doc.Instructions,
 		StoredInput:        doc.StoredInput,
+		StoredTools:        cloneOpenAITools(doc.StoredTools),
+		StoredToolChoice:   cloneRawMessage(doc.StoredToolChoice),
 		StoredAt:           doc.StoredAt,
 		OwnerAPIKeyID:      doc.OwnerAPIKeyID,
 	}, nil
@@ -458,6 +462,8 @@ type storedResponseDoc struct {
 	IncompleteDetails  *IncompleteDetails   `json:"incomplete_details,omitempty"`
 	Instructions       string               `json:"instructions,omitempty"`
 	StoredInput        json.RawMessage      `json:"stored_input,omitempty"`
+	StoredTools        []OpenAITool         `json:"stored_tools"`
+	StoredToolChoice   json.RawMessage      `json:"stored_tool_choice,omitempty"`
 	StoredAt           int64                `json:"stored_at"`
 	OwnerAPIKeyID      string               `json:"owner_api_key_id,omitempty"`
 }

@@ -83,7 +83,8 @@ func parseOpenAIToolChoice(raw json.RawMessage) (normalizedToolChoice, error) {
 	if object.Function != nil && strings.TrimSpace(object.Function.Name) != "" {
 		name = strings.TrimSpace(object.Function.Name)
 	}
-	if strings.ToLower(strings.TrimSpace(object.Type)) != "function" || name == "" {
+	choiceType := strings.ToLower(strings.TrimSpace(object.Type))
+	if (choiceType != "function" && choiceType != "custom" && choiceType != "tool") || name == "" {
 		return normalizedToolChoice{}, fmt.Errorf("tool_choice function name is required")
 	}
 	return normalizedToolChoice{mode: "function", name: name}, nil

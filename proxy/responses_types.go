@@ -33,6 +33,8 @@ type ResponsesObject struct {
 	Instructions       string               `json:"instructions,omitempty"`
 	StoredInput        json.RawMessage      `json:"-"`
 	StoredInstr        string               `json:"-"`
+	StoredTools        []OpenAITool         `json:"-"`
+	StoredToolChoice   json.RawMessage      `json:"-"`
 	StoredAt           int64                `json:"stored_at,omitempty"`
 	OwnerAPIKeyID      string               `json:"-"`
 }
@@ -46,6 +48,7 @@ type ResponseOutputItem struct {
 	CallID    string                `json:"call_id,omitempty"`
 	Name      string                `json:"name,omitempty"`
 	Arguments string                `json:"arguments,omitempty"`
+	Input     string                `json:"input,omitempty"`
 	Summary   []ResponseSummaryPart `json:"summary,omitempty"`
 }
 

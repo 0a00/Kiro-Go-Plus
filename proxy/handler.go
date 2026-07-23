@@ -292,6 +292,11 @@ func validateOpenAIRequestShape(req *OpenAIRequest) string {
 	if len(req.Messages) == 0 {
 		return "messages must not be empty"
 	}
+	for index := range req.Messages {
+		if err := normalizeOpenAIMessageRole(&req.Messages[index]); err != nil {
+			return fmt.Sprintf("messages[%d]: %v", index, err)
+		}
+	}
 
 	hasNonSystem := false
 	hasUserContext := false

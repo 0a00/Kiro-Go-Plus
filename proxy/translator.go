@@ -1251,6 +1251,7 @@ type OpenAIRequest struct {
 type OpenAIMessage struct {
 	Role       string      `json:"role"`
 	Content    interface{} `json:"content"`
+	Name       string      `json:"name,omitempty"`
 	ToolCalls  []ToolCall  `json:"tool_calls,omitempty"`
 	ToolCallID string      `json:"tool_call_id,omitempty"`
 }
@@ -1317,6 +1318,31 @@ func (t *OpenAITool) UnmarshalJSON(data []byte) error {
 	}
 	if t.Function.Parameters == nil {
 		t.Function.Parameters = raw.Parameters
+	}
+	return nil
+}
+
+func normalizeOpenAIMessageRole(message *OpenAIMessage) error {
+	if message == nil {
+		return nil
+	}
+
+	original := strings.ToLower(strings.TrimSpace(message.Role))
+	switch original {
+	case "system", "user", "assistant", "tool":
+		message.Role = original
+	case "developer":
+		message.Role = "system"
+	case "function":
+		message.Role = "tool"
+		if strings.TrimSpace(message.ToolCallID) == "" {
+			message.ToolCallID = strings.TrimSpace(message.Name)
+		}
+		if message.ToolCallID == "" {
+			return fmt.Errorf("legacy function message requires name or tool_call_id")
+		}
+	default:
+		return fmt.Errorf("unsupported message role %q", message.Role)
 	}
 	return nil
 }
@@ -2526,7 +2552,8 @@ func convertOpenAIToolsWithRegistry(tools []OpenAITool, registry *toolNameRegist
 
 	result := make([]KiroToolWrapper, 0, len(tools))
 	for _, tool := range tools {
-		if tool.Type != "function" {
+		toolType := strings.ToLower(strings.TrimSpace(tool.Type))
+		if toolType != "function" && toolType != "custom" {
 			continue
 		}
 		desc := tool.Function.Description
@@ -2541,7 +2568,20 @@ func convertOpenAIToolsWithRegistry(tools []OpenAITool, registry *toolNameRegist
 		wrapper := KiroToolWrapper{}
 		wrapper.ToolSpecification.Name = name
 		wrapper.ToolSpecification.Description = normalizeToolDesc(desc, name)
-		wrapper.ToolSpecification.InputSchema = InputSchema{JSON: ensureObjectSchema(tool.Function.Parameters)}
+		parameters := tool.Function.Parameters
+		if toolType == "custom" {
+			parameters = map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"input": map[string]interface{}{
+						"type":        "string",
+						"description": "Raw text input for this tool",
+					},
+				},
+				"required": []string{"input"},
+			}
+		}
+		wrapper.ToolSpecification.InputSchema = InputSchema{JSON: ensureObjectSchema(parameters)}
 		result = append(result, wrapper)
 	}
 	return result

@@ -12,6 +12,78 @@ import (
 
 const defaultResponsesModel = "claude-sonnet-4.5"
 
+type responseToolNameSet map[string]struct{}
+
+func cloneOpenAITools(tools []OpenAITool) []OpenAITool {
+	if tools == nil {
+		return nil
+	}
+	cloned := make([]OpenAITool, len(tools))
+	copy(cloned, tools)
+	return cloned
+}
+
+func cloneRawMessage(raw json.RawMessage) json.RawMessage {
+	if raw == nil {
+		return nil
+	}
+	return append(json.RawMessage(nil), raw...)
+}
+
+func mergeResponsesTools(primary, additional []OpenAITool, specified bool) []OpenAITool {
+	if !specified {
+		return nil
+	}
+	merged := make([]OpenAITool, 0, len(primary)+len(additional))
+	positions := make(map[string]int, len(primary)+len(additional))
+	for _, tool := range append(cloneOpenAITools(primary), additional...) {
+		name := strings.ToLower(strings.TrimSpace(tool.Function.Name))
+		if name == "" {
+			merged = append(merged, tool)
+			continue
+		}
+		if index, exists := positions[name]; exists {
+			merged[index] = tool
+			continue
+		}
+		positions[name] = len(merged)
+		merged = append(merged, tool)
+	}
+	return merged
+}
+
+func applyResponsesRequestOptions(req *ResponsesRequest, input responsesInputResult, previous *ResponsesObject) {
+	if req == nil {
+		return
+	}
+	toolsSpecified := req.Tools != nil || input.AdditionalToolsPresent
+	if toolsSpecified {
+		req.Tools = mergeResponsesTools(req.Tools, input.AdditionalTools, true)
+	} else if previous != nil {
+		req.Tools = cloneOpenAITools(previous.StoredTools)
+	}
+	if len(req.ToolChoice) == 0 && previous != nil {
+		req.ToolChoice = cloneRawMessage(previous.StoredToolChoice)
+	}
+}
+
+func customResponseToolNames(tools []OpenAITool) responseToolNameSet {
+	names := make(responseToolNameSet)
+	for _, tool := range tools {
+		if strings.EqualFold(strings.TrimSpace(tool.Type), "custom") {
+			if name := strings.TrimSpace(tool.Function.Name); name != "" {
+				names[name] = struct{}{}
+			}
+		}
+	}
+	return names
+}
+
+func (names responseToolNameSet) contains(name string) bool {
+	_, ok := names[strings.TrimSpace(name)]
+	return ok
+}
+
 func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		http.Error(w, "Method Not Allowed", 405)
@@ -56,20 +128,24 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 	}
 
 	var historyMessages []OpenAIMessage
+	var previousResponse *ResponsesObject
 	if req.PreviousResponseID != "" {
 		prev, loadErr := loadResponseForOwner(req.PreviousResponseID, apiKeyIDFromContext(r.Context()))
 		if loadErr != nil {
 			h.sendOpenAIError(w, 404, "invalid_request_error", "previous_response_id not found")
 			return
 		}
+		previousResponse = prev
 		historyMessages = expandPreviousResponseHistory(prev)
 	}
 
-	inputMessages, err := parseResponsesInput(req.Input)
+	parsedInput, err := parseResponsesInputWithTools(req.Input)
 	if err != nil {
 		h.sendOpenAIError(w, 400, "invalid_request_error", err.Error())
 		return
 	}
+	applyResponsesRequestOptions(&req, parsedInput, previousResponse)
+	inputMessages := parsedInput.Messages
 
 	finalMessages := make([]OpenAIMessage, 0, len(historyMessages)+len(inputMessages)+1)
 	finalMessages = append(finalMessages, historyMessages...)
@@ -107,8 +183,8 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 		Model:      req.Model,
 		Messages:   finalMessages,
 		Stream:     req.Stream,
-		Tools:      req.Tools,
-		ToolChoice: req.ToolChoice,
+		Tools:      cloneOpenAITools(req.Tools),
+		ToolChoice: cloneRawMessage(req.ToolChoice),
 	}
 	if req.Temperature != nil {
 		value := *req.Temperature
@@ -127,6 +203,7 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 		h.sendOpenAIError(w, 400, "invalid_request_error", err.Error())
 		return
 	}
+	customTools := customResponseToolNames(openaiReq.Tools)
 
 	thinkingCfg := config.GetThinkingConfig()
 	contextWindowTokens := applyOpenAITokenBudgetDefaults(openaiReq)
@@ -160,12 +237,12 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 
 	if req.Stream {
 		h.handleResponsesStream(w, kiroPayload, actualModel, thinking, estimatedInputTokens,
-			apiKeyID, respID, routeKey, &req, storedInputCopy, storeResponse)
+			apiKeyID, respID, routeKey, &req, storedInputCopy, storeResponse, customTools)
 		return
 	}
 
 	h.handleResponsesNonStream(w, kiroPayload, actualModel, thinking, estimatedInputTokens,
-		apiKeyID, respID, routeKey, &req, storedInputCopy, storeResponse)
+		apiKeyID, respID, routeKey, &req, storedInputCopy, storeResponse, customTools)
 }
 
 func responsesRouteKey(payload *KiroPayload, previousResponseID, responseID string) string {
@@ -183,7 +260,7 @@ func responsesRouteKey(payload *KiroPayload, previousResponseID, responseID stri
 func (h *Handler) handleResponsesNonStream(
 	w http.ResponseWriter, payload *KiroPayload, model string, thinking bool,
 	estimatedInputTokens int, apiKeyID, respID, routeKey string,
-	req *ResponsesRequest, storedInput json.RawMessage, storeResponse bool,
+	req *ResponsesRequest, storedInput json.RawMessage, storeResponse bool, customTools responseToolNameSet,
 ) {
 	startedAt := time.Now()
 	firstContent := payload.beginRequestTiming(startedAt)
@@ -306,12 +383,14 @@ func (h *Handler) handleResponsesNonStream(
 		entry.DurationMs = requestDurationMs(startedAt)
 		h.recordRequestLogForPayload(payload, entry)
 
-		respObj := buildResponsesObject(respID, model, finalContent, reasoningContent, toolUses, inputTokens, outputTokens, thinkingTokens, cacheUsage, req)
+		respObj := buildResponsesObject(respID, model, finalContent, reasoningContent, toolUses, inputTokens, outputTokens, thinkingTokens, cacheUsage, req, customTools)
 		if truncated {
 			markResponseIncomplete(respObj)
 		}
 		respObj.StoredInput = storedInput
 		respObj.Instructions = req.Instructions
+		respObj.StoredTools = cloneOpenAITools(req.Tools)
+		respObj.StoredToolChoice = cloneRawMessage(req.ToolChoice)
 		respObj.OwnerAPIKeyID = apiKeyID
 
 		if storeResponse {
@@ -370,6 +449,7 @@ func (h *Handler) handleResponsesNonStream(
 func buildResponsesObject(
 	id, model, content, reasoning string, toolUses []KiroToolUse,
 	inputTokens, outputTokens, thinkingTokens int, cacheUsage promptCacheUsage, req *ResponsesRequest,
+	customTools responseToolNameSet,
 ) *ResponsesObject {
 	output := make([]ResponseOutputItem, 0, 2+len(toolUses))
 
@@ -399,15 +479,7 @@ func buildResponsesObject(
 	}
 
 	for _, tu := range toolUses {
-		args, _ := json.Marshal(tu.Input)
-		output = append(output, ResponseOutputItem{
-			ID:        generateOutputItemID("fc"),
-			Type:      "function_call",
-			Status:    "completed",
-			CallID:    tu.ToolUseID,
-			Name:      tu.Name,
-			Arguments: string(args),
-		})
+		output = append(output, buildResponseToolOutputItem(tu, customTools))
 	}
 
 	if len(output) == 0 {
@@ -436,6 +508,42 @@ func buildResponsesObject(
 	}
 }
 
+func buildResponseToolOutputItem(toolUse KiroToolUse, customTools responseToolNameSet) ResponseOutputItem {
+	if customTools.contains(toolUse.Name) {
+		return ResponseOutputItem{
+			ID:     generateOutputItemID("ctc"),
+			Type:   "custom_tool_call",
+			Status: "completed",
+			CallID: toolUse.ToolUseID,
+			Name:   toolUse.Name,
+			Input:  customResponseToolInput(toolUse.Input),
+		}
+	}
+	arguments, _ := json.Marshal(toolUse.Input)
+	return ResponseOutputItem{
+		ID:        generateOutputItemID("fc"),
+		Type:      "function_call",
+		Status:    "completed",
+		CallID:    toolUse.ToolUseID,
+		Name:      toolUse.Name,
+		Arguments: string(arguments),
+	}
+}
+
+func customResponseToolInput(input map[string]interface{}) string {
+	if raw, exists := input["input"]; exists {
+		return stringifyArbitrary(raw)
+	}
+	if raw, exists := input["_raw_arguments"]; exists {
+		return stringifyArbitrary(raw)
+	}
+	encoded, err := json.Marshal(input)
+	if err != nil {
+		return ""
+	}
+	return string(encoded)
+}
+
 func markResponseIncomplete(response *ResponsesObject) {
 	if response == nil {
 		return
@@ -447,7 +555,7 @@ func markResponseIncomplete(response *ResponsesObject) {
 func (h *Handler) handleResponsesStream(
 	w http.ResponseWriter, payload *KiroPayload, model string, thinking bool,
 	estimatedInputTokens int, apiKeyID, respID, routeKey string,
-	req *ResponsesRequest, storedInput json.RawMessage, storeResponse bool,
+	req *ResponsesRequest, storedInput json.RawMessage, storeResponse bool, customTools responseToolNameSet,
 ) {
 	startedAt := time.Now()
 	firstContent := payload.beginRequestTiming(startedAt)
@@ -700,37 +808,55 @@ func (h *Handler) handleResponsesStream(
 				}
 
 				toolUses = append(toolUses, tu)
-				args, _ := json.Marshal(tu.Input)
-				fcID := generateOutputItemID("fc")
+				item := buildResponseToolOutputItem(tu, customTools)
+				inProgressItem := map[string]interface{}{
+					"id":      item.ID,
+					"type":    item.Type,
+					"status":  "in_progress",
+					"call_id": item.CallID,
+					"name":    item.Name,
+				}
+				if item.Type == "custom_tool_call" {
+					inProgressItem["input"] = ""
+				} else {
+					inProgressItem["arguments"] = ""
+				}
 				send("response.output_item.added", map[string]interface{}{
 					"type":         "response.output_item.added",
 					"output_index": outputIndex,
-					"item": map[string]interface{}{
-						"id":        fcID,
-						"type":      "function_call",
-						"status":    "in_progress",
-						"call_id":   tu.ToolUseID,
-						"name":      tu.Name,
-						"arguments": "",
-					},
+					"item":         inProgressItem,
 				})
-				send("response.function_call_arguments.delta", map[string]interface{}{
-					"type":         "response.function_call_arguments.delta",
-					"item_id":      fcID,
-					"output_index": outputIndex,
-					"delta":        string(args),
-				})
+				if item.Type == "custom_tool_call" {
+					send("response.custom_tool_call_input.delta", map[string]interface{}{
+						"type":         "response.custom_tool_call_input.delta",
+						"item_id":      item.ID,
+						"output_index": outputIndex,
+						"delta":        item.Input,
+					})
+					send("response.custom_tool_call_input.done", map[string]interface{}{
+						"type":         "response.custom_tool_call_input.done",
+						"item_id":      item.ID,
+						"output_index": outputIndex,
+						"input":        item.Input,
+					})
+				} else {
+					send("response.function_call_arguments.delta", map[string]interface{}{
+						"type":         "response.function_call_arguments.delta",
+						"item_id":      item.ID,
+						"output_index": outputIndex,
+						"delta":        item.Arguments,
+					})
+					send("response.function_call_arguments.done", map[string]interface{}{
+						"type":         "response.function_call_arguments.done",
+						"item_id":      item.ID,
+						"output_index": outputIndex,
+						"arguments":    item.Arguments,
+					})
+				}
 				send("response.output_item.done", map[string]interface{}{
 					"type":         "response.output_item.done",
 					"output_index": outputIndex,
-					"item": map[string]interface{}{
-						"id":        fcID,
-						"type":      "function_call",
-						"status":    "completed",
-						"call_id":   tu.ToolUseID,
-						"name":      tu.Name,
-						"arguments": string(args),
-					},
+					"item":         item,
 				})
 				outputIndex++
 				responseStarted = true
@@ -861,13 +987,15 @@ func (h *Handler) handleResponsesStream(
 			Credits:                  credits,
 		}
 
-		respObj := buildResponsesObject(respID, model, finalContent, reasoning, toolUses, inputTokens, outputTokens, thinkingTokens, cacheUsage, req)
+		respObj := buildResponsesObject(respID, model, finalContent, reasoning, toolUses, inputTokens, outputTokens, thinkingTokens, cacheUsage, req, customTools)
 		if truncated {
 			markResponseIncomplete(respObj)
 		}
 		respObj.CreatedAt = createdAt
 		respObj.StoredInput = storedInput
 		respObj.Instructions = req.Instructions
+		respObj.StoredTools = cloneOpenAITools(req.Tools)
+		respObj.StoredToolChoice = cloneRawMessage(req.ToolChoice)
 		respObj.OwnerAPIKeyID = apiKeyID
 
 		if storeResponse {

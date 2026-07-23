@@ -69,7 +69,8 @@ func claudeToolNames(tools []ClaudeTool) []string {
 func openAIToolNames(tools []OpenAITool) []string {
 	names := make([]string, 0, len(tools))
 	for _, tool := range tools {
-		if tool.Type == "function" {
+		switch strings.ToLower(strings.TrimSpace(tool.Type)) {
+		case "function", "custom":
 			names = append(names, tool.Function.Name)
 		}
 	}
