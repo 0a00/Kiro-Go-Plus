@@ -14,7 +14,7 @@ import (
 	"testing"
 )
 
-func stubKiroAPIKeyProbe(t *testing.T, stub func(context.Context, string, string) (*config.AccountInfo, error)) {
+func stubKiroAPIKeyProbe(t *testing.T, stub func(context.Context, string, string, string) (*config.AccountInfo, error)) {
 	t.Helper()
 	original := probeKiroAPIKeyRegion
 	probeKiroAPIKeyRegion = stub
@@ -24,9 +24,12 @@ func stubKiroAPIKeyProbe(t *testing.T, stub func(context.Context, string, string
 func TestResolveKiroAPIKeyRegionDiscoversWorkingCandidate(t *testing.T) {
 	t.Setenv("KIRO_PROFILE_REGIONS", "us-east-1, eu-central-1,us-east-1")
 	var calls []string
-	stubKiroAPIKeyProbe(t, func(_ context.Context, key, region string) (*config.AccountInfo, error) {
+	stubKiroAPIKeyProbe(t, func(_ context.Context, key, region, proxyURL string) (*config.AccountInfo, error) {
 		if key != "ksk_test" {
 			t.Fatalf("unexpected key %q", key)
+		}
+		if proxyURL != "socks5://127.0.0.1:1080" {
+			t.Fatalf("unexpected proxy URL %q", proxyURL)
 		}
 		calls = append(calls, region)
 		if region == "us-east-1" {
@@ -35,7 +38,7 @@ func TestResolveKiroAPIKeyRegionDiscoversWorkingCandidate(t *testing.T) {
 		return &config.AccountInfo{Email: "verified@example.invalid", UserId: "user-verified"}, nil
 	})
 
-	region, info, retryable, err := resolveKiroAPIKeyRegion(context.Background(), "ksk_test", "")
+	region, info, retryable, err := resolveKiroAPIKeyRegion(context.Background(), "ksk_test", "", "socks5://127.0.0.1:1080")
 	if err != nil {
 		t.Fatalf("resolve region: %v", err)
 	}
@@ -49,7 +52,7 @@ func TestResolveKiroAPIKeyRegionDiscoversWorkingCandidate(t *testing.T) {
 
 func TestResolveKiroAPIKeyRegionClassifiesTransientFailure(t *testing.T) {
 	t.Setenv("KIRO_PROFILE_REGIONS", "us-east-1,eu-central-1")
-	stubKiroAPIKeyProbe(t, func(_ context.Context, _, region string) (*config.AccountInfo, error) {
+	stubKiroAPIKeyProbe(t, func(_ context.Context, _, region, _ string) (*config.AccountInfo, error) {
 		if region == "us-east-1" {
 			return nil, context.DeadlineExceeded
 		}
@@ -65,7 +68,7 @@ func TestResolveKiroAPIKeyRegionClassifiesTransientFailure(t *testing.T) {
 func TestResolveKiroAPIKeyRegionValidatesExplicitRegionOnly(t *testing.T) {
 	t.Setenv("KIRO_PROFILE_REGIONS", "us-east-1,eu-central-1")
 	var calls []string
-	stubKiroAPIKeyProbe(t, func(_ context.Context, _, region string) (*config.AccountInfo, error) {
+	stubKiroAPIKeyProbe(t, func(_ context.Context, _, region, _ string) (*config.AccountInfo, error) {
 		calls = append(calls, region)
 		return &config.AccountInfo{UserId: "explicit-user"}, nil
 	})
@@ -84,7 +87,7 @@ func TestApiImportCredentialsDiscoversKiroAPIKeyRegion(t *testing.T) {
 		t.Fatalf("config.Init: %v", err)
 	}
 	t.Setenv("KIRO_PROFILE_REGIONS", "us-east-1,eu-central-1")
-	stubKiroAPIKeyProbe(t, func(_ context.Context, _, region string) (*config.AccountInfo, error) {
+	stubKiroAPIKeyProbe(t, func(_ context.Context, _, region, _ string) (*config.AccountInfo, error) {
 		if region == "us-east-1" {
 			return nil, errors.New("HTTP 403 from GetUsageLimits")
 		}
@@ -121,7 +124,7 @@ func TestApiAddAccountDiscoversKiroAPIKeyRegion(t *testing.T) {
 		t.Fatalf("config.Init: %v", err)
 	}
 	t.Setenv("KIRO_PROFILE_REGIONS", "us-east-1,eu-central-1")
-	stubKiroAPIKeyProbe(t, func(_ context.Context, _, region string) (*config.AccountInfo, error) {
+	stubKiroAPIKeyProbe(t, func(_ context.Context, _, region, _ string) (*config.AccountInfo, error) {
 		if region == "us-east-1" {
 			return nil, errors.New("HTTP 403 from GetUsageLimits")
 		}

@@ -583,6 +583,25 @@ func getRequestEndpoints(preferred string, payload *KiroPayload) []kiroEndpoint 
 	return endpoints
 }
 
+func getRequestEndpointsForAccount(preferred string, payload *KiroPayload, account *config.Account) []kiroEndpoint {
+	endpoints := getRequestEndpoints(preferred, payload)
+	if !isKiroAPIKeyAccount(account) || strings.TrimSpace(account.ProfileArn) != "" {
+		return endpoints
+	}
+
+	compatible := make([]kiroEndpoint, 0, len(endpoints))
+	for _, endpoint := range endpoints {
+		if !endpoint.RequiresProfileArn {
+			compatible = append(compatible, endpoint)
+		}
+	}
+	preferred = strings.ToLower(strings.TrimSpace(preferred))
+	if preferred == "" || preferred == "auto" {
+		compatible = moveEndpointFirst(compatible, "kiro")
+	}
+	return compatible
+}
+
 // CallKiroAPI calls the Kiro streaming API, trying each configured endpoint with automatic fallback.
 func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroStreamCallback) error {
 	requestContext := context.Background()
@@ -655,7 +674,7 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 	// Build endpoint list before profile lookup. Legacy/custom endpoints that do
 	// not require a profile must not pay for a potentially slow profile probe.
 	preferredEndpoint := config.GetPreferredEndpoint()
-	endpoints := getRequestEndpoints(preferredEndpoint, payload)
+	endpoints := getRequestEndpointsForAccount(preferredEndpoint, payload, account)
 	accountID := ""
 	accountEmail := ""
 	if account != nil {

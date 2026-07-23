@@ -32,6 +32,21 @@ func TestResolveProfileArnReturnsCachedValueWithoutRequest(t *testing.T) {
 	}
 }
 
+func TestResolveProfileArnSkipsAPIKeyWithoutRequest(t *testing.T) {
+	kiroRestHttpStore.Store(&http.Client{
+		Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			t.Fatal("unexpected profile lookup for API key account")
+			return nil, nil
+		}),
+	})
+	t.Cleanup(func() { InitKiroHttpClient("") })
+
+	account := &config.Account{AuthMethod: "api_key", KiroApiKey: "ksk_test", AccessToken: "ksk_test"}
+	if _, err := ResolveProfileArn(account); !isProfileArnResolutionSkippedError(err) {
+		t.Fatalf("expected soft profile skip, got %v", err)
+	}
+}
+
 func TestRegionalizeURLPrefersProfileArnRegion(t *testing.T) {
 	account := &config.Account{
 		Region:     "ap-southeast-1",
@@ -202,6 +217,39 @@ func TestGetUsageLimitsContextCancelsTransport(t *testing.T) {
 	}
 	if elapsed := time.Since(started); elapsed > time.Second {
 		t.Fatalf("context cancellation took too long: %s", elapsed)
+	}
+}
+
+func TestGetUsageLimitsDoesNotResolveOrSendProfileArn(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	var calls int32
+	kiroRestHttpStore.Store(&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		atomic.AddInt32(&calls, 1)
+		if req.URL.Path != "/getUsageLimits" {
+			t.Fatalf("unexpected usage request path: %s", req.URL.Path)
+		}
+		if got := req.URL.Query().Get("profileArn"); got != "" {
+			t.Fatalf("usage request included profileArn %q", got)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{}`)),
+			Header:     make(http.Header),
+		}, nil
+	})})
+	t.Cleanup(func() { InitKiroHttpClient("") })
+
+	_, err := GetUsageLimitsContext(context.Background(), &config.Account{
+		AccessToken: "token",
+		ProfileArn:  "arn:aws:codewhisperer:us-east-1:123456789012:profile/test",
+	})
+	if err != nil {
+		t.Fatalf("GetUsageLimitsContext: %v", err)
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("usage request count = %d, want 1", got)
 	}
 }
 

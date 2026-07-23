@@ -4137,6 +4137,12 @@ func (h *Handler) apiAddAccount(w http.ResponseWriter, r *http.Request) {
 		account.ID = auth.GenerateAccountID()
 	}
 	account.KiroApiKey = strings.TrimSpace(account.KiroApiKey)
+	account.ProxyURL = strings.TrimSpace(account.ProxyURL)
+	if err := validateAccountProxyURL(account.ProxyURL); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
 	isAPIKey := isKiroAPIKeyAccount(&account)
 	if isAPIKey {
 		if method := strings.TrimSpace(account.AuthMethod); account.KiroApiKey != "" && method != "" && !strings.EqualFold(method, "api_key") && !strings.EqualFold(method, "apikey") {
@@ -4160,7 +4166,7 @@ func (h *Handler) apiAddAccount(w http.ResponseWriter, r *http.Request) {
 		account.RefreshToken = ""
 		account.ExpiresAt = 0
 		if strings.HasPrefix(account.KiroApiKey, "ksk_") {
-			region, info, retryable, err := resolveKiroAPIKeyRegion(r.Context(), account.KiroApiKey, account.Region)
+			region, info, retryable, err := resolveKiroAPIKeyRegion(r.Context(), account.KiroApiKey, account.Region, account.ProxyURL)
 			if err != nil {
 				status := http.StatusBadRequest
 				if retryable {
@@ -6365,7 +6371,7 @@ func (h *Handler) apiTestAccount(w http.ResponseWriter, r *http.Request, id stri
 
 	var content string
 	var generationErr error
-	for _, endpoint := range getSortedEndpoints(config.GetPreferredEndpoint()) {
+	for _, endpoint := range getRequestEndpointsForAccount(config.GetPreferredEndpoint(), kiroPayload, account) {
 		check := h.testKiroGenerationEndpoint(account, kiroPayload, endpoint)
 		checks = append(checks, check)
 		if check.Success && content == "" {
@@ -6433,7 +6439,7 @@ func (h *Handler) testKiroGenerationEndpoint(account *config.Account, payload *K
 		return check
 	}
 	setPayloadProfileArnForAccount(payloadCopy, account)
-	if strings.TrimSpace(payloadCopy.ProfileArn) == "" {
+	if endpoint.RequiresProfileArn && strings.TrimSpace(payloadCopy.ProfileArn) == "" {
 		if profileArn, err := ResolveProfileArn(account); err == nil {
 			payloadCopy.ProfileArn = profileArn
 		}

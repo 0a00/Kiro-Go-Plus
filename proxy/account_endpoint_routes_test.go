@@ -70,6 +70,28 @@ func TestLongToolRequestPrefersKiroAndUsesSeparateRouteKey(t *testing.T) {
 	}
 }
 
+func TestAPIKeyAccountEndpointsSkipRuntimeAndPreferKiro(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	account := &config.Account{AuthMethod: "api_key", KiroApiKey: "ksk_test"}
+	endpoints := getRequestEndpointsForAccount("auto", &KiroPayload{}, account)
+	if len(endpoints) == 0 || endpoints[0].Key != "kiro" {
+		t.Fatalf("API key endpoint order = %+v", endpoints)
+	}
+	for _, endpoint := range endpoints {
+		if endpoint.RequiresProfileArn || endpoint.Key == "runtime" {
+			t.Fatalf("API key account received profile-bound endpoint: %+v", endpoints)
+		}
+	}
+
+	account.ProfileArn = "arn:aws:codewhisperer:us-east-1:123456789012:profile/test"
+	withProfile := getRequestEndpointsForAccount("auto", &KiroPayload{}, account)
+	if len(withProfile) == 0 || withProfile[0].Key != "runtime" {
+		t.Fatalf("profile-backed API key endpoint order = %+v", withProfile)
+	}
+}
+
 func TestAccountEndpointRouteSkipsCoolingRateLimitedEndpoint(t *testing.T) {
 	registry, _ := newAccountEndpointRouteTestRegistry(t)
 	err := classifyUpstreamHTTPError(http.StatusTooManyRequests, "Kiro Runtime", []byte(`{"message":"too many requests"}`))

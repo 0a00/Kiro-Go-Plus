@@ -155,13 +155,14 @@ func validKiroRegion(region string) bool {
 	return last >= '0' && last <= '9'
 }
 
-var probeKiroAPIKeyRegion = func(ctx context.Context, key, region string) (*config.AccountInfo, error) {
+var probeKiroAPIKeyRegion = func(ctx context.Context, key, region, proxyURL string) (*config.AccountInfo, error) {
 	account := &config.Account{
 		AccessToken: key,
 		KiroApiKey:  key,
 		AuthMethod:  "api_key",
 		Region:      region,
 		MachineId:   config.GenerateMachineId(),
+		ProxyURL:    proxyURL,
 	}
 	return RefreshAccountInfoContext(ctx, account)
 }
@@ -170,13 +171,17 @@ var probeKiroAPIKeyRegion = func(ctx context.Context, key, region string) (*conf
 // explicit region is checked alone; otherwise the configured candidates are
 // tried in order. retryable is true when any failure was transport/upstream
 // related rather than an authentication rejection.
-func resolveKiroAPIKeyRegion(ctx context.Context, key, explicitRegion string) (region string, info *config.AccountInfo, retryable bool, err error) {
+func resolveKiroAPIKeyRegion(ctx context.Context, key, explicitRegion string, proxyURLs ...string) (region string, info *config.AccountInfo, retryable bool, err error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	key = strings.TrimSpace(key)
 	if key == "" {
 		return "", nil, false, fmt.Errorf("kiroApiKey is required")
+	}
+	proxyURL := ""
+	if len(proxyURLs) > 0 {
+		proxyURL = strings.TrimSpace(proxyURLs[0])
 	}
 
 	regions := kiroAPIKeyCandidateRegions()
@@ -190,7 +195,7 @@ func resolveKiroAPIKeyRegion(ctx context.Context, key, explicitRegion string) (r
 	errorsByRegion := make([]string, 0, len(regions))
 	for _, candidate := range regions {
 		probeCtx, cancel := context.WithTimeout(ctx, kiroAPIKeyProbeTimeout)
-		probedInfo, probeErr := probeKiroAPIKeyRegion(probeCtx, key, candidate)
+		probedInfo, probeErr := probeKiroAPIKeyRegion(probeCtx, key, candidate, proxyURL)
 		cancel()
 		if probeErr == nil {
 			return candidate, probedInfo, false, nil
@@ -248,13 +253,9 @@ func GetUsageLimitsContext(ctx context.Context, account *config.Account) (*Usage
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if err := ensureRestProfileArnContext(ctx, account); err != nil {
-		return nil, fmt.Errorf("resolve profileArn: %w", err)
-	}
 
 	url := fmt.Sprintf("%s/getUsageLimits?origin=AI_EDITOR&resourceType=AGENTIC_REQUEST&isEmailRequired=true", kiroRestAPIBase)
 	url = regionalizeURL(url, account)
-	url = withProfileArnQuery(url, account)
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
@@ -424,6 +425,9 @@ func ResolveProfileArnContext(ctx context.Context, account *config.Account) (str
 	}
 	if profileArn := strings.TrimSpace(account.ProfileArn); profileArn != "" {
 		return profileArn, nil
+	}
+	if isKiroAPIKeyAccount(account) {
+		return "", fmt.Errorf("profile ARN resolution skipped: api_key account uses key-bound profile")
 	}
 
 	profileLookupSuppressed := isProfileArnResolutionSuppressed(account)

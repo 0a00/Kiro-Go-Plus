@@ -999,7 +999,7 @@
     const normalized = String(method).toLowerCase();
     if (normalized === 'idc') return t('auth.enterprise');
     if (normalized === 'social') return t('auth.social');
-    if (normalized === 'api_key' || normalized === 'apikey' || normalized === 'api-key') return 'API Key';
+    if (normalized === 'api_key' || normalized === 'apikey' || normalized === 'api-key') return t('auth.apiKey');
     if (normalized === 'builderid') return 'BuilderID';
     if (normalized === 'github') return t('local.providerGithub');
     if (normalized === 'google') return t('local.providerGoogle');
@@ -3171,7 +3171,8 @@
     sso: 'fa-solid fa-shield-halved',
     local: 'fa-solid fa-folder-open',
     credentials: 'fa-solid fa-code',
-    cookie: 'fa-solid fa-cookie-bite'
+    cookie: 'fa-solid fa-cookie-bite',
+    apikey: 'fa-solid fa-lock'
   };
   function methodCard(type, title, desc) {
     var icon = METHOD_ICONS[type] || 'fa-solid fa-circle-plus';
@@ -3196,6 +3197,7 @@
     else if (type === 'local') modalLocal(title, body);
     else if (type === 'credentials') modalCredentials(title, body);
     else if (type === 'cookie') modalCookie(title, body);
+    else if (type === 'apikey') modalApiKey(title, body);
     if (!modal.classList.contains('active')) openDialog('addModal');
     enhanceCustomSelects(body);
   }
@@ -3213,6 +3215,7 @@
       methodCard('builderid', t('modal.builderIdTitle'), t('modal.builderIdDesc')) +
       methodCard('iam', t('modal.iamTitle'), t('modal.iamDesc')) +
       methodCard('enterprisesso', t('modal.enterpriseSsoTitle'), t('modal.enterpriseSsoDesc')) +
+      methodCard('apikey', t('modal.apiKeyTitle'), t('modal.apiKeyDesc')) +
       methodCard('sso', t('modal.ssoTitle'), t('modal.ssoDesc')) +
       methodCard('local', t('modal.localTitle'), t('modal.localDesc')) +
       methodCard('credentials', t('modal.credentialsTitle'), t('modal.credentialsDesc')) +
@@ -3401,6 +3404,59 @@
       '<button class="btn btn-primary" id="importCookieBtn" type="button">' + escapeHtml(t('common.add')) + '</button>' +
       '</div>';
     $('importCookieBtn').addEventListener('click', importFromCookie);
+  }
+  function modalApiKey(title, body) {
+    title.textContent = t('modal.apiKeyTitle');
+    body.innerHTML =
+      '<p class="help-block">' + escapeHtml(t('modal.apiKeyDesc')) + '</p>' +
+      '<div class="form-group"><label>' + escapeHtml(t('apikey.keyLabel')) + '</label>' +
+      '<input type="password" id="kiroApiKeyValue" class="font-mono" placeholder="ksk_..." autocomplete="new-password" spellcheck="false" /></div>' +
+      '<div class="form-group"><label>' + escapeHtml(t('apikey.nickname')) + ' <small>' + escapeHtml(t('apikey.optional')) + '</small></label>' +
+      '<input type="text" id="kiroApiKeyNickname" placeholder="' + escapeAttr(t('apikey.nicknamePlaceholder')) + '" /></div>' +
+      '<div class="form-group"><label>' + escapeHtml(t('detail.region')) + ' <small>' + escapeHtml(t('apikey.autoDetect')) + '</small></label>' +
+      '<input type="text" id="kiroApiKeyRegion" placeholder="us-east-1" /></div>' +
+      '<div class="form-group"><label>' + escapeHtml(t('detail.proxyURL')) + ' <small>' + escapeHtml(t('apikey.optional')) + '</small></label>' +
+      '<input type="text" id="kiroApiKeyProxyURL" placeholder="socks5://host:port" autocomplete="off" spellcheck="false" />' +
+      '<small class="form-hint">' + escapeHtml(t('detail.proxyHint')) + '</small></div>' +
+      '<div class="modal-footer">' +
+      '<button class="btn btn-secondary" data-modal-goto="add" type="button">' + escapeHtml(t('common.back')) + '</button>' +
+      '<button class="btn btn-primary" id="importKiroApiKeyBtn" type="button">' + escapeHtml(t('common.add')) + '</button>' +
+      '</div>';
+    $('importKiroApiKeyBtn').addEventListener('click', importKiroApiKey);
+  }
+  async function importKiroApiKey() {
+    const key = $('kiroApiKeyValue').value.trim();
+    if (!key) return toastWarning(t('apikey.keyMissing'));
+    if (!key.startsWith('ksk_') || key.length <= 4) return toastWarning(t('apikey.keyInvalid'));
+    const button = $('importKiroApiKeyBtn');
+    button.disabled = true;
+    try {
+      const res = await api('/accounts', {
+        method: 'POST',
+        body: JSON.stringify({
+          authMethod: 'api_key',
+          kiroApiKey: key,
+          nickname: $('kiroApiKeyNickname').value.trim(),
+          region: $('kiroApiKeyRegion').value.trim(),
+          proxyURL: $('kiroApiKeyProxyURL').value.trim(),
+          enabled: true
+        })
+      });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok || !d.success) {
+        toastError(t('common.failed') + ': ' + (d.error || res.status));
+        return;
+      }
+      closeModal();
+      loadAccounts();
+      loadStats();
+      toastPrimary(t('apikey.success'));
+      autoRefreshNewAccount(d.id);
+    } catch (e) {
+      toastError(t('common.failed') + ': ' + e.message);
+    } finally {
+      button.disabled = false;
+    }
   }
   function updateLocalFields() {
     const p = $('localProvider').value;
