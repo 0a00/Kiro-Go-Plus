@@ -238,6 +238,7 @@ type AutoRefreshConfig struct {
 // RetryConfig bounds retries across accounts and upstream endpoint fallbacks.
 type RetryConfig struct {
 	MaxAccountAttempts             int `json:"maxAccountAttempts"`
+	AccountSelectionTimeoutSeconds int `json:"accountSelectionTimeoutSeconds"`
 	MaxUpstreamAttempts            int `json:"maxUpstreamAttempts"`
 	MaxRetryDurationSeconds        int `json:"maxRetryDurationSeconds"`
 	FirstTokenTimeoutSeconds       int `json:"firstTokenTimeoutSeconds"`
@@ -497,7 +498,7 @@ const (
 )
 
 // Version current version
-const Version = "1.2.27"
+const Version = "1.2.28"
 
 var (
 	cfg           *Config
@@ -636,6 +637,9 @@ func loadLocked() error {
 		defaults := defaultRetryConfig()
 		if !rawConfigHasNestedKey(data, "retry", "maxAccountAttempts") {
 			c.Retry.MaxAccountAttempts = defaults.MaxAccountAttempts
+		}
+		if !rawConfigHasNestedKey(data, "retry", "accountSelectionTimeoutSeconds") {
+			c.Retry.AccountSelectionTimeoutSeconds = defaults.AccountSelectionTimeoutSeconds
 		}
 		if !rawConfigHasNestedKey(data, "retry", "maxRetryDurationSeconds") {
 			c.Retry.MaxRetryDurationSeconds = defaults.MaxRetryDurationSeconds
@@ -1047,6 +1051,7 @@ func normalizeAutoRefreshLocked() {
 func defaultRetryConfig() RetryConfig {
 	return RetryConfig{
 		MaxAccountAttempts:             8,
+		AccountSelectionTimeoutSeconds: 120,
 		MaxUpstreamAttempts:            12,
 		MaxRetryDurationSeconds:        900,
 		FirstTokenTimeoutSeconds:       45,
@@ -1067,6 +1072,12 @@ func normalizeRetryLocked() {
 	}
 	if cfg.Retry.MaxAccountAttempts > 100 {
 		cfg.Retry.MaxAccountAttempts = 100
+	}
+	if cfg.Retry.AccountSelectionTimeoutSeconds < 10 {
+		cfg.Retry.AccountSelectionTimeoutSeconds = defaults.AccountSelectionTimeoutSeconds
+	}
+	if cfg.Retry.AccountSelectionTimeoutSeconds > 3600 {
+		cfg.Retry.AccountSelectionTimeoutSeconds = 3600
 	}
 	if cfg.Retry.MaxUpstreamAttempts <= 0 {
 		cfg.Retry.MaxUpstreamAttempts = defaults.MaxUpstreamAttempts
@@ -1752,6 +1763,9 @@ func GetRetryConfig() RetryConfig {
 	defaults := defaultRetryConfig()
 	if out.MaxAccountAttempts < 0 {
 		out.MaxAccountAttempts = defaults.MaxAccountAttempts
+	}
+	if out.AccountSelectionTimeoutSeconds < 10 {
+		out.AccountSelectionTimeoutSeconds = defaults.AccountSelectionTimeoutSeconds
 	}
 	if out.MaxUpstreamAttempts <= 0 {
 		out.MaxUpstreamAttempts = defaults.MaxUpstreamAttempts

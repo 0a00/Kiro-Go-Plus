@@ -520,7 +520,7 @@ func TestOperationalConfigDefaults(t *testing.T) {
 	}
 
 	retry := GetRetryConfig()
-	if retry.MaxAccountAttempts != 8 || retry.MaxUpstreamAttempts != 12 || retry.MaxRetryDurationSeconds != 900 ||
+	if retry.MaxAccountAttempts != 8 || retry.AccountSelectionTimeoutSeconds != 120 || retry.MaxUpstreamAttempts != 12 || retry.MaxRetryDurationSeconds != 900 ||
 		retry.FirstTokenTimeoutSeconds != 45 || retry.ToolAssemblyTimeoutSeconds != 180 || retry.EmptyResponseRetries != 2 {
 		t.Fatalf("unexpected retry defaults: %+v", retry)
 	}
@@ -608,6 +608,7 @@ func TestRetryConfigMissingNewTimeoutFieldsUsesDefaults(t *testing.T) {
 		t.Fatalf("parse config: %v", err)
 	}
 	retry := document["retry"].(map[string]interface{})
+	delete(retry, "accountSelectionTimeoutSeconds")
 	delete(retry, "maxRetryDurationSeconds")
 	delete(retry, "toolAssemblyTimeoutSeconds")
 	raw, err = json.Marshal(document)
@@ -621,7 +622,7 @@ func TestRetryConfigMissingNewTimeoutFieldsUsesDefaults(t *testing.T) {
 		t.Fatalf("reload config: %v", err)
 	}
 	got := GetRetryConfig()
-	if got.MaxRetryDurationSeconds != 900 || got.ToolAssemblyTimeoutSeconds != 180 {
+	if got.AccountSelectionTimeoutSeconds != 120 || got.MaxRetryDurationSeconds != 900 || got.ToolAssemblyTimeoutSeconds != 180 {
 		t.Fatalf("missing timeout fields were not migrated: %+v", got)
 	}
 }

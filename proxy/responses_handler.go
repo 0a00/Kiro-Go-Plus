@@ -405,8 +405,11 @@ func (h *Handler) handleResponsesNonStream(
 	}
 
 	if stopErr := attempts.stopErr(); stopErr != nil {
-		h.recordCanceledRequestForPayload(payload, "openai.responses", model, startedAt, firstContent.Value(), stopErr)
-		return
+		if !isAccountSelectionTimeout(stopErr) {
+			h.recordCanceledRequestForPayload(payload, "openai.responses", model, startedAt, firstContent.Value(), stopErr)
+			return
+		}
+		lastErr = stopErr
 	}
 	if lastErr == nil {
 		if busyErr != nil {
@@ -1021,8 +1024,11 @@ func (h *Handler) handleResponsesStream(
 	}
 
 	if stopErr := attempts.stopErr(); stopErr != nil {
-		h.recordCanceledRequestForPayload(payload, "openai.responses.stream", model, startedAt, firstContent.Value(), stopErr)
-		return
+		if !isAccountSelectionTimeout(stopErr) {
+			h.recordCanceledRequestForPayload(payload, "openai.responses.stream", model, startedAt, firstContent.Value(), stopErr)
+			return
+		}
+		lastErr = stopErr
 	}
 	if lastErr == nil {
 		if busyErr != nil {

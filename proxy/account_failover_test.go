@@ -134,6 +134,45 @@ func TestAccountAttemptControllerCancellationInterruptsWait(t *testing.T) {
 	}
 }
 
+func TestAccountAttemptControllerStopsAtSelectionTimeout(t *testing.T) {
+	controller := newAccountAttemptController(context.Background(), nil, 0)
+	controller.setSelectionTimeout(20 * time.Millisecond)
+
+	started := time.Now()
+	if controller.nextRound(5 * time.Second) {
+		t.Fatal("controller continued after account selection deadline")
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("selection timeout took too long: %s", elapsed)
+	}
+	if !isAccountSelectionTimeout(controller.stopErr()) {
+		t.Fatalf("stop error = %v, want account selection timeout", controller.stopErr())
+	}
+	if mapped := mapDownstreamError(controller.stopErr()); mapped.Status != 504 {
+		t.Fatalf("selection timeout mapped to HTTP %d, want 504", mapped.Status)
+	}
+}
+
+func TestAccountAttemptControllerDoesNotCountUpstreamTimeAsSelectionTimeout(t *testing.T) {
+	controller := newAccountAttemptController(context.Background(), nil, 0)
+	controller.setSelectionTimeout(20 * time.Millisecond)
+	if !controller.beginSelection() {
+		t.Fatal("failed to start account selection")
+	}
+	time.Sleep(30 * time.Millisecond)
+	controller.finishSelection()
+
+	if err := controller.stopErr(); err != nil {
+		t.Fatalf("upstream time was treated as an account selection timeout: %v", err)
+	}
+	if controller.beginSelection() {
+		t.Fatal("controller started a new selection after its total budget was consumed")
+	}
+	if !isAccountSelectionTimeout(controller.stopErr()) {
+		t.Fatalf("stop error = %v, want account selection timeout", controller.stopErr())
+	}
+}
+
 func TestAccountAttemptControllerShutdownStopsNewAttempts(t *testing.T) {
 	shutdownCtx, shutdown := context.WithCancel(context.Background())
 	controller := newAccountAttemptController(context.Background(), shutdownCtx, 0)

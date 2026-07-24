@@ -1,5 +1,5 @@
 {
-  "version": "1.2.27",
-  "changelog": "Add model-window-aware input truncation, durable cooldown semantics, account inventory diagnostics, ksk_ region discovery, and native credential scopes compatibility.\n新增按模型上下文窗口裁剪输入、持久化冷却语义、账号库存诊断、ksk_ 区域发现和原生凭据 scopes 兼容。",
+  "version": "1.2.28",
+  "changelog": "Add account-selection total timeout, scoped API-key self-service endpoints, enterprise refresh hardening, and Responses compatibility.\n新增账号选择总超时、API Key 隔离自助接口、企业账号刷新加固和 Responses 兼容。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }

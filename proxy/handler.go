@@ -2539,8 +2539,11 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 	}
 
 	if stopErr := attempts.stopErr(); stopErr != nil {
-		h.recordCanceledRequestForPayload(payload, "claude.messages.stream", model, startedAt, firstContent.Value(), stopErr)
-		return
+		if !isAccountSelectionTimeout(stopErr) {
+			h.recordCanceledRequestForPayload(payload, "claude.messages.stream", model, startedAt, firstContent.Value(), stopErr)
+			return
+		}
+		lastErr = stopErr
 	}
 	if lastErr == nil {
 		if busyErr != nil {
@@ -2917,8 +2920,11 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 	}
 
 	if stopErr := attempts.stopErr(); stopErr != nil {
-		h.recordCanceledRequestForPayload(payload, "claude.messages", model, startedAt, firstContent.Value(), stopErr)
-		return
+		if !isAccountSelectionTimeout(stopErr) {
+			h.recordCanceledRequestForPayload(payload, "claude.messages", model, startedAt, firstContent.Value(), stopErr)
+			return
+		}
+		lastErr = stopErr
 	}
 	if lastErr == nil {
 		if busyErr != nil {
@@ -3523,8 +3529,11 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 	}
 
 	if stopErr := attempts.stopErr(); stopErr != nil {
-		h.recordCanceledRequestForPayload(payload, "openai.chat.stream", model, startedAt, firstContent.Value(), stopErr)
-		return
+		if !isAccountSelectionTimeout(stopErr) {
+			h.recordCanceledRequestForPayload(payload, "openai.chat.stream", model, startedAt, firstContent.Value(), stopErr)
+			return
+		}
+		lastErr = stopErr
 	}
 	if lastErr == nil {
 		if busyErr != nil {
@@ -3701,8 +3710,11 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 	}
 
 	if stopErr := attempts.stopErr(); stopErr != nil {
-		h.recordCanceledRequestForPayload(payload, "openai.chat", model, startedAt, firstContent.Value(), stopErr)
-		return
+		if !isAccountSelectionTimeout(stopErr) {
+			h.recordCanceledRequestForPayload(payload, "openai.chat", model, startedAt, firstContent.Value(), stopErr)
+			return
+		}
+		lastErr = stopErr
 	}
 	if lastErr == nil {
 		if busyErr != nil {
@@ -5844,9 +5856,10 @@ func (h *Handler) apiGetRetryConfig(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) apiUpdateRetryConfig(w http.ResponseWriter, r *http.Request) {
 	var update struct {
 		config.RetryConfig
-		MaxAccountAttempts         *int `json:"maxAccountAttempts"`
-		MaxRetryDurationSeconds    *int `json:"maxRetryDurationSeconds"`
-		ToolAssemblyTimeoutSeconds *int `json:"toolAssemblyTimeoutSeconds"`
+		MaxAccountAttempts             *int `json:"maxAccountAttempts"`
+		AccountSelectionTimeoutSeconds *int `json:"accountSelectionTimeoutSeconds"`
+		MaxRetryDurationSeconds        *int `json:"maxRetryDurationSeconds"`
+		ToolAssemblyTimeoutSeconds     *int `json:"toolAssemblyTimeoutSeconds"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&update); err != nil {
 		w.WriteHeader(400)
@@ -5861,6 +5874,11 @@ func (h *Handler) apiUpdateRetryConfig(w http.ResponseWriter, r *http.Request) {
 	req := update.RetryConfig
 	req.MaxAccountAttempts = *update.MaxAccountAttempts
 	current := config.GetRetryConfig()
+	if update.AccountSelectionTimeoutSeconds == nil {
+		req.AccountSelectionTimeoutSeconds = current.AccountSelectionTimeoutSeconds
+	} else {
+		req.AccountSelectionTimeoutSeconds = *update.AccountSelectionTimeoutSeconds
+	}
 	if update.MaxRetryDurationSeconds == nil {
 		req.MaxRetryDurationSeconds = current.MaxRetryDurationSeconds
 	} else {
@@ -5875,6 +5893,7 @@ func (h *Handler) apiUpdateRetryConfig(w http.ResponseWriter, r *http.Request) {
 		req.StreamIdleTimeoutSeconds = current.StreamIdleTimeoutSeconds
 	}
 	if req.MaxAccountAttempts < 0 || req.MaxAccountAttempts > 100 ||
+		req.AccountSelectionTimeoutSeconds < 10 || req.AccountSelectionTimeoutSeconds > 3600 ||
 		req.MaxUpstreamAttempts < 1 || req.MaxUpstreamAttempts > 200 ||
 		req.MaxRetryDurationSeconds < 0 || req.MaxRetryDurationSeconds > 86400 ||
 		req.FirstTokenTimeoutSeconds < 5 || req.FirstTokenTimeoutSeconds > 600 ||

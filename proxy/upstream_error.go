@@ -136,6 +136,10 @@ func mapDownstreamError(err error) downstreamError {
 		mapped.Status = http.StatusServiceUnavailable
 		return mapped
 	}
+	if isAccountSelectionTimeout(err) {
+		mapped.Status = http.StatusGatewayTimeout
+		return mapped
+	}
 
 	if errors.Is(err, context.DeadlineExceeded) {
 		mapped.Status = http.StatusGatewayTimeout

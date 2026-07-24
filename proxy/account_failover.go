@@ -2,6 +2,8 @@ package proxy
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"kiro-go/config"
 	"kiro-go/logger"
 	accountpool "kiro-go/pool"
@@ -15,16 +17,25 @@ const (
 	accountRetryMaximumDelay = 5 * time.Second
 )
 
+var errAccountSelectionTimeout = errors.New("account selection timed out")
+
 // accountAttemptController keeps finite retry behavior unchanged while making
-// maxAccountAttempts=0 a context-aware, paced polling mode.
+// unlimited polling bounded and cancellation-aware. Selection time is
+// accumulated only while looking for an account, not during upstream calls.
 type accountAttemptController struct {
-	requestCtx  context.Context
-	shutdownCtx context.Context
-	maxAttempts int
-	attempts    int
-	rounds      int
-	excluded    map[string]bool
-	wait        func(time.Duration) bool
+	requestCtx        context.Context
+	shutdownCtx       context.Context
+	maxAttempts       int
+	attempts          int
+	rounds            int
+	excluded          map[string]bool
+	wait              func(time.Duration) bool
+	selectionDeadline time.Time
+	selectionTimeout  time.Duration
+	selectionStarted  time.Time
+	selectionElapsed  time.Duration
+	selectionActive   bool
+	selectionTimedOut bool
 }
 
 func newAccountAttemptController(requestCtx, shutdownCtx context.Context, maxAttempts int) *accountAttemptController {
@@ -46,11 +57,54 @@ func (h *Handler) newAccountAttemptController(requestCtx context.Context) *accou
 	if h != nil {
 		shutdownCtx = h.backgroundCtx
 	}
-	return newAccountAttemptController(requestCtx, shutdownCtx, config.GetRetryConfig().MaxAccountAttempts)
+	retry := config.GetRetryConfig()
+	controller := newAccountAttemptController(requestCtx, shutdownCtx, retry.MaxAccountAttempts)
+	controller.setSelectionTimeout(time.Duration(retry.AccountSelectionTimeoutSeconds) * time.Second)
+	return controller
+}
+
+func (c *accountAttemptController) setSelectionTimeout(timeout time.Duration) {
+	if c == nil || timeout <= 0 {
+		return
+	}
+	c.selectionTimeout = timeout
+	c.selectionDeadline = time.Time{}
+	c.selectionStarted = time.Time{}
+	c.selectionElapsed = 0
+	c.selectionActive = false
+	c.selectionTimedOut = false
+}
+
+func (c *accountAttemptController) beginSelection() bool {
+	if c == nil || c.selectionTimeout <= 0 {
+		return c != nil
+	}
+	if c.selectionTimedOut || c.selectionActive {
+		return !c.selectionTimedOut
+	}
+	remaining := c.selectionTimeout - c.selectionElapsed
+	if remaining <= 0 {
+		c.selectionTimedOut = true
+		return false
+	}
+	c.selectionStarted = time.Now()
+	c.selectionDeadline = c.selectionStarted.Add(remaining)
+	c.selectionActive = true
+	return true
+}
+
+func (c *accountAttemptController) finishSelection() {
+	if c == nil || !c.selectionActive {
+		return
+	}
+	c.selectionElapsed += time.Since(c.selectionStarted)
+	c.selectionStarted = time.Time{}
+	c.selectionDeadline = time.Time{}
+	c.selectionActive = false
 }
 
 func (c *accountAttemptController) next() bool {
-	if c == nil || c.stopErr() != nil {
+	if c == nil || !c.beginSelection() || c.stopErr() != nil {
 		return false
 	}
 	if c.maxAttempts > 0 && c.attempts >= c.maxAttempts {
@@ -61,7 +115,7 @@ func (c *accountAttemptController) next() bool {
 }
 
 func (c *accountAttemptController) nextRound(retryAfter time.Duration) bool {
-	if c == nil || c.maxAttempts != 0 || c.stopErr() != nil {
+	if c == nil || c.maxAttempts != 0 || !c.beginSelection() || c.stopErr() != nil {
 		return false
 	}
 	delay := c.roundDelay(retryAfter)
@@ -95,6 +149,11 @@ func (c *accountAttemptController) roundDelay(retryAfter time.Duration) time.Dur
 }
 
 func (c *accountAttemptController) waitForDelay(delay time.Duration) bool {
+	if remaining := c.selectionTimeRemaining(); remaining <= 0 {
+		return false
+	} else if remaining > 0 && remaining < delay {
+		delay = remaining
+	}
 	timer := time.NewTimer(delay)
 	defer timer.Stop()
 
@@ -104,7 +163,7 @@ func (c *accountAttemptController) waitForDelay(delay time.Duration) bool {
 	}
 	select {
 	case <-timer.C:
-		return true
+		return c.stopErr() == nil
 	case <-c.requestCtx.Done():
 		return false
 	case <-shutdownDone:
@@ -124,18 +183,50 @@ func (c *accountAttemptController) stopErr() error {
 			return err
 		}
 	}
+	if c.selectionTimedOut {
+		return fmt.Errorf("%w after %s", errAccountSelectionTimeout, c.selectionTimeout)
+	}
+	if !c.selectionActive || c.selectionDeadline.IsZero() {
+		return nil
+	}
+	if !time.Now().Before(c.selectionDeadline) {
+		c.selectionTimedOut = true
+		return fmt.Errorf("%w after %s", errAccountSelectionTimeout, c.selectionTimeout)
+	}
 	return nil
+}
+
+func (c *accountAttemptController) selectionTimeRemaining() time.Duration {
+	if c == nil || !c.selectionActive || c.selectionDeadline.IsZero() {
+		return -1
+	}
+	remaining := time.Until(c.selectionDeadline)
+	if remaining <= 0 {
+		return 0
+	}
+	return remaining
+}
+
+func isAccountSelectionTimeout(err error) bool {
+	return errors.Is(err, errAccountSelectionTimeout)
 }
 
 func (h *Handler) acquireNextAccountForRequest(controller *accountAttemptController, model, routeKey string, payloads ...*KiroPayload) (account *config.Account, guard *accountpool.UpstreamRequestGuard, busyResult *accountpool.UpstreamBusyError) {
 	startedAt := time.Now()
 	defer func() {
+		if controller == nil {
+			return
+		}
 		if len(payloads) == 0 || payloads[0] == nil {
 			return
 		}
 		affinityHit := guard != nil && guard.AffinityHit()
 		payloads[0].recordAccountSelection(time.Since(startedAt), controller.attempts, affinityHit)
 	}()
+	if controller == nil || !controller.beginSelection() {
+		return nil, nil, nil
+	}
+	defer controller.finishSelection()
 	for controller.next() {
 		account, guard, busy := h.acquireAccountForModel(model, routeKey, controller.excluded)
 		if account != nil {

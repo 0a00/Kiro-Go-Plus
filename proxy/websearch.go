@@ -179,6 +179,10 @@ func (h *Handler) handleClaudeWebSearch(ctx context.Context, w http.ResponseWrit
 		if upstreamErr, ok := asUpstreamError(err); ok && upstreamErr.Kind == UpstreamErrorCanceled {
 			return
 		}
+		statusCode := http.StatusBadGateway
+		if isAccountSelectionTimeout(err) {
+			statusCode = http.StatusGatewayTimeout
+		}
 		if trace := requestDetailTraceFromContext(ctx); trace != nil {
 			trace.recordError(err)
 		}
@@ -187,17 +191,17 @@ func (h *Handler) handleClaudeWebSearch(ctx context.Context, w http.ResponseWrit
 			RequestID:      requestIDFromContext(ctx),
 			Protocol:       "claude.web_search",
 			Model:          req.Model,
-			StatusCode:     502,
+			StatusCode:     statusCode,
 			Error:          err.Error(),
 			RequestSummary: query,
 		})
-		h.sendClaudeError(w, 502, "api_error", err.Error())
+		h.sendClaudeError(w, statusCode, "api_error", err.Error())
 		h.recordRequestLogForContext(ctx, requestLogEntry{
 			Timestamp:    time.Now().Unix(),
 			Protocol:     "claude.web_search",
 			Model:        req.Model,
 			Status:       "failed",
-			StatusCode:   http.StatusBadGateway,
+			StatusCode:   statusCode,
 			DurationMs:   requestDurationMs(startedAt),
 			InputTokens:  estimatedInputTokens,
 			OutputTokens: 0,
@@ -299,6 +303,9 @@ func (h *Handler) callWebSearchMCP(ctx context.Context, model, query string) (*w
 		}
 	}
 	if err := attempts.stopErr(); err != nil {
+		if isAccountSelectionTimeout(err) {
+			return nil, err
+		}
 		return nil, classifyRequestCancellation("Kiro MCP WebSearch", err)
 	}
 	if lastErr != nil {
