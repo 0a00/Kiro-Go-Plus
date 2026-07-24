@@ -1,5 +1,5 @@
 {
-  "version": "1.2.28",
-  "changelog": "Add account-selection total timeout, scoped API-key self-service endpoints, enterprise refresh hardening, and Responses compatibility.\n新增账号选择总超时、API Key 隔离自助接口、企业账号刷新加固和 Responses 兼容。",
+  "version": "1.2.29",
+  "changelog": "Add bulk API key creation with one-key-per-line input.\n新增 API Key 批量添加功能，支持一行一个 Key。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }

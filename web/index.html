@@ -401,10 +401,16 @@
           <div class="form-group" style="margin-top: 1rem;">
             <div class="flex items-center gap-2" style="justify-content: space-between;">
               <label class="font-semibold" data-i18n="apiKeys.listTitle"></label>
-              <button class="btn btn-outline btn-sm" id="addApiKeyBtn" type="button">
-                <i class="fa-solid fa-plus"></i>
-                <span data-i18n="apiKeys.add"></span>
-              </button>
+              <div class="flex items-center gap-2" style="flex-wrap:wrap;justify-content:flex-end;">
+                <button class="btn btn-outline btn-sm" id="addApiKeysBatchBtn" type="button">
+                  <i class="fa-solid fa-layer-group"></i>
+                  <span data-i18n="apiKeys.addBatch"></span>
+                </button>
+                <button class="btn btn-outline btn-sm" id="addApiKeyBtn" type="button">
+                  <i class="fa-solid fa-plus"></i>
+                  <span data-i18n="apiKeys.add"></span>
+                </button>
+              </div>
             </div>
             <small data-i18n="apiKeys.listHint"></small>
           </div>
@@ -1403,6 +1409,34 @@
         <div class="modal-footer">
           <button class="btn btn-secondary" id="apiKeyModalCancelBtn" type="button" data-i18n="apiKeys.cancelBtn"></button>
           <button class="btn btn-primary" id="apiKeyModalSaveBtn" type="button" data-i18n="apiKeys.saveBtn"></button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="apiKeyBatchModal" class="modal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <span class="modal-title" data-i18n="apiKeys.batchTitle"></span>
+        <button class="modal-close" id="apiKeyBatchModalClose" type="button" aria-label=""
+          data-i18n-aria-label="common.close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label data-i18n="apiKeys.batchInput"></label>
+          <textarea id="apiKeyBatchForm_keys" rows="12" class="font-mono"
+            data-i18n-placeholder="apiKeys.batchPlaceholder" spellcheck="false"></textarea>
+          <small data-i18n="apiKeys.batchHint"></small>
+        </div>
+        <div class="form-group">
+          <label class="flex items-center gap-2">
+            <span class="switch"><input type="checkbox" id="apiKeyBatchForm_enabled" checked /><span class="slider"></span></span>
+            <span data-i18n="apiKeys.formEnabled"></span>
+          </label>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" id="apiKeyBatchModalCancelBtn" type="button" data-i18n="apiKeys.cancelBtn"></button>
+          <button class="btn btn-primary" id="apiKeyBatchModalSaveBtn" type="button" data-i18n="apiKeys.batchSaveBtn"></button>
         </div>
       </div>
     </div>

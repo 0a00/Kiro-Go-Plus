@@ -5,7 +5,10 @@ import (
 	"fmt"
 	"kiro-go/config"
 	"net/http"
+	"strings"
 )
+
+const maxApiKeyBatchEntries = 1000
 
 // apiKeyView is the response payload for listing/inspecting API keys. The Key field
 // is masked so admins can identify entries without exposing the secret.
@@ -130,6 +133,58 @@ func (h *Handler) apiCreateApiKey(w http.ResponseWriter, r *http.Request) {
 		"id":      entry.ID,
 		"key":     entry.Key,
 		"apiKey":  toApiKeyView(entry),
+	})
+}
+
+type apiKeyBatchCreateRequest struct {
+	Keys    string `json:"keys"`
+	Enabled *bool  `json:"enabled,omitempty"`
+}
+
+func (h *Handler) apiCreateApiKeysBatch(w http.ResponseWriter, r *http.Request) {
+	var req apiKeyBatchCreateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON"})
+		return
+	}
+
+	lines := strings.Split(req.Keys, "\n")
+	entries := make([]config.ApiKeyEntry, 0, len(lines))
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		entries = append(entries, config.ApiKeyEntry{Key: line, Enabled: true})
+	}
+	if len(entries) == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "keys must contain at least one non-empty line"})
+		return
+	}
+	if len(entries) > maxApiKeyBatchEntries {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": fmt.Sprintf("at most %d API keys can be added at once", maxApiKeyBatchEntries)})
+		return
+	}
+	if req.Enabled != nil {
+		for i := range entries {
+			entries[i].Enabled = *req.Enabled
+		}
+	}
+
+	created, skipped, err := config.AddApiKeys(entries)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	emptyLines := len(lines) - len(entries)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":               true,
+		"createdCount":          len(created),
+		"skippedDuplicateCount": len(skipped),
+		"ignoredEmptyLineCount": emptyLines,
 	})
 }
 

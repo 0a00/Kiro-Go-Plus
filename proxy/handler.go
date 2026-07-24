@@ -4028,6 +4028,8 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 		h.apiListApiKeys(w, r)
 	case path == "/api-keys" && r.Method == "POST":
 		h.apiCreateApiKey(w, r)
+	case path == "/api-keys/batch" && r.Method == "POST":
+		h.apiCreateApiKeysBatch(w, r)
 	case strings.HasPrefix(path, "/api-keys/") && strings.HasSuffix(path, "/reset-usage") && r.Method == "POST":
 		id := strings.TrimSuffix(strings.TrimPrefix(path, "/api-keys/"), "/reset-usage")
 		h.apiResetApiKeyUsage(w, r, id)

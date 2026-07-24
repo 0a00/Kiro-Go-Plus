@@ -78,6 +78,51 @@ func AddApiKey(entry ApiKeyEntry) (ApiKeyEntry, error) {
 	return entry, nil
 }
 
+// AddApiKeys appends a batch of unique API key entries with one config write.
+// Empty values are ignored. Duplicate values are returned in skipped so the
+// caller can report them without exposing the keys in an API response.
+func AddApiKeys(entries []ApiKeyEntry) (created []ApiKeyEntry, skipped []string, err error) {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	if cfg == nil {
+		return nil, nil, errors.New("config not initialized")
+	}
+
+	existing := make(map[string]struct{}, len(cfg.ApiKeys)+len(entries))
+	for _, current := range cfg.ApiKeys {
+		existing[current.Key] = struct{}{}
+	}
+	for _, entry := range entries {
+		entry.Key = strings.TrimSpace(entry.Key)
+		if entry.Key == "" {
+			continue
+		}
+		if _, ok := existing[entry.Key]; ok {
+			skipped = append(skipped, entry.Key)
+			continue
+		}
+		if entry.ID == "" {
+			entry.ID = newUUID()
+		}
+		if entry.CreatedAt == 0 {
+			entry.CreatedAt = time.Now().Unix()
+		}
+		created = append(created, entry)
+		existing[entry.Key] = struct{}{}
+	}
+	if len(created) == 0 {
+		return nil, skipped, nil
+	}
+
+	originalLen := len(cfg.ApiKeys)
+	cfg.ApiKeys = append(cfg.ApiKeys, created...)
+	if err := saveLocked(); err != nil {
+		cfg.ApiKeys = cfg.ApiKeys[:originalLen]
+		return nil, nil, err
+	}
+	return created, skipped, nil
+}
+
 // UpdateApiKey applies a patch to an existing API key. Patch semantics:
 //   - Name, Key are overwritten when non-empty in patch.
 //   - Enabled, TokenLimit, CreditLimit are always overwritten (zero values are valid).

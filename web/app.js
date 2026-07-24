@@ -2813,6 +2813,7 @@
   let apiKeysCache = [];
   let apiKeyEditingId = '';
   let apiKeyModalSubmitting = false;
+  let apiKeyBatchSubmitting = false;
 
   async function loadApiKeys() {
     const list = $('apiKeysList');
@@ -2935,6 +2936,53 @@
     apiKeyEditingId = '';
     apiKeyModalSubmitting = false;
     $('apiKeyModalSaveBtn').disabled = false;
+  }
+
+  function openApiKeyBatchModal() {
+    $('apiKeyBatchForm_keys').value = '';
+    $('apiKeyBatchForm_enabled').checked = true;
+    apiKeyBatchSubmitting = false;
+    $('apiKeyBatchModalSaveBtn').disabled = false;
+    openDialog('apiKeyBatchModal');
+  }
+
+  function closeApiKeyBatchModal() {
+    closeDialog('apiKeyBatchModal');
+    apiKeyBatchSubmitting = false;
+    $('apiKeyBatchModalSaveBtn').disabled = false;
+  }
+
+  async function submitApiKeyBatchModal() {
+    if (apiKeyBatchSubmitting) return;
+    const rawKeys = $('apiKeyBatchForm_keys').value;
+    const nonEmptyKeys = rawKeys.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+    if (!nonEmptyKeys.length) {
+      toast(t('apiKeys.batchNoInput'), 'warning');
+      return;
+    }
+    apiKeyBatchSubmitting = true;
+    const saveBtn = $('apiKeyBatchModalSaveBtn');
+    saveBtn.disabled = true;
+    try {
+      const res = await api('/api-keys/batch', {
+        method: 'POST',
+        body: JSON.stringify({
+          keys: rawKeys,
+          enabled: $('apiKeyBatchForm_enabled').checked
+        })
+      });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok || d.success === false) throw new Error(d.error || t('common.saveFailed'));
+      const created = Number(d.createdCount) || 0;
+      const skipped = Number(d.skippedDuplicateCount) || 0;
+      toast(t(created ? 'apiKeys.batchResult' : 'apiKeys.batchResultEmpty', created, skipped), created ? 'success' : 'warning');
+      closeApiKeyBatchModal();
+      await loadApiKeys();
+    } catch (e) {
+      toast((e && e.message) || t('common.saveFailed'), 'error');
+      apiKeyBatchSubmitting = false;
+      saveBtn.disabled = false;
+    }
   }
 
   async function submitApiKeyModal() {
@@ -3087,12 +3135,20 @@
     }
     const addBtn = $('addApiKeyBtn');
     if (addBtn) addBtn.addEventListener('click', () => openApiKeyModal(null));
+    const addBatchBtn = $('addApiKeysBatchBtn');
+    if (addBatchBtn) addBatchBtn.addEventListener('click', openApiKeyBatchModal);
     const saveBtn = $('apiKeyModalSaveBtn');
     if (saveBtn) saveBtn.addEventListener('click', submitApiKeyModal);
     const cancelBtn = $('apiKeyModalCancelBtn');
     if (cancelBtn) cancelBtn.addEventListener('click', closeApiKeyModal);
     const closeBtn = $('apiKeyModalClose');
     if (closeBtn) closeBtn.addEventListener('click', closeApiKeyModal);
+    const batchSaveBtn = $('apiKeyBatchModalSaveBtn');
+    if (batchSaveBtn) batchSaveBtn.addEventListener('click', submitApiKeyBatchModal);
+    const batchCancelBtn = $('apiKeyBatchModalCancelBtn');
+    if (batchCancelBtn) batchCancelBtn.addEventListener('click', closeApiKeyBatchModal);
+    const batchCloseBtn = $('apiKeyBatchModalClose');
+    if (batchCloseBtn) batchCloseBtn.addEventListener('click', closeApiKeyBatchModal);
     const showCloseBtn = $('apiKeyShowCloseBtn');
     if (showCloseBtn) showCloseBtn.addEventListener('click', closeShowApiKeyModal);
     const showCloseX = $('apiKeyShowClose');
@@ -3100,6 +3156,7 @@
     const copyBtn = $('apiKeyShowCopyBtn');
     if (copyBtn) copyBtn.addEventListener('click', copyNewApiKey);
     bindDialogBackdropClose('apiKeyModal', closeApiKeyModal);
+    bindDialogBackdropClose('apiKeyBatchModal', closeApiKeyBatchModal);
     bindDialogBackdropClose('apiKeyShowModal', closeShowApiKeyModal);
   }
 

@@ -168,6 +168,40 @@ func TestApiKeyCRUD(t *testing.T) {
 	}
 }
 
+func TestAddApiKeysBatchPersistsUniqueEntries(t *testing.T) {
+	cfgFile := filepath.Join(t.TempDir(), "config.json")
+	if err := Init(cfgFile); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	created, skipped, err := AddApiKeys([]ApiKeyEntry{
+		{Key: " sk-batch-a ", Enabled: true},
+		{Key: "sk-batch-b", Enabled: true},
+		{Key: "sk-batch-a", Enabled: true},
+		{Key: "", Enabled: true},
+	})
+	if err != nil {
+		t.Fatalf("batch add: %v", err)
+	}
+	if len(created) != 2 || len(skipped) != 1 {
+		t.Fatalf("created=%d skipped=%d, want created=2 skipped=1", len(created), len(skipped))
+	}
+	if created[0].Key != "sk-batch-a" || created[1].Key != "sk-batch-b" {
+		t.Fatalf("unexpected created keys: %+v", created)
+	}
+	if created[0].ID == "" || created[1].ID == "" {
+		t.Fatalf("batch entries did not receive IDs: %+v", created)
+	}
+
+	if err := Init(cfgFile); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	keys := ListApiKeys()
+	if len(keys) != 2 || keys[0].Key != "sk-batch-a" || keys[1].Key != "sk-batch-b" {
+		t.Fatalf("batch entries were not persisted: %+v", keys)
+	}
+}
+
 func TestRecordApiKeyUsageConcurrent(t *testing.T) {
 	cfgFile := filepath.Join(t.TempDir(), "config.json")
 	if err := Init(cfgFile); err != nil {
