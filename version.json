@@ -1,5 +1,5 @@
 {
   "version": "1.2.30",
-  "changelog": "Add bulk API key creation with one-key-per-line input.\n新增 API Key 批量添加功能，支持一行一个 Key。",
+  "changelog": "Harden credential imports with explicit authentication precedence, paginated profile discovery, profile validation, rotated Refresh Token recovery, and complete credential exports.\n强化凭据导入：显式认证优先、Profile 分页发现与校验、旋转 Refresh Token 恢复及完整凭据导出。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }
