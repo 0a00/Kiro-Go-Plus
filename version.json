@@ -1,5 +1,5 @@
 {
-  "version": "1.2.30",
-  "changelog": "Harden credential imports with explicit authentication precedence, paginated profile discovery, profile validation, rotated Refresh Token recovery, and complete credential exports.\n强化凭据导入：显式认证优先、Profile 分页发现与校验、旋转 Refresh Token 恢复及完整凭据导出。",
+  "version": "1.2.31",
+  "changelog": "Add Claude Opus 5 support with 1M/128K model metadata, a 512-token cache threshold, dynamic Kiro capability discovery, and native reasoning effort forwarding across Anthropic, Chat Completions, and Responses APIs.\n新增 Claude Opus 5 支持：1M/128K 模型元数据、512 Token 缓存门槛、Kiro 动态能力发现，以及 Anthropic、Chat Completions 和 Responses 接口的原生 reasoning effort 转发。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }

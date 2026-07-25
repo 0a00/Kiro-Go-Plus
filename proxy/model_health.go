@@ -158,6 +158,7 @@ func (h *Handler) runModelHealthProbe(parent context.Context, model string, kind
 			return result
 		}
 	}
+	h.prepareOpenAINativeEffort(req, thinking)
 
 	payload := OpenAIToKiro(req, thinking)
 	payload.requestContext = ctx

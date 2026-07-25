@@ -6,6 +6,7 @@ import (
 )
 
 var builtInKiroModels = map[string]struct{}{
+	"claude-opus-5":     {},
 	"claude-sonnet-5":   {},
 	"claude-opus-4.8":   {},
 	"claude-opus-4.7":   {},

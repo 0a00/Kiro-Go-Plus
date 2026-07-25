@@ -27,6 +27,7 @@ const promptCacheShardCount = 64
 // short requests.
 const defaultMinCacheableTokens = 1024
 const opusMinCacheableTokens = 4096
+const opus5MinCacheableTokens = 512
 
 type promptCacheUsage struct {
 	CacheCreationInputTokens   int
@@ -69,6 +70,12 @@ type promptCacheProfile struct {
 }
 
 func minCacheableTokensForModel(model string) int {
+	if discovered := discoveredPromptCacheMinimum(model); discovered > 0 {
+		return discovered
+	}
+	if isClaudeOpus5Model(model) {
+		return opus5MinCacheableTokens
+	}
 	lower := strings.ToLower(model)
 	if strings.Contains(lower, "opus") {
 		return opusMinCacheableTokens

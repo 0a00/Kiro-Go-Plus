@@ -1233,16 +1233,33 @@ func buildAnthropicModelsResponse(cached []ModelInfo, thinkingSuffix string) []m
 				maxInputTokens = m.TokenLimits.MaxInputTokens
 				maxOutputTokens = m.TokenLimits.MaxOutputTokens
 			}
-			models = append(models, buildModelInfoWithLimits(m.ModelId, "anthropic", supportsImage, maxInputTokens, maxOutputTokens))
+			if maxInputTokens <= 0 {
+				maxInputTokens = m.ContextWindow
+			}
+			base := buildModelInfoWithLimits(m.ModelId, "anthropic", supportsImage, maxInputTokens, maxOutputTokens)
+			enrichModelResponse(base, m)
+			models = append(models, base)
 			// 自动生成 thinking 变体
-			models = append(models, buildModelInfoWithLimits(m.ModelId+thinkingSuffix, "anthropic", supportsImage, maxInputTokens, maxOutputTokens))
+			thinkingModel := buildModelInfoWithLimits(m.ModelId+thinkingSuffix, "anthropic", supportsImage, maxInputTokens, maxOutputTokens)
+			enrichModelResponse(thinkingModel, m)
+			models = append(models, thinkingModel)
 		}
 	}
 	return models
 }
 
 func fallbackAnthropicModels(thinkingSuffix string) []map[string]interface{} {
+	opus5 := buildModelInfoWithLimits("claude-opus-5", "anthropic", true, 1_000_000, 128_000)
+	opus5Thinking := buildModelInfoWithLimits("claude-opus-5"+thinkingSuffix, "anthropic", true, 1_000_000, 128_000)
+	for _, model := range []map[string]interface{}{opus5, opus5Thinking} {
+		model["effort_levels"] = []string{effortLow, effortMedium, effortHigh, effortXHigh, effortMax}
+		model["prompt_cache_min_tokens"] = 512
+		model["upstream_context_window"] = 1_000_000
+		model["upstream_max_output_tokens"] = 128_000
+	}
 	return []map[string]interface{}{
+		opus5,
+		opus5Thinking,
 		buildModelInfo("claude-sonnet-5", "anthropic", true),
 		buildModelInfo("claude-sonnet-5"+thinkingSuffix, "anthropic", true),
 		buildModelInfo("claude-opus-4.8", "anthropic", true),
@@ -1261,6 +1278,33 @@ func fallbackAnthropicModels(thinkingSuffix string) []map[string]interface{} {
 		buildModelInfo("claude-haiku-4.5"+thinkingSuffix, "anthropic", true),
 		buildModelInfo("claude-opus-4.5", "anthropic", true),
 		buildModelInfo("claude-opus-4.5"+thinkingSuffix, "anthropic", true),
+	}
+}
+
+func enrichModelResponse(response map[string]interface{}, model ModelInfo) {
+	if len(model.Capabilities) > 0 {
+		response["kiro_capabilities"] = append([]string(nil), model.Capabilities...)
+	}
+	if len(model.EffortLevels) > 0 {
+		response["effort_levels"] = append([]string(nil), model.EffortLevels...)
+	}
+	if model.EffortSchemaPath != "" {
+		response["effort_schema_path"] = model.EffortSchemaPath
+	}
+	if model.PromptCaching != nil {
+		response["prompt_caching"] = model.PromptCaching
+		if model.PromptCaching.MinimumTokensPerCacheCheckpoint > 0 {
+			response["prompt_cache_min_tokens"] = model.PromptCaching.MinimumTokensPerCacheCheckpoint
+		}
+	}
+	if model.ContextWindow > 0 {
+		response["upstream_context_window"] = model.ContextWindow
+	}
+	if model.TokenLimits != nil {
+		response["upstream_token_limits"] = map[string]int{
+			"max_input_tokens":  model.TokenLimits.MaxInputTokens,
+			"max_output_tokens": model.TokenLimits.MaxOutputTokens,
+		}
 	}
 }
 
@@ -1638,12 +1682,15 @@ func mergeUniqueModels(existing []ModelInfo, incoming []ModelInfo) []ModelInfo {
 
 	indexByID := make(map[string]int, len(existing))
 	merged := make([]ModelInfo, len(existing))
-	copy(merged, existing)
+	for i := range existing {
+		merged[i] = cloneModelInfo(existing[i])
+	}
 	for i, model := range merged {
 		indexByID[strings.ToLower(strings.TrimSpace(model.ModelId))] = i
 	}
 
 	for _, model := range incoming {
+		model = cloneModelInfo(model)
 		key := strings.ToLower(strings.TrimSpace(model.ModelId))
 		if key == "" {
 			continue
@@ -1666,8 +1713,18 @@ func mergeModelInfo(base ModelInfo, extra ModelInfo) ModelInfo {
 	if base.Description == "" {
 		base.Description = extra.Description
 	}
+	if base.Provider == "" {
+		base.Provider = extra.Provider
+	}
+	if extra.ContextWindow > base.ContextWindow {
+		base.ContextWindow = extra.ContextWindow
+	}
+	base.IsDefault = base.IsDefault || extra.IsDefault
 	if base.RateMultiplier == 0 {
 		base.RateMultiplier = extra.RateMultiplier
+	}
+	if base.RateUnit == "" {
+		base.RateUnit = extra.RateUnit
 	}
 	if base.TokenLimits == nil {
 		base.TokenLimits = extra.TokenLimits
@@ -1679,6 +1736,31 @@ func mergeModelInfo(base ModelInfo, extra ModelInfo) ModelInfo {
 			base.TokenLimits.MaxOutputTokens = extra.TokenLimits.MaxOutputTokens
 		}
 	}
+	if base.PromptCaching == nil {
+		if extra.PromptCaching != nil {
+			cache := *extra.PromptCaching
+			base.PromptCaching = &cache
+		}
+	} else if extra.PromptCaching != nil {
+		if extra.PromptCaching.MaximumCacheCheckpointsPerRequest > base.PromptCaching.MaximumCacheCheckpointsPerRequest {
+			base.PromptCaching.MaximumCacheCheckpointsPerRequest = extra.PromptCaching.MaximumCacheCheckpointsPerRequest
+		}
+		if extra.PromptCaching.MinimumTokensPerCacheCheckpoint > base.PromptCaching.MinimumTokensPerCacheCheckpoint {
+			base.PromptCaching.MinimumTokensPerCacheCheckpoint = extra.PromptCaching.MinimumTokensPerCacheCheckpoint
+		}
+		if extra.PromptCaching.SupportsPromptCaching != nil && (base.PromptCaching.SupportsPromptCaching == nil || *extra.PromptCaching.SupportsPromptCaching) {
+			supported := *extra.PromptCaching.SupportsPromptCaching
+			base.PromptCaching.SupportsPromptCaching = &supported
+		}
+	}
+	if len(base.AdditionalModelRequestFieldsSchema) == 0 && len(extra.AdditionalModelRequestFieldsSchema) > 0 {
+		base.AdditionalModelRequestFieldsSchema = extra.AdditionalModelRequestFieldsSchema
+	}
+	if base.EffortSchemaPath == "" {
+		base.EffortSchemaPath = extra.EffortSchemaPath
+	}
+	base.Capabilities = mergeStringLists(base.Capabilities, extra.Capabilities)
+	base.EffortLevels = mergeStringLists(base.EffortLevels, extra.EffortLevels)
 	base.InputTypes = mergeStringLists(base.InputTypes, extra.InputTypes)
 	return base
 }
@@ -1739,6 +1821,7 @@ func (h *Handler) handleCountTokens(w http.ResponseWriter, r *http.Request) {
 
 	actualModel, thinking := resolveClaudeThinkingMode(req.Model, req.Thinking, thinkingCfg.Suffix)
 	req.Model = actualModel
+	h.prepareClaudeNativeEffort(&req, thinking)
 	effectiveReq := cloneClaudeRequestForThinking(&req, thinking)
 
 	estimatedTokens := estimateClaudeRequestInputTokens(effectiveReq)
@@ -1845,6 +1928,7 @@ func (h *Handler) handleClaudeMessages(w http.ResponseWriter, r *http.Request) {
 		contextWindowTokens = resolveContextWindowTokens(actualModel, req.ContextWindow, req.MaxInputTokens)
 	}
 	req.Model = actualModel
+	h.prepareClaudeNativeEffort(&req, thinking)
 	effectiveReq := cloneClaudeRequestForThinking(&req, thinking)
 	thinkingResponseOpts := resolveClaudeThinkingResponseOptions(req.Thinking, thinkingCfg.ClaudeFormat)
 	estimatedInputTokens := estimateClaudeRequestInputTokens(effectiveReq)
@@ -3039,6 +3123,10 @@ func (h *Handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 		contextWindowTokens = resolveContextWindowTokens(actualModel, req.ContextWindow, req.MaxInputTokens)
 	}
 	req.Model = actualModel
+	if normalizeRequestedEffort(req.ReasoningEffort) != "" {
+		thinking = true
+	}
+	h.prepareOpenAINativeEffort(&req, thinking)
 	estimatedInputTokens := estimateOpenAIRequestInputTokens(&req)
 	if admissionErr := reserveAPIKeyTokens(r.Context(), estimatedInputTokens); admissionErr != nil {
 		applyAuthErrorHeaders(w, admissionErr)

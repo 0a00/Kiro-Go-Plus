@@ -559,6 +559,7 @@ func TestParseModelAndThinking(t *testing.T) {
 		{"haiku dash form", "claude-haiku-4-5", "claude-haiku-4.5", false},
 		{"haiku dot form", "claude-haiku-4.5", "claude-haiku-4.5", false},
 		{"future major bump", "claude-sonnet-5-0", "claude-sonnet-5.0", false},
+		{"opus 5 bare major", "claude-opus-5", "claude-opus-5", false},
 
 		// Bare family name passes through (no minor to normalize).
 		{"bare sonnet 4", "claude-sonnet-4", "claude-sonnet-4", false},
@@ -581,6 +582,7 @@ func TestParseModelAndThinking(t *testing.T) {
 		// Thinking suffix is stripped before mapping.
 		{"thinking suffix on dash form", "claude-opus-4-8-thinking", "claude-opus-4.8", true},
 		{"thinking suffix on dot form", "claude-sonnet-4.5-thinking", "claude-sonnet-4.5", true},
+		{"thinking suffix on opus 5", "claude-opus-5-thinking", "claude-opus-5", true},
 		{"thinking suffix on legacy alias", "claude-3-5-sonnet-thinking", "claude-sonnet-4.5", true},
 
 		// Unknown models pass through unchanged.

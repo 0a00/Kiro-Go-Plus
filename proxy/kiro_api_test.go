@@ -326,12 +326,12 @@ func TestListAvailableModelsFollowsPaginationAndCachesTokenLimits(t *testing.T) 
 		if req.URL.Path != "/ListAvailableModels" || req.URL.Query().Get("maxResults") != "50" {
 			t.Fatalf("unexpected models request: %s", req.URL.String())
 		}
-		body := `{"models":[{"modelId":"model-page-one","tokenLimits":{"maxInputTokens":111,"maxOutputTokens":11}}],"nextToken":"page-two"}`
+		body := `{"models":[{"modelId":"model-page-one","contextWindow":1000000,"capabilities":["vision","reasoning"],"promptCaching":{"minimumTokensPerCacheCheckpoint":512,"supportsPromptCaching":true},"tokenLimits":{"maxInputTokens":111,"maxOutputTokens":11},"additionalModelRequestFieldsSchema":{"type":"object","properties":{"output_config":{"type":"object","properties":{"effort":{"type":"string","enum":["low","medium","high","xhigh","max"]}}}}}}],"nextToken":"page-two"}`
 		if call == 2 {
 			if got := req.URL.Query().Get("nextToken"); got != "page-two" {
 				t.Fatalf("expected pagination token, got %q", got)
 			}
-			body = `{"models":[{"modelId":"model-page-two","tokenLimits":{"maxInputTokens":222,"maxOutputTokens":22}}]}`
+			body = `{"availableModels":[{"modelId":"model-page-two","tokenLimits":{"maxInputTokens":222,"maxOutputTokens":22}}]}`
 		}
 		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
 	})})
@@ -349,6 +349,15 @@ func TestListAvailableModelsFollowsPaginationAndCachesTokenLimits(t *testing.T) 
 	}
 	if limits, ok := getDiscoveredModelTokenLimits("model-page-two"); !ok || limits.MaxInputTokens != 222 || limits.MaxOutputTokens != 22 {
 		t.Fatalf("expected discovered limits to be cached, got %+v ok=%v", limits, ok)
+	}
+	if models[0].ContextWindow != 1000000 || models[0].EffortSchemaPath != "output_config" || !reflect.DeepEqual(models[0].EffortLevels, []string{"low", "medium", "high", "xhigh", "max"}) {
+		t.Fatalf("expected dynamic model capabilities to be preserved, got %+v", models[0])
+	}
+	if models[0].PromptCaching == nil || models[0].PromptCaching.MinimumTokensPerCacheCheckpoint != 512 {
+		t.Fatalf("expected prompt caching metadata, got %+v", models[0].PromptCaching)
+	}
+	if got := discoveredPromptCacheMinimum("model-page-one"); got != 512 {
+		t.Fatalf("discovered cache minimum = %d, want 512", got)
 	}
 }
 

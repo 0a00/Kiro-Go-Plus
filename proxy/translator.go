@@ -159,6 +159,8 @@ type ClaudeRequest struct {
 	RequireToolUse   bool   `json:"-"`
 	RequiredToolName string `json:"-"`
 	ToolUsePolicy    string `json:"-"`
+	NativeEffort     string `json:"-"`
+	NativeEffortPath string `json:"-"`
 }
 
 type ClaudeThinkingConfig struct {
@@ -399,6 +401,7 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 			TopP:        topP,
 		}
 	}
+	applyNativeEffort(payload, req.NativeEffortPath, req.NativeEffort)
 
 	truncatePayloadToLimit(payload, systemPrompt != "")
 
@@ -419,6 +422,9 @@ func buildClaudeSystemPrompt(system interface{}, thinkingPrompt string) string {
 
 func claudeThinkingPrompt(req *ClaudeRequest, enabled bool) string {
 	if !enabled || req == nil {
+		return ""
+	}
+	if req.NativeEffort != "" {
 		return ""
 	}
 	cfg := config.GetThinkingConfig()
@@ -1246,6 +1252,10 @@ type OpenAIRequest struct {
 	Stream              bool            `json:"stream,omitempty"`
 	Tools               []OpenAITool    `json:"tools,omitempty"`
 	ToolChoice          json.RawMessage `json:"tool_choice,omitempty"`
+	ReasoningEffort     string          `json:"reasoning_effort,omitempty"`
+
+	NativeEffort     string `json:"-"`
+	NativeEffortPath string `json:"-"`
 }
 
 type OpenAIMessage struct {
@@ -1429,7 +1439,7 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 	}
 
 	// 如果启用 thinking 模式，注入 thinking 提示
-	if thinking {
+	if thinking && req.NativeEffort == "" {
 		thinkingCfg := config.GetThinkingConfig()
 		thinkingPrompt := buildThinkingPrompt(nil, nil, req.MaxTokens, thinkingCfg.DefaultBudgetTokens, thinkingCfg.BudgetCapTokens)
 		if !hasThinkingModeTags(systemPrompt) {
@@ -1609,6 +1619,7 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 			TopP:        req.TopP,
 		}
 	}
+	applyNativeEffort(payload, req.NativeEffortPath, req.NativeEffort)
 
 	truncatePayloadToLimit(payload, systemPrompt != "")
 

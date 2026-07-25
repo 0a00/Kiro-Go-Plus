@@ -20,6 +20,9 @@ func TestRequestedModelAvailabilityUsesCurrentCache(t *testing.T) {
 	if !h.requestedModelAvailable("claude-opus-4.8", "claude-opus-4.8") {
 		t.Fatal("known hidden model was rejected because it was absent from the live cache")
 	}
+	if !h.requestedModelAvailable("claude-opus-5-thinking", "claude-opus-5") {
+		t.Fatal("Opus 5 thinking variant was rejected")
+	}
 	if h.requestedModelAvailable("claude-sonnet-4.8", "claude-sonnet-4.8") {
 		t.Fatal("model absent from a populated cache was accepted")
 	}

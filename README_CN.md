@@ -23,9 +23,9 @@ Kiro-Go Plus 保留原 Kiro-Go 的接口兼容性和部署方式，重点增强�
 - 流式解析：AWS EventStream 长度与 CRC 校验、空闲超时、截断响应检测
 - 认证方式：Builder ID、IAM Identity Center、Kiro 托管 SSO、Microsoft 365 / Entra ID、SSO Token、API Key、Kiro 原生/KAM JSON 导入；`ksk_` Key 落盘前自动发现并验证数据面区域
 - Prompt Cache：可设置缓存创建与读取比例区间、5m/1h TTL、分片 LRU、API Key 隔离、可选重启持久化指纹、命中率和未命中原因诊断
-- 扩展能力：动态模型发现与文本/思考/工具能力自检、Web Search、外部 Token 计数、Responses 历史存储
+- 扩展能力：Claude Opus 5（1M 上下文、128K 输出元数据、512 Token 缓存门槛）、动态模型能力与 effort 发现、文本/思考/工具能力自检、Web Search、外部 Token 计数、Responses 历史存储
 - 运维能力：账号库存诊断（延迟/错误 EWMA 与粘性命中率）、持久化请求元数据、账号选择与首 SSE/思考/文本/工具输出耗时、最大事件间隔、可选完整日志（脱敏请求/输出、重试和流时间线）、诊断事件、Webhook 告警、`/health`、`/ready`
-- Token 与 Agent 稳定性：可配置默认思考、最大输出和上下文预算；客户端显式值优先；Claude 工具流支持安全、自适应、平衡和实时四档策略
+- Token 与 Agent 稳定性：支持 Kiro 原生 reasoning effort，可配置默认思考、最大输出和上下文预算；客户端显式值优先；Claude 工具流支持安全、自适应、平衡和实时四档策略
 - 出站网络：全局和账号级 HTTP / SOCKS5 代理
 
 Prompt Cache 仅模拟并统计 Anthropic 缓存用量，不缓存模型响应正文。持久化仅保存版本化提示词指纹和元数据，文件权限为 `0600`；实时账号健康指标仅用于诊断，不会改变路由。

@@ -9,6 +9,18 @@ import (
 	"time"
 )
 
+func TestMinCacheableTokensForOpus5(t *testing.T) {
+	if got := minCacheableTokensForModel("claude-opus-5"); got != 512 {
+		t.Fatalf("Opus 5 cache minimum = %d, want 512", got)
+	}
+	if got := minCacheableTokensForModel("claude-opus-5-thinking"); got != 512 {
+		t.Fatalf("Opus 5 thinking cache minimum = %d, want 512", got)
+	}
+	if got := minCacheableTokensForModel("claude-opus-4.8"); got != 4096 {
+		t.Fatalf("legacy Opus cache minimum = %d, want 4096", got)
+	}
+}
+
 func TestPromptCacheTrackerComputeAndUpdate(t *testing.T) {
 	tracker := newPromptCacheTracker(time.Hour)
 	longSystem := strings.Repeat("You are a helpful coding assistant with deep knowledge of Go, Rust, Python, and TypeScript. ", 80)

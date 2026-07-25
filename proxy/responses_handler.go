@@ -186,6 +186,9 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 		Tools:      cloneOpenAITools(req.Tools),
 		ToolChoice: cloneRawMessage(req.ToolChoice),
 	}
+	if req.Reasoning != nil {
+		openaiReq.ReasoningEffort = req.Reasoning.Effort
+	}
 	if req.Temperature != nil {
 		value := *req.Temperature
 		openaiReq.Temperature = &value
@@ -218,6 +221,10 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 	}
 	openaiReq.Model = actualModel
 	req.Model = actualModel
+	if normalizeRequestedEffort(openaiReq.ReasoningEffort) != "" {
+		thinking = true
+	}
+	h.prepareOpenAINativeEffort(openaiReq, thinking)
 
 	estimatedInputTokens := estimateOpenAIRequestInputTokens(openaiReq)
 	if admissionErr := reserveAPIKeyTokens(r.Context(), estimatedInputTokens); admissionErr != nil {

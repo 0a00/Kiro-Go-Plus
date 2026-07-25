@@ -116,7 +116,7 @@ func resolveModelMaxToolTokens(model string) int {
 	}
 
 	lower := strings.ToLower(mapped)
-	for _, capable := range []string{"claude-opus-4.7", "claude-opus-4.8", "claude-sonnet-5"} {
+	for _, capable := range []string{"claude-opus-4.7", "claude-opus-4.8", "claude-opus-5", "claude-sonnet-5"} {
 		if strings.Contains(lower, capable) {
 			return 32768
 		}

@@ -52,6 +52,9 @@ func TestMaybeLongToolFallbackIsOptionalAndModelAware(t *testing.T) {
 	if got, changed := maybeLongToolFallback("claude-sonnet-4.6", 4096, []string{"Write"}); changed || got != "claude-sonnet-4.6" {
 		t.Fatalf("small tool budget unexpectedly fell back: %q changed=%v", got, changed)
 	}
+	if got := resolveModelMaxToolTokens("claude-opus-5"); got != 32768 {
+		t.Fatalf("Opus 5 max tool tokens = %d, want 32768", got)
+	}
 	if got, changed := maybeLongToolFallback("claude-sonnet-4.6", 64000, []string{"WebSearch"}); changed || got != "claude-sonnet-4.6" {
 		t.Fatalf("low-risk tool unexpectedly fell back: %q changed=%v", got, changed)
 	}

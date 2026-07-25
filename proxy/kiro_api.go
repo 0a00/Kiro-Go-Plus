@@ -492,16 +492,22 @@ func ListAvailableModelsContext(ctx context.Context, account *config.Account) ([
 		}
 
 		var result struct {
-			Models    []ModelInfo `json:"models"`
-			NextToken string      `json:"nextToken"`
+			Models          []ModelInfo `json:"models"`
+			AvailableModels []ModelInfo `json:"availableModels"`
+			NextToken       string      `json:"nextToken"`
 		}
 		if err := json.Unmarshal(body, &result); err != nil {
 			return nil, err
 		}
-		models = append(models, result.Models...)
+		pageModels := result.Models
+		if len(result.AvailableModels) > 0 {
+			pageModels = append(pageModels, result.AvailableModels...)
+		}
+		normalizeModelInfos(pageModels)
+		models = append(models, pageModels...)
 		nextToken = strings.TrimSpace(result.NextToken)
 		if nextToken == "" {
-			rememberDiscoveredModelTokenLimits(models)
+			rememberDiscoveredModelMetadata(models)
 			return models, nil
 		}
 		if _, duplicate := seenTokens[nextToken]; duplicate {
@@ -1166,10 +1172,25 @@ type UserInfoResponse struct {
 }
 
 type ModelInfo struct {
-	ModelId        string            `json:"modelId"`
-	ModelName      string            `json:"modelName"`
-	Description    string            `json:"description"`
-	InputTypes     []string          `json:"supportedInputTypes"`
-	RateMultiplier float64           `json:"rateMultiplier"`
-	TokenLimits    *ModelTokenLimits `json:"tokenLimits"`
+	ModelId                            string                 `json:"modelId"`
+	ModelName                          string                 `json:"modelName"`
+	Description                        string                 `json:"description"`
+	Provider                           string                 `json:"provider,omitempty"`
+	Capabilities                       []string               `json:"capabilities,omitempty"`
+	ContextWindow                      int                    `json:"contextWindow,omitempty"`
+	IsDefault                          bool                   `json:"isDefault,omitempty"`
+	InputTypes                         []string               `json:"supportedInputTypes"`
+	RateMultiplier                     float64                `json:"rateMultiplier"`
+	RateUnit                           string                 `json:"rateUnit,omitempty"`
+	PromptCaching                      *ModelPromptCaching    `json:"promptCaching,omitempty"`
+	TokenLimits                        *ModelTokenLimits      `json:"tokenLimits"`
+	AdditionalModelRequestFieldsSchema map[string]interface{} `json:"additionalModelRequestFieldsSchema,omitempty"`
+	EffortLevels                       []string               `json:"effortLevels,omitempty"`
+	EffortSchemaPath                   string                 `json:"effortSchemaPath,omitempty"`
+}
+
+type ModelPromptCaching struct {
+	MaximumCacheCheckpointsPerRequest int   `json:"maximumCacheCheckpointsPerRequest,omitempty"`
+	MinimumTokensPerCacheCheckpoint   int   `json:"minimumTokensPerCacheCheckpoint,omitempty"`
+	SupportsPromptCaching             *bool `json:"supportsPromptCaching,omitempty"`
 }
