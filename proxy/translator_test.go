@@ -560,6 +560,19 @@ func TestParseModelAndThinking(t *testing.T) {
 		{"haiku dot form", "claude-haiku-4.5", "claude-haiku-4.5", false},
 		{"future major bump", "claude-sonnet-5-0", "claude-sonnet-5.0", false},
 		{"opus 5 bare major", "claude-opus-5", "claude-opus-5", false},
+		{"dated sonnet minor snapshot", "claude-sonnet-4-5-20250929", "claude-sonnet-4.5", false},
+		{"latest haiku minor snapshot", "claude-haiku-4-5-latest", "claude-haiku-4.5", false},
+		{"dotted dated snapshot", "claude-opus-4.8-20260701", "claude-opus-4.8", false},
+		{"latest sonnet alias", "claude-sonnet-latest", "claude-sonnet-5", false},
+		{"context annotation 1m", "claude-sonnet-5[1m]", "claude-sonnet-5", false},
+		{"context annotation 200k", "claude-haiku-4-5[200k]", "claude-haiku-4.5", false},
+		{"context annotation before thinking", "claude-sonnet-5[1m]-thinking", "claude-sonnet-5", true},
+
+		// Native GPT aliases use Kiro's dotted version form.
+		{"gpt sol dash form", "gpt-5-6-sol", "gpt-5.6-sol", false},
+		{"gpt terra dash form", "gpt-5-6-terra", "gpt-5.6-terra", false},
+		{"gpt luna dash form", "gpt-5-6-luna", "gpt-5.6-luna", false},
+		{"gpt sol dot form", "gpt-5.6-sol", "gpt-5.6-sol", false},
 
 		// Bare family name passes through (no minor to normalize).
 		{"bare sonnet 4", "claude-sonnet-4", "claude-sonnet-4", false},
@@ -699,12 +712,32 @@ func TestClaudeToolResultMixedTextAndImage(t *testing.T) {
 	if len(cur.Images) != 1 {
 		t.Fatalf("expected one image extracted, got %d", len(cur.Images))
 	}
-	if cur.UserInputMessageContext == nil || len(cur.UserInputMessageContext.ToolResults) != 1 {
-		t.Fatalf("expected one tool result")
+	if !strings.Contains(cur.Content, "here is the screenshot") {
+		t.Fatalf("expected orphan tool-result text in current content, got %q", cur.Content)
 	}
-	gotText := cur.UserInputMessageContext.ToolResults[0].Content[0].Text
-	if gotText != "here is the screenshot" {
-		t.Fatalf("expected original tool text preserved, got %q", gotText)
+	if cur.UserInputMessageContext != nil && len(cur.UserInputMessageContext.ToolResults) != 0 {
+		t.Fatalf("expected orphan tool result to be flattened")
+	}
+}
+
+func TestOpenAIOrphanToolResultPreservesTextWithImage(t *testing.T) {
+	const dataURL = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+	req := &OpenAIRequest{
+		Model: "claude-sonnet-4.5",
+		Messages: []OpenAIMessage{
+			{Role: "tool", ToolCallID: "orphan", Content: []interface{}{
+				map[string]interface{}{"type": "text", "text": "screenshot result"},
+				map[string]interface{}{"type": "image_url", "image_url": map[string]interface{}{"url": dataURL}},
+			}},
+		},
+	}
+
+	cur := OpenAIToKiro(req, false).ConversationState.CurrentMessage.UserInputMessage
+	if len(cur.Images) != 1 || !strings.Contains(cur.Content, "screenshot result") {
+		t.Fatalf("orphan tool result lost content: %+v", cur)
+	}
+	if cur.UserInputMessageContext != nil && len(cur.UserInputMessageContext.ToolResults) != 0 {
+		t.Fatalf("expected orphan tool result to be flattened")
 	}
 }
 

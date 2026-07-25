@@ -28,6 +28,30 @@ func TestRequestedModelAvailabilityUsesCurrentCache(t *testing.T) {
 	}
 }
 
+func TestRequestedModelAvailabilityControlledPassThrough(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	h := &Handler{cachedModels: []ModelInfo{{ModelId: "claude-sonnet-5"}}}
+	if h.requestedModelAvailable("future-model-1", "future-model-1") {
+		t.Fatal("unlisted model passed through while disabled")
+	}
+	if err := config.UpdateModelRegistryConfig(config.ModelRegistryConfig{
+		NegativeCacheTTLSeconds: 3600,
+		AllowUnlistedModels:     true,
+	}); err != nil {
+		t.Fatalf("UpdateModelRegistryConfig: %v", err)
+	}
+	if !h.requestedModelAvailable("future-model-1", "future-model-1") {
+		t.Fatal("safe unlisted model was rejected while enabled")
+	}
+	for _, invalid := range []string{"../future-model", "future/model", "future model", "model@provider", strings.Repeat("a", 129)} {
+		if h.requestedModelAvailable(invalid, invalid) {
+			t.Fatalf("unsafe model ID %q passed through", invalid)
+		}
+	}
+}
+
 func TestClaudeMessagesRejectsUnavailableModelBeforeAccountSelection(t *testing.T) {
 	t.Setenv("ALLOW_UNAUTHENTICATED_API", "true")
 	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {

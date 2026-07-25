@@ -14,37 +14,40 @@ import (
 	"time"
 )
 
-func TestNormalizeChunkBasicProgression(t *testing.T) {
-	prev := ""
+func TestParseEventStreamPreservesRepeatedTextDeltas(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		eventType string
+		field     string
+		chunks    []string
+		want      string
+		reasoning bool
+	}{
+		{name: "assistant repeated", eventType: "assistantResponseEvent", field: "content", chunks: []string{"666", "666", "666", "6"}, want: "6666666666"},
+		{name: "assistant prefix shaped", eventType: "assistantResponseEvent", field: "content", chunks: []string{"6", "66"}, want: "666"},
+		{name: "reasoning repeated", eventType: "reasoningContentEvent", field: "text", chunks: []string{"ha", "ha", "ha"}, want: "hahaha", reasoning: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var stream bytes.Buffer
+			for _, chunk := range tc.chunks {
+				stream.Write(awsEventStreamFrame(t, tc.eventType, map[string]interface{}{tc.field: chunk}))
+			}
 
-	if got := normalizeChunk("abc", &prev); got != "abc" {
-		t.Fatalf("expected first chunk to pass through, got %q", got)
-	}
-	if got := normalizeChunk("abcde", &prev); got != "de" {
-		t.Fatalf("expected appended delta, got %q", got)
-	}
-}
-
-func TestNormalizeChunkPrefixRewindDoesNotReplay(t *testing.T) {
-	prev := ""
-
-	_ = normalizeChunk("abcde", &prev)
-	if got := normalizeChunk("abc", &prev); got != "" {
-		t.Fatalf("expected rewind chunk to be ignored, got %q", got)
-	}
-	if prev != "abcde" {
-		t.Fatalf("expected previous snapshot to remain longest version, got %q", prev)
-	}
-	if got := normalizeChunk("abcdef", &prev); got != "f" {
-		t.Fatalf("expected only unseen suffix after rewind, got %q", got)
-	}
-}
-
-func TestNormalizeChunkOverlapDelta(t *testing.T) {
-	prev := "hello world"
-
-	if got := normalizeChunk("world!!!", &prev); got != "!!!" {
-		t.Fatalf("expected overlap suffix delta, got %q", got)
+			var got strings.Builder
+			err := parseEventStream(bytes.NewReader(stream.Bytes()), &KiroStreamCallback{
+				OnText: func(text string, reasoning bool) {
+					if reasoning == tc.reasoning {
+						got.WriteString(text)
+					}
+				},
+			})
+			if err != nil {
+				t.Fatalf("parse repeated deltas: %v", err)
+			}
+			if got.String() != tc.want {
+				t.Fatalf("stream content corrupted: got %q want %q", got.String(), tc.want)
+			}
+		})
 	}
 }
 

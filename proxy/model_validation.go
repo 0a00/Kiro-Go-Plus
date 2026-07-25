@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"kiro-go/config"
+	"regexp"
 	"strings"
 )
 
@@ -16,7 +17,12 @@ var builtInKiroModels = map[string]struct{}{
 	"claude-sonnet-4.5": {},
 	"claude-sonnet-4":   {},
 	"claude-haiku-4.5":  {},
+	"gpt-5.6-sol":       {},
+	"gpt-5.6-terra":     {},
+	"gpt-5.6-luna":      {},
 }
+
+var safeUnlistedModelIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
 func normalizeKnownModelID(model string) string {
 	return strings.ToLower(strings.TrimSpace(MapModel(model)))
@@ -42,6 +48,9 @@ func (h *Handler) requestedModelAvailable(requested, actual string) bool {
 	// supported protocol surface, then use the live cache for newly discovered
 	// model IDs.
 	if _, ok := builtInKiroModels[actual]; ok {
+		return true
+	}
+	if config.GetModelRegistryConfig().AllowUnlistedModels && safeUnlistedModelIDPattern.MatchString(actual) {
 		return true
 	}
 

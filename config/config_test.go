@@ -685,6 +685,41 @@ func TestModelRegistryRejectsInvalidToolTokenLimit(t *testing.T) {
 	}
 }
 
+func TestModelRegistryPersistsAllowUnlistedModels(t *testing.T) {
+	if err := Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	registry := GetModelRegistryConfig()
+	if registry.AllowUnlistedModels {
+		t.Fatal("unlisted model pass-through must default to disabled")
+	}
+	registry.AllowUnlistedModels = true
+	if err := UpdateModelRegistryConfig(registry); err != nil {
+		t.Fatalf("UpdateModelRegistryConfig: %v", err)
+	}
+	if !GetModelRegistryConfig().AllowUnlistedModels {
+		t.Fatal("allowUnlistedModels was not persisted")
+	}
+}
+
+func TestWebSearchConfigNormalizesAndValidatesMaxRounds(t *testing.T) {
+	if err := Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if got := GetWebSearchConfig().MaxRounds; got != DefaultWebSearchMaxRounds {
+		t.Fatalf("default max rounds = %d, want %d", got, DefaultWebSearchMaxRounds)
+	}
+	if err := UpdateWebSearchConfig(WebSearchConfig{Enabled: true, MaxRounds: 8}); err != nil {
+		t.Fatalf("UpdateWebSearchConfig: %v", err)
+	}
+	if got := GetWebSearchConfig(); !got.Enabled || got.MaxRounds != 8 {
+		t.Fatalf("unexpected saved WebSearch config: %+v", got)
+	}
+	if err := UpdateWebSearchConfig(WebSearchConfig{MaxRounds: MaxWebSearchMaxRounds + 1}); err == nil {
+		t.Fatal("expected oversized WebSearch maxRounds to be rejected")
+	}
+}
+
 func TestAccountStatsBatchIgnoresStaleConfigGeneration(t *testing.T) {
 	if err := Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatalf("init old config: %v", err)

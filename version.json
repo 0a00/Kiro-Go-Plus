@@ -1,5 +1,5 @@
 {
-  "version": "1.2.31",
-  "changelog": "Add Claude Opus 5 support with 1M/128K model metadata, a 512-token cache threshold, dynamic Kiro capability discovery, and native reasoning effort forwarding across Anthropic, Chat Completions, and Responses APIs.\n新增 Claude Opus 5 支持：1M/128K 模型元数据、512 Token 缓存门槛、Kiro 动态能力发现，以及 Anthropic、Chat Completions 和 Responses 接口的原生 reasoning effort 转发。",
+  "version": "1.2.32",
+  "changelog": "Improve Claude Sonnet 5 and GPT-5.6 model compatibility, preserve repeated stream deltas and image-adjacent tool results, add optional safe unlisted-model pass-through, and support bounded multi-round WebSearch with mixed client tools and account failover.\n改进 Claude Sonnet 5 和 GPT-5.6 模型兼容，保留重复流式增量与图片相邻的工具结果，新增可选的安全格式未列出模型透传，并支持有界多轮 WebSearch、混合客户端工具和账号故障切换。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }

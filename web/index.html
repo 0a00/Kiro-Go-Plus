@@ -668,6 +668,13 @@
             <input type="number" id="modelNegativeCacheTTLSeconds" min="60" max="604800" step="60" />
           </div>
           <div class="form-group">
+            <label class="flex items-center gap-2">
+              <span class="switch"><input type="checkbox" id="allowUnlistedModels" /><span class="slider"></span></span>
+              <span data-i18n="settings.allowUnlistedModels"></span>
+            </label>
+            <small data-i18n="settings.allowUnlistedModelsHint"></small>
+          </div>
+          <div class="form-group">
             <label data-i18n="settings.modelRegistryJson"></label>
             <textarea id="modelRegistryJson" class="font-mono" rows="12"
               placeholder='[{"id":"my-sonnet","displayName":"My Sonnet","kiroModelId":"claude-sonnet-4.6","contextWindow":1000000,"maxTokens":64000,"maxToolTokens":8192,"matchKeywords":["my-sonnet"]}]'></textarea>
@@ -957,6 +964,11 @@
               <span data-i18n="settings.webSearchEnabled"></span>
             </label>
             <small data-i18n="settings.webSearchHint"></small>
+          </div>
+          <div class="form-group">
+            <label data-i18n="settings.webSearchMaxRounds"></label>
+            <input type="number" id="webSearchMaxRounds" min="1" max="20" step="1" />
+            <small data-i18n="settings.webSearchMaxRoundsHint"></small>
           </div>
           <button class="btn btn-primary" id="saveWebSearchBtn" data-i18n="settings.saveWebSearch"></button>
         </div>

@@ -287,6 +287,7 @@ type ModelEntry struct {
 // ModelRegistryConfig controls dynamic model mappings and per-account negative caching.
 type ModelRegistryConfig struct {
 	NegativeCacheTTLSeconds int          `json:"negativeCacheTtlSeconds"`
+	AllowUnlistedModels     bool         `json:"allowUnlistedModels"`
 	Models                  []ModelEntry `json:"models,omitempty"`
 }
 
@@ -329,8 +330,15 @@ type RequestLogConfig struct {
 
 // WebSearchConfig controls the Anthropic web_search compatibility shim.
 type WebSearchConfig struct {
-	Enabled bool `json:"enabled"`
+	Enabled   bool `json:"enabled"`
+	MaxRounds int  `json:"maxRounds"`
 }
+
+const (
+	DefaultWebSearchMaxRounds = 5
+	MinWebSearchMaxRounds     = 1
+	MaxWebSearchMaxRounds     = 20
+)
 
 // CountTokensProviderConfig controls the optional remote count_tokens provider.
 type CountTokensProviderConfig struct {
@@ -498,7 +506,7 @@ const (
 )
 
 // Version current version
-const Version = "1.2.31"
+const Version = "1.2.32"
 
 var (
 	cfg           *Config
@@ -691,6 +699,7 @@ func loadLocked() error {
 	normalizeHealthLocked()
 	normalizeDiagnosticLocked()
 	normalizeRequestLogLocked()
+	normalizeWebSearchLocked()
 	normalizeCountTokensProviderLocked()
 
 	// Migration: if a legacy single ApiKey is present and the new ApiKeys list is empty,
@@ -1366,7 +1375,16 @@ func normalizeRequestLogLocked() {
 }
 
 func defaultWebSearchConfig() WebSearchConfig {
-	return WebSearchConfig{Enabled: false}
+	return WebSearchConfig{Enabled: false, MaxRounds: DefaultWebSearchMaxRounds}
+}
+
+func normalizeWebSearchLocked() {
+	if cfg.WebSearch.MaxRounds <= 0 {
+		cfg.WebSearch.MaxRounds = DefaultWebSearchMaxRounds
+	}
+	if cfg.WebSearch.MaxRounds > MaxWebSearchMaxRounds {
+		cfg.WebSearch.MaxRounds = MaxWebSearchMaxRounds
+	}
 }
 
 func defaultCountTokensProviderConfig() CountTokensProviderConfig {
@@ -2058,9 +2076,16 @@ func GetWebSearchConfig() WebSearchConfig {
 }
 
 func UpdateWebSearchConfig(webSearch WebSearchConfig) error {
+	if webSearch.MaxRounds == 0 {
+		webSearch.MaxRounds = DefaultWebSearchMaxRounds
+	}
+	if webSearch.MaxRounds < MinWebSearchMaxRounds || webSearch.MaxRounds > MaxWebSearchMaxRounds {
+		return fmt.Errorf("maxRounds must be between %d and %d", MinWebSearchMaxRounds, MaxWebSearchMaxRounds)
+	}
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
 	cfg.WebSearch = webSearch
+	normalizeWebSearchLocked()
 	return Save()
 }
 

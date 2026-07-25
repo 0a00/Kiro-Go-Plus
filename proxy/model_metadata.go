@@ -201,6 +201,9 @@ func fallbackEffortMetadata(model string) ([]string, string) {
 	if isClaudeOpus5Model(model) {
 		return []string{effortLow, effortMedium, effortHigh, effortXHigh, effortMax}, "output_config"
 	}
+	if isClaudeSonnet5Model(model) {
+		return []string{effortHigh}, "output_config"
+	}
 	return nil, ""
 }
 
@@ -208,6 +211,12 @@ func isClaudeOpus5Model(model string) bool {
 	model = strings.ToLower(strings.TrimSpace(model))
 	model = strings.TrimSuffix(model, "-thinking")
 	return model == "claude-opus-5" || strings.HasPrefix(model, "claude-opus-5.")
+}
+
+func isClaudeSonnet5Model(model string) bool {
+	model = strings.ToLower(strings.TrimSpace(model))
+	model = strings.TrimSuffix(model, "-thinking")
+	return model == "claude-sonnet-5" || strings.HasPrefix(model, "claude-sonnet-5.")
 }
 
 func normalizeRequestedEffort(raw string) string {
@@ -266,7 +275,7 @@ func resolveSupportedEffort(requested string, supported []string) (string, bool)
 }
 
 func defaultNativeEffort(model string) string {
-	if isClaudeOpus5Model(model) {
+	if isClaudeOpus5Model(model) || isClaudeSonnet5Model(model) {
 		return effortHigh
 	}
 	return effortMedium

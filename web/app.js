@@ -2207,6 +2207,7 @@
     const res = await api('/model-registry');
     const d = await res.json();
     $('modelNegativeCacheTTLSeconds').value = d.negativeCacheTtlSeconds || 3600;
+    $('allowUnlistedModels').checked = d.allowUnlistedModels === true;
     const models = Array.isArray(d.models) ? d.models : [];
     $('modelRegistryJson').value = JSON.stringify(models, null, 2);
     if (!$('modelHealthModel').value.trim()) $('modelHealthModel').value = (models[0] && models[0].id) || 'claude-sonnet-4.6';
@@ -2227,7 +2228,11 @@
     }
     const res = await api('/model-registry', {
       method: 'POST',
-      body: JSON.stringify({ negativeCacheTtlSeconds: ttl, models })
+      body: JSON.stringify({
+        negativeCacheTtlSeconds: ttl,
+        allowUnlistedModels: $('allowUnlistedModels').checked,
+        models
+      })
     });
     const d = await res.json().catch(() => ({}));
     if (!res.ok || d.success === false) {
@@ -2812,11 +2817,17 @@
     const res = await api('/web-search');
     const d = await res.json();
     $('webSearchEnabled').checked = d.enabled === true;
+    $('webSearchMaxRounds').value = d.maxRounds || 5;
   }
   async function saveWebSearchConfig() {
+    const maxRounds = Math.round(Number($('webSearchMaxRounds').value) || 0);
+    if (maxRounds < 1 || maxRounds > 20) {
+      toast(t('settings.webSearchInvalid'), 'warning');
+      return;
+    }
     const res = await api('/web-search', {
       method: 'POST',
-      body: JSON.stringify({ enabled: $('webSearchEnabled').checked })
+      body: JSON.stringify({ enabled: $('webSearchEnabled').checked, maxRounds })
     });
     const d = await res.json().catch(() => ({}));
     if (!res.ok || d.success === false) {

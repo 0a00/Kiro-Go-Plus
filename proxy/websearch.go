@@ -15,6 +15,8 @@ import (
 	"github.com/google/uuid"
 )
 
+const webSearchToolName = "web_search"
+
 type mcpRequest struct {
 	ID      string      `json:"id"`
 	JSONRPC string      `json:"jsonrpc"`
@@ -60,12 +62,28 @@ func hasPureWebSearchTool(req *ClaudeRequest) bool {
 	if req == nil || len(req.Tools) != 1 {
 		return false
 	}
-	return isWebSearchToolName(req.Tools[0].Name)
+	return isNativeWebSearchTool(req.Tools[0])
+}
+
+func hasMixedWebSearchTools(req *ClaudeRequest) bool {
+	if req == nil || len(req.Tools) <= 1 {
+		return false
+	}
+	for _, tool := range req.Tools {
+		if isNativeWebSearchTool(tool) {
+			return true
+		}
+	}
+	return false
+}
+
+func isNativeWebSearchTool(tool ClaudeTool) bool {
+	return strings.TrimSpace(tool.Name) == webSearchToolName &&
+		strings.HasPrefix(strings.TrimSpace(tool.Type), "web_search_")
 }
 
 func isWebSearchToolName(name string) bool {
-	normalized := strings.ToLower(strings.TrimSpace(name))
-	return normalized == "web_search" || strings.HasPrefix(normalized, "web_search_")
+	return strings.TrimSpace(name) == webSearchToolName
 }
 
 func extractWebSearchQuery(req *ClaudeRequest) string {
@@ -426,21 +444,37 @@ func callMCPWebSearchURL(ctx context.Context, account *config.Account, rawURL st
 		return nil, fmt.Errorf("MCP error %d: %s", mcp.Error.Code, mcp.Error.Message)
 	}
 	if mcp.Result == nil {
-		return &webSearchResults{Query: query}, nil
+		return nil, fmt.Errorf("MCP web_search response is missing result")
 	}
+	if mcp.Result.IsError {
+		return nil, fmt.Errorf("MCP web_search tool returned an error result")
+	}
+	var parseErr error
 	for _, item := range mcp.Result.Content {
 		if item.Type != "text" || strings.TrimSpace(item.Text) == "" {
 			continue
 		}
 		var results webSearchResults
-		if err := json.Unmarshal([]byte(item.Text), &results); err == nil {
-			if results.Query == "" {
-				results.Query = query
-			}
-			return &results, nil
+		if err := json.Unmarshal([]byte(item.Text), &results); err != nil {
+			parseErr = err
+			continue
 		}
+		if strings.TrimSpace(results.Error) != "" {
+			return nil, fmt.Errorf("MCP web_search payload error: %s", strings.TrimSpace(results.Error))
+		}
+		if results.Results == nil {
+			parseErr = fmt.Errorf("search payload is missing results")
+			continue
+		}
+		if results.Query == "" {
+			results.Query = query
+		}
+		return &results, nil
 	}
-	return &webSearchResults{Query: query}, nil
+	if parseErr != nil {
+		return nil, fmt.Errorf("MCP web_search returned an invalid payload: %w", parseErr)
+	}
+	return nil, fmt.Errorf("MCP web_search response contains no parseable text result")
 }
 
 func webSearchSummary(query string, results *webSearchResults) string {

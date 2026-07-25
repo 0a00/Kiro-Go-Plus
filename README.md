@@ -24,7 +24,7 @@ Kiro-Go Plus preserves Kiro-Go's API and deployment compatibility while adding p
 - Streaming validation: AWS EventStream length and CRC validation, idle timeout, and truncated-response detection
 - Authentication: Builder ID, IAM Identity Center, Kiro hosted SSO, Microsoft 365 / Entra ID, SSO Token, API key, and native/KAM JSON import; `ksk_` keys discover and validate their data-plane region before persistence
 - Prompt Cache accounting: configurable creation/read ranges, 5m/1h TTLs, sharded LRU, API-key isolation, optional restart-safe fingerprint persistence, hit statistics, and miss-reason diagnostics
-- Extensions: Claude Opus 5 support (1M context, 128K output metadata, 512-token cache minimum), dynamic model capability/effort discovery, text/thinking/tool self-tests, Web Search, external token counting, and Responses history
+- Extensions: Claude Opus 5 and Sonnet 5 metadata, GPT-5.6 aliases, dynamic model capability/effort discovery, optional safe unlisted-model pass-through, text/thinking/tool self-tests, multi-round Web Search, external token counting, and Responses history
 - Operations: account inventory diagnostics with latency/error EWMAs and affinity rates, persisted request metadata, account-selection and first SSE/thinking/text/tool timing, maximum event gaps, optional complete logs with sanitized request/output, retries and stream timelines, diagnostic events, webhook alerts, `/health`, and `/ready`
 - Networking: global and per-account HTTP / SOCKS5 proxies
 
@@ -41,7 +41,7 @@ Open `/admin` to manage:
 - Load balancing, retries, timeouts, circuits, and upstream protection
 - Token/model refresh intervals, concurrency, and batch sizes
 - Prompt Cache creation/read ranges, TTL, capacity, and isolation
-- Web Search, token counting, Responses storage, diagnostics, complete request logging, and alerts
+- Web Search enablement and per-request round limit, token counting, Responses storage, diagnostics, complete request logging, and alerts
 - Claude Agent tool enforcement, thinking/output/context token defaults, response formats, long-tool protection, and safe/adaptive/balanced/live stream modes
 - API keys, quotas, admin password, listener settings, and client fingerprints
 
@@ -52,6 +52,8 @@ Tool stream modes trade retry coverage for latency: **Adaptive** keeps ordinary 
 Long-tool protection is enabled by default with one recovery retry and an 8192-token guidance limit. Optional preflight model fallback is disabled by default because model availability differs between accounts.
 
 Complete request logging is disabled by default. When enabled, it captures inference routes only and writes bounded details to `data/request_details.json` with mode `0600` and a 64 MiB total cap. Authorization headers and credentials are excluded; image/document Base64 and tool arguments are represented only by type, byte count, and SHA-256. Prompts and model output are still sensitive, so enable this mode only while diagnosing issues and clear it afterward.
+
+Unlisted-model pass-through is disabled by default. Enable it only when Kiro has released a model that is not yet in the local registry; IDs are syntax-checked locally, while upstream Kiro remains the final availability validator.
 
 ## Quick Start
 

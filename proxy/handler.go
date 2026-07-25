@@ -1249,19 +1249,29 @@ func buildAnthropicModelsResponse(cached []ModelInfo, thinkingSuffix string) []m
 }
 
 func fallbackAnthropicModels(thinkingSuffix string) []map[string]interface{} {
-	opus5 := buildModelInfoWithLimits("claude-opus-5", "anthropic", true, 1_000_000, 128_000)
-	opus5Thinking := buildModelInfoWithLimits("claude-opus-5"+thinkingSuffix, "anthropic", true, 1_000_000, 128_000)
+	opus5 := buildModelInfoWithFixedLimits("claude-opus-5", "anthropic", true, 1_000_000, 128_000)
+	opus5Thinking := buildModelInfoWithFixedLimits("claude-opus-5"+thinkingSuffix, "anthropic", true, 1_000_000, 128_000)
 	for _, model := range []map[string]interface{}{opus5, opus5Thinking} {
 		model["effort_levels"] = []string{effortLow, effortMedium, effortHigh, effortXHigh, effortMax}
 		model["prompt_cache_min_tokens"] = 512
 		model["upstream_context_window"] = 1_000_000
 		model["upstream_max_output_tokens"] = 128_000
 	}
+	sonnet5 := buildModelInfoWithFixedLimits("claude-sonnet-5", "anthropic", true, 1_000_000, 128_000)
+	sonnet5Thinking := buildModelInfoWithFixedLimits("claude-sonnet-5"+thinkingSuffix, "anthropic", true, 1_000_000, 128_000)
+	for _, model := range []map[string]interface{}{sonnet5, sonnet5Thinking} {
+		model["effort_levels"] = []string{effortHigh}
+		model["upstream_context_window"] = 1_000_000
+		model["upstream_max_output_tokens"] = 128_000
+	}
 	return []map[string]interface{}{
 		opus5,
 		opus5Thinking,
-		buildModelInfo("claude-sonnet-5", "anthropic", true),
-		buildModelInfo("claude-sonnet-5"+thinkingSuffix, "anthropic", true),
+		sonnet5,
+		sonnet5Thinking,
+		buildModelInfoWithoutInferredLimits("gpt-5.6-sol", "openai", false),
+		buildModelInfoWithoutInferredLimits("gpt-5.6-terra", "openai", false),
+		buildModelInfoWithoutInferredLimits("gpt-5.6-luna", "openai", false),
 		buildModelInfo("claude-opus-4.8", "anthropic", true),
 		buildModelInfo("claude-opus-4.8"+thinkingSuffix, "anthropic", true),
 		buildModelInfo("claude-sonnet-4.6", "anthropic", true),
@@ -1323,6 +1333,29 @@ func buildModelInfo(id, ownedBy string, supportsImage bool) map[string]interface
 }
 
 func buildModelInfoWithLimits(id, ownedBy string, supportsImage bool, maxInputTokens, maxOutputTokens int) map[string]interface{} {
+	return buildModelInfoResponse(id, ownedBy, supportsImage, maxInputTokens, maxOutputTokens, true, false)
+}
+
+func buildModelInfoWithFixedLimits(id, ownedBy string, supportsImage bool, maxInputTokens, maxOutputTokens int) map[string]interface{} {
+	return buildModelInfoResponse(id, ownedBy, supportsImage, maxInputTokens, maxOutputTokens, true, true)
+}
+
+func buildModelInfoWithoutInferredLimits(id, ownedBy string, supportsImage bool) map[string]interface{} {
+	if discovered, ok := getDiscoveredModelMetadata(id); ok {
+		maxInputTokens := discovered.ContextWindow
+		maxOutputTokens := 0
+		if discovered.TokenLimits != nil {
+			if maxInputTokens <= 0 {
+				maxInputTokens = discovered.TokenLimits.MaxInputTokens
+			}
+			maxOutputTokens = discovered.TokenLimits.MaxOutputTokens
+		}
+		return buildModelInfoResponse(id, ownedBy, supportsImage, maxInputTokens, maxOutputTokens, false, true)
+	}
+	return buildModelInfoResponse(id, ownedBy, supportsImage, 0, 0, false, false)
+}
+
+func buildModelInfoResponse(id, ownedBy string, supportsImage bool, maxInputTokens, maxOutputTokens int, inferInputLimit, preserveProvidedLimits bool) map[string]interface{} {
 	modalities := []string{"text"}
 	if supportsImage {
 		modalities = append(modalities, "image")
@@ -1337,17 +1370,16 @@ func buildModelInfoWithLimits(id, ownedBy string, supportsImage bool, maxInputTo
 		maxOutputTokens = entry.MaxTokens
 	} else {
 		defaults := config.GetThinkingConfig()
-		if defaults.DefaultContextWindowTokens > 0 {
+		if (!preserveProvidedLimits || maxInputTokens <= 0) && defaults.DefaultContextWindowTokens > 0 {
 			maxInputTokens = defaults.DefaultContextWindowTokens
 		}
-		if defaults.DefaultMaxOutputTokens > 0 {
+		if (!preserveProvidedLimits || maxOutputTokens <= 0) && defaults.DefaultMaxOutputTokens > 0 {
 			maxOutputTokens = defaults.DefaultMaxOutputTokens
 		}
 	}
-	if maxInputTokens <= 0 {
+	if maxInputTokens <= 0 && inferInputLimit {
 		maxInputTokens = getContextWindowSize(id)
 	}
-	tokenLimits := map[string]int{"max_input_tokens": maxInputTokens}
 	model := map[string]interface{}{
 		"id":               id,
 		"object":           "model",
@@ -1355,9 +1387,6 @@ func buildModelInfoWithLimits(id, ownedBy string, supportsImage bool, maxInputTo
 		"supports_image":   supportsImage,
 		"input_modalities": modalities,
 		"modalities":       modalitiesMap,
-		"context_window":   maxInputTokens,
-		"max_input_tokens": maxInputTokens,
-		"token_limits":     tokenLimits,
 		"capabilities": map[string]bool{
 			"vision":       supportsImage,
 			"image":        supportsImage,
@@ -1372,10 +1401,19 @@ func buildModelInfoWithLimits(id, ownedBy string, supportsImage bool, maxInputTo
 			},
 		},
 	}
+	tokenLimits := map[string]int{}
+	if maxInputTokens > 0 {
+		model["context_window"] = maxInputTokens
+		model["max_input_tokens"] = maxInputTokens
+		tokenLimits["max_input_tokens"] = maxInputTokens
+	}
 	if maxOutputTokens > 0 {
 		model["max_output_tokens"] = maxOutputTokens
 		model["max_tokens"] = maxOutputTokens
 		tokenLimits["max_output_tokens"] = maxOutputTokens
+	}
+	if len(tokenLimits) > 0 {
+		model["token_limits"] = tokenLimits
 	}
 	return model
 }
@@ -1939,9 +1977,20 @@ func (h *Handler) handleClaudeMessages(w http.ResponseWriter, r *http.Request) {
 	}
 	cacheProfile := h.promptCache.BuildClaudeProfile(effectiveReq, estimatedInputTokens)
 
-	if config.GetWebSearchConfig().Enabled && hasPureWebSearchTool(&req) {
-		h.handleClaudeWebSearch(r.Context(), w, &req, estimatedInputTokens, apiKeyIDFromContext(r.Context()))
-		return
+	if config.GetWebSearchConfig().Enabled {
+		apiKeyID := apiKeyIDFromContext(r.Context())
+		if hasPureWebSearchTool(&req) {
+			h.handleClaudeWebSearch(r.Context(), w, &req, estimatedInputTokens, apiKeyID)
+			return
+		}
+		if hasMixedWebSearchTools(&req) {
+			h.handleClaudeWebSearchLoop(
+				r.Context(), w, &req, thinking, thinkingResponseOpts,
+				contextWindowTokens, estimatedInputTokens, apiKeyID,
+				requestConversationNamespace(r, apiKeyID),
+			)
+			return
+		}
 	}
 
 	// 转换请求
@@ -6456,7 +6505,7 @@ func (h *Handler) apiUpdateWebSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := config.UpdateWebSearchConfig(req); err != nil {
-		w.WriteHeader(500)
+		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}

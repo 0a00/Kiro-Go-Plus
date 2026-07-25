@@ -94,6 +94,25 @@ func TestLegacyModelKeepsSyntheticThinkingFallback(t *testing.T) {
 	}
 }
 
+func TestClaudeSonnet5UsesNativeAdaptiveFallback(t *testing.T) {
+	h := &Handler{}
+	req := &ClaudeRequest{
+		Model:     "claude-sonnet-5",
+		MaxTokens: 4096,
+		Messages:  []ClaudeMessage{{Role: "user", Content: "hello"}},
+		Thinking:  &ClaudeThinkingConfig{Type: "adaptive"},
+	}
+	h.prepareClaudeNativeEffort(req, true)
+	if req.NativeEffort != effortHigh || req.NativeEffortPath != "output_config" {
+		t.Fatalf("unexpected Sonnet 5 fallback: effort=%q path=%q", req.NativeEffort, req.NativeEffortPath)
+	}
+	payload := ClaudeToKiro(req, true)
+	outputConfig, ok := payload.AdditionalModelRequestFields["output_config"].(map[string]interface{})
+	if !ok || outputConfig["effort"] != effortHigh {
+		t.Fatalf("Sonnet 5 adaptive effort missing from payload: %#v", payload.AdditionalModelRequestFields)
+	}
+}
+
 func TestOpenAIReasoningEffortUsesNativeKiroField(t *testing.T) {
 	h := &Handler{}
 	req := &OpenAIRequest{
@@ -109,12 +128,12 @@ func TestOpenAIReasoningEffortUsesNativeKiroField(t *testing.T) {
 	}
 }
 
-func TestFallbackModelsAdvertiseOpus5Limits(t *testing.T) {
+func TestFallbackModelsAdvertiseGeneration5Limits(t *testing.T) {
 	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatalf("config.Init: %v", err)
 	}
 	models := fallbackAnthropicModels("-thinking")
-	for _, id := range []string{"claude-opus-5", "claude-opus-5-thinking"} {
+	for _, id := range []string{"claude-opus-5", "claude-opus-5-thinking", "claude-sonnet-5", "claude-sonnet-5-thinking"} {
 		var found map[string]interface{}
 		for _, model := range models {
 			if model["id"] == id {
@@ -128,8 +147,30 @@ func TestFallbackModelsAdvertiseOpus5Limits(t *testing.T) {
 		if found["context_window"] != 1_000_000 || found["max_output_tokens"] != 128_000 {
 			t.Fatalf("unexpected Opus 5 limits for %q: %#v", id, found)
 		}
-		if found["prompt_cache_min_tokens"] != 512 {
+		if strings.HasPrefix(id, "claude-opus-5") && found["prompt_cache_min_tokens"] != 512 {
 			t.Fatalf("unexpected Opus 5 cache metadata for %q: %#v", id, found)
+		}
+	}
+}
+
+func TestFallbackModelsIncludeGPT56WithoutGuessedLimits(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	models := fallbackAnthropicModels("-thinking")
+	for _, id := range []string{"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"} {
+		var found map[string]interface{}
+		for _, model := range models {
+			if model["id"] == id {
+				found = model
+				break
+			}
+		}
+		if found == nil {
+			t.Fatalf("fallback model %q not found", id)
+		}
+		if _, exists := found["context_window"]; exists {
+			t.Fatalf("uncertain GPT-5.6 context limit should not be guessed: %#v", found)
 		}
 	}
 }
