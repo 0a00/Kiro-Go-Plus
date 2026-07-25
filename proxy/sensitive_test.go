@@ -24,6 +24,11 @@ func TestAccountDetailsMaskCredentialsAndExportRequiresReauthentication(t *testi
 		ID: "account-secret", Enabled: true, Email: "secret@example.com",
 		AccessToken: "access-super-secret", RefreshToken: "refresh-super-secret",
 		ClientID: "client-id-secret", ClientSecret: "client-super-secret",
+		UserId: "user-id", MachineId: "machine-id", AuthMethod: "external_idp",
+		Provider: "AzureAD", Region: "eu-central-1", StartUrl: "https://example.awsapps.com/start",
+		ProfileArn:    "arn:aws:codewhisperer:eu-central-1:123456789012:profile/test",
+		TokenEndpoint: "https://login.microsoftonline.com/tenant/oauth2/v2.0/token",
+		IssuerURL:     "https://login.microsoftonline.com/tenant/v2.0", Scopes: "offline_access",
 	}
 	if err := config.AddAccount(account); err != nil {
 		t.Fatalf("add account: %v", err)
@@ -59,6 +64,40 @@ func TestAccountDetailsMaskCredentialsAndExportRequiresReauthentication(t *testi
 	}
 	if exported["refreshToken"] != account.RefreshToken || exported["clientSecret"] != account.ClientSecret {
 		t.Fatalf("unexpected exported credentials: %+v", exported)
+	}
+	for key, want := range map[string]string{
+		"email": account.Email, "userId": account.UserId, "machineId": account.MachineId,
+		"startUrl": account.StartUrl, "region": account.Region, "profileArn": account.ProfileArn,
+		"tokenEndpoint": account.TokenEndpoint, "issuerUrl": account.IssuerURL, "scopes": account.Scopes,
+	} {
+		if got := exported[key]; got != want {
+			t.Fatalf("exported %s = %v, want %q; payload=%+v", key, got, want, exported)
+		}
+	}
+
+	bulk := httptest.NewRecorder()
+	h.apiExportAccounts(bulk, httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"ids":["account-secret"],"password":"admin-secret"}`)))
+	if bulk.Code != http.StatusOK {
+		t.Fatalf("bulk export status=%d body=%s", bulk.Code, bulk.Body.String())
+	}
+	var bulkExport struct {
+		Accounts []struct {
+			UserId      string `json:"userId"`
+			MachineId   string `json:"machineId"`
+			Credentials struct {
+				StartUrl string `json:"startUrl"`
+				Region   string `json:"region"`
+			} `json:"credentials"`
+		} `json:"accounts"`
+	}
+	if err := json.Unmarshal(bulk.Body.Bytes(), &bulkExport); err != nil {
+		t.Fatalf("decode bulk export: %v", err)
+	}
+	if len(bulkExport.Accounts) != 1 || bulkExport.Accounts[0].UserId != account.UserId ||
+		bulkExport.Accounts[0].MachineId != account.MachineId ||
+		bulkExport.Accounts[0].Credentials.StartUrl != account.StartUrl ||
+		bulkExport.Accounts[0].Credentials.Region != account.Region {
+		t.Fatalf("bulk export lost account metadata: %+v", bulkExport.Accounts)
 	}
 }
 

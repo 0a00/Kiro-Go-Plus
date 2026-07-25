@@ -633,6 +633,7 @@
   "credentials.lineParseSkipped": ", skipped {0} malformed line(s)",
   "credentials.lineParseAllSkipped": "{0} line(s) were malformed; no accounts could be parsed (each line needs 5 fields: email----password----refreshToken----clientId----clientSecret)",
   "credentials.batchHint": "Supports JSON (single object, array, or Kiro Account Manager export), or line format: email----password----refreshToken----clientId----clientSecret. OAuth accounts require refreshToken; API Key accounts use authMethod=api_key. Microsoft 365 credentials support external_idp, tokenEndpoint, issuerUrl, scopes, and profileArn.",
+  "credentials.rotatedTokenRecovery": "Import was not fully saved. {0} rotated Refresh Token recovery record(s) were copied and downloaded; keep them secure and retry the import.",
   "auth.apiKey": "API Key",
   "apikey.nickname": "Nickname",
   "apikey.optional": "(optional)",

@@ -4,12 +4,15 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"kiro-go/auth"
 	"kiro-go/config"
 	accountpool "kiro-go/pool"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -522,21 +525,27 @@ func TestNormalizeImportAuthMethodRecognizesExternalIdp(t *testing.T) {
 	tests := []struct {
 		name          string
 		authMethod    string
+		provider      string
 		clientID      string
 		clientSecret  string
 		kiroAPIKey    string
 		tokenEndpoint string
+		issuerURL     string
 		want          string
 	}{
 		{name: "explicit", authMethod: "external_idp", clientID: "client", want: "external_idp"},
 		{name: "alias", authMethod: "Entra-ID", clientID: "client", want: "external_idp"},
 		{name: "endpoint", clientID: "client", tokenEndpoint: "https://login.microsoftonline.com/t/oauth2/v2.0/token", want: "external_idp"},
+		{name: "issuer", clientID: "client", issuerURL: "https://login.microsoftonline.com/t/v2.0", want: "external_idp"},
+		{name: "provider", provider: "Microsoft", clientID: "client", want: "external_idp"},
 		{name: "api key wins", authMethod: "external_idp", kiroAPIKey: "key", want: "api_key"},
-		{name: "idc remains idc", authMethod: "idc", clientID: "client", clientSecret: "secret", want: "idc"},
+		{name: "idc remains idc", authMethod: "idc", clientID: "client", clientSecret: "secret", tokenEndpoint: "https://login.microsoftonline.com/t/oauth2/v2.0/token", want: "idc"},
+		{name: "social remains social", authMethod: "social", tokenEndpoint: "https://login.microsoftonline.com/t/oauth2/v2.0/token", want: "social"},
+		{name: "enterprise provider wins", provider: "Enterprise", clientID: "client", tokenEndpoint: "https://login.microsoftonline.com/t/oauth2/v2.0/token", want: "idc"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			got := normalizeImportAuthMethod(test.authMethod, test.clientID, test.clientSecret, test.kiroAPIKey, test.tokenEndpoint)
+			got := normalizeImportAuthMethod(test.authMethod, test.provider, test.clientID, test.clientSecret, test.kiroAPIKey, test.tokenEndpoint, test.issuerURL)
 			if got != test.want {
 				t.Fatalf("normalized auth method = %q, want %q", got, test.want)
 			}
@@ -602,6 +611,237 @@ func TestPrepareCredentialsAccountRejectsUntrustedExternalIdpEndpoint(t *testing
 	}
 	if importErr.status != http.StatusBadRequest || !strings.Contains(importErr.Error(), "endpoint rejected") {
 		t.Fatalf("unexpected import error: status=%d error=%q", importErr.status, importErr.Error())
+	}
+}
+
+func TestPrepareCredentialsAccountExplicitIDCWinsExternalHints(t *testing.T) {
+	issuer := "https://login.microsoftonline.com/tenant-123/v2.0"
+	importPayload := fmt.Sprintf(`{"iss":%q,"email":"idc@example.com","exp":%d}`, issuer, time.Now().Add(time.Hour).Unix())
+	importAccessToken := "header." + base64.RawURLEncoding.EncodeToString([]byte(importPayload)) + ".signature"
+	refreshedPayload := fmt.Sprintf(`{"email":"idc-refreshed@example.com","exp":%d}`, time.Now().Add(time.Hour).Unix())
+	refreshedAccessToken := "header." + base64.RawURLEncoding.EncodeToString([]byte(refreshedPayload)) + ".signature"
+
+	previousClient := auth.SetGlobalAuthClientForTest(&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Host != "oidc.test" {
+			t.Fatalf("explicit IDC import reached external endpoint: %s", req.URL)
+		}
+		body := fmt.Sprintf(`{"accessToken":%q,"refreshToken":"idc-rotated","expiresIn":3600}`, refreshedAccessToken)
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+	})})
+	defer auth.SetGlobalAuthClientForTest(previousClient)
+	oldOIDC := authOidcURL()
+	auth.SetOIDCTokenURLForTest(func(string) string { return "https://oidc.test/refresh" })
+	defer auth.SetOIDCTokenURLForTest(oldOIDC)
+
+	account, importErr := (&Handler{}).prepareCredentialsAccount(importCredentialsRequest{
+		AuthMethod:    "idc",
+		AccessToken:   importAccessToken,
+		RefreshToken:  "idc-refresh",
+		ClientID:      "idc-client",
+		ClientSecret:  "idc-secret",
+		Region:        "us-east-1",
+		TokenEndpoint: "https://login.microsoftonline.com/tenant-123/oauth2/v2.0/token",
+		IssuerURL:     issuer,
+	})
+	if importErr != nil {
+		t.Fatalf("prepare IDC account: %v", importErr)
+	}
+	if account.AuthMethod != "idc" || account.AccessToken != refreshedAccessToken || account.RefreshToken != "idc-rotated" {
+		t.Fatalf("external hints overrode IDC refresh: %+v", account)
+	}
+}
+
+func TestApiImportCredentialsValidatesExternalIdpProfile(t *testing.T) {
+	issuer := "https://login.microsoftonline.com/tenant-123/v2.0"
+	payload := fmt.Sprintf(`{"iss":%q,"preferred_username":"entra@example.com","exp":%d}`, issuer, time.Now().Add(time.Hour).Unix())
+	accessToken := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none"}`)) + "." +
+		base64.RawURLEncoding.EncodeToString([]byte(payload)) + ".signature"
+	const offeredProfile = "arn:aws:codewhisperer:us-east-1:123456789012:profile/offered"
+	const rejectedProfile = "arn:aws:codewhisperer:us-east-1:123456789012:profile/rejected"
+
+	for _, test := range []struct {
+		name       string
+		profileArn string
+		wantStatus int
+	}{
+		{name: "offered", profileArn: offeredProfile, wantStatus: http.StatusOK},
+		{name: "unoffered", profileArn: rejectedProfile, wantStatus: http.StatusBadRequest},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+				t.Fatalf("config.Init: %v", err)
+			}
+			t.Setenv("KIRO_PROFILE_REGIONS", "us-east-1")
+			kiroRestHttpStore.Store(&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				if req.URL.Path != "/ListAvailableProfiles" {
+					t.Fatalf("unexpected profile request path: %s", req.URL.Path)
+				}
+				body := `{"profiles":[{"arn":"` + offeredProfile + `"}]}`
+				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+			})})
+			t.Cleanup(func() { InitKiroHttpClient("") })
+
+			body, err := json.Marshal(map[string]interface{}{
+				"accessToken":  accessToken,
+				"refreshToken": "refresh-token",
+				"clientId":     "client-123",
+				"authMethod":   "external_idp",
+				"region":       "us-east-1",
+				"profileArn":   test.profileArn,
+			})
+			if err != nil {
+				t.Fatalf("marshal request: %v", err)
+			}
+			rec := httptest.NewRecorder()
+			(&Handler{pool: accountpool.GetPool()}).apiImportCredentials(
+				rec,
+				httptest.NewRequest(http.MethodPost, "/auth/credentials", strings.NewReader(string(body))),
+			)
+
+			if rec.Code != test.wantStatus {
+				t.Fatalf("status = %d, want %d; body=%s", rec.Code, test.wantStatus, rec.Body.String())
+			}
+			accounts := config.GetAccounts()
+			if test.wantStatus == http.StatusOK {
+				if len(accounts) != 1 || accounts[0].ProfileArn != offeredProfile {
+					t.Fatalf("offered profile was not persisted: %+v", accounts)
+				}
+			} else {
+				if !strings.Contains(rec.Body.String(), "not offered") {
+					t.Fatalf("expected not-offered error, got %s", rec.Body.String())
+				}
+				if len(accounts) != 0 {
+					t.Fatalf("rejected profile persisted accounts: %+v", accounts)
+				}
+			}
+		})
+	}
+}
+
+func TestApiImportCredentialsReturnsRotatedRefreshTokenWhenPersistFails(t *testing.T) {
+	cfgFile := filepath.Join(t.TempDir(), "config.json")
+	if err := config.Init(cfgFile); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	defer installCleanAuthClient(t)()
+
+	accessPayload := fmt.Sprintf(`{"email":"persist-fail@example.com","exp":%d}`, time.Now().Add(time.Hour).Unix())
+	accessToken := "header." + base64.RawURLEncoding.EncodeToString([]byte(accessPayload)) + ".signature"
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"accessToken": accessToken, "refreshToken": "rotated-after-refresh", "expiresIn": 3600,
+		})
+	}))
+	defer fake.Close()
+
+	oldOIDC := authOidcURL()
+	auth.SetOIDCTokenURLForTest(func(string) string { return fake.URL })
+	defer auth.SetOIDCTokenURLForTest(oldOIDC)
+
+	if err := os.Remove(cfgFile); err != nil {
+		t.Fatalf("remove config file: %v", err)
+	}
+	if err := os.Mkdir(cfgFile, 0o700); err != nil {
+		t.Fatalf("replace config file with directory: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	(&Handler{pool: accountpool.GetPool()}).apiImportCredentials(
+		rec,
+		httptest.NewRequest(http.MethodPost, "/auth/credentials", strings.NewReader(`{
+			"refreshToken":"original-refresh",
+			"clientId":"client-id",
+			"clientSecret":"client-secret",
+			"authMethod":"idc",
+			"region":"us-east-1"
+		}`)),
+	)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500; body=%s", rec.Code, rec.Body.String())
+	}
+	var response map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response["rotatedRefreshToken"] != "rotated-after-refresh" || response["hint"] == "" {
+		t.Fatalf("missing rotated-token recovery response: %+v", response)
+	}
+	if accounts := config.GetAccounts(); len(accounts) != 0 {
+		t.Fatalf("failed import persisted accounts: %+v", accounts)
+	}
+}
+
+func TestApiImportCredentialsReturnsBatchRotatedTokensWhenPersistFails(t *testing.T) {
+	cfgFile := filepath.Join(t.TempDir(), "config.json")
+	if err := config.Init(cfgFile); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	defer installCleanAuthClient(t)()
+
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var requestBody struct {
+			RefreshToken string `json:"refreshToken"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
+			t.Errorf("decode refresh request: %v", err)
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		email := strings.TrimPrefix(requestBody.RefreshToken, "original-") + "@example.com"
+		accessPayload := fmt.Sprintf(`{"email":%q,"exp":%d}`, email, time.Now().Add(time.Hour).Unix())
+		accessToken := "header." + base64.RawURLEncoding.EncodeToString([]byte(accessPayload)) + ".signature"
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"accessToken":  accessToken,
+			"refreshToken": "rotated-" + strings.TrimPrefix(requestBody.RefreshToken, "original-"),
+			"expiresIn":    3600,
+		})
+	}))
+	defer fake.Close()
+
+	oldOIDC := authOidcURL()
+	auth.SetOIDCTokenURLForTest(func(string) string { return fake.URL })
+	defer auth.SetOIDCTokenURLForTest(oldOIDC)
+	if err := os.Remove(cfgFile); err != nil {
+		t.Fatalf("remove config file: %v", err)
+	}
+	if err := os.Mkdir(cfgFile, 0o700); err != nil {
+		t.Fatalf("replace config file with directory: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	(&Handler{pool: accountpool.GetPool()}).apiImportCredentials(
+		rec,
+		httptest.NewRequest(http.MethodPost, "/auth/credentials", strings.NewReader(`[
+			{"refreshToken":"original-one","clientId":"client-one","clientSecret":"secret-one","authMethod":"idc","region":"us-east-1"},
+			{"refreshToken":"original-two","clientId":"client-two","clientSecret":"secret-two","authMethod":"idc","region":"us-east-1"}
+		]`)),
+	)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500; body=%s", rec.Code, rec.Body.String())
+	}
+	var response struct {
+		Recoveries []struct {
+			Index               int    `json:"index"`
+			RotatedRefreshToken string `json:"rotatedRefreshToken"`
+		} `json:"recoveries"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	got := make(map[int]string, len(response.Recoveries))
+	for _, recovery := range response.Recoveries {
+		got[recovery.Index] = recovery.RotatedRefreshToken
+	}
+	want := map[int]string{1: "rotated-one", 2: "rotated-two"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("batch recoveries = %v, want %v; body=%s", got, want, rec.Body.String())
+	}
+	if accounts := config.GetAccounts(); len(accounts) != 0 {
+		t.Fatalf("failed batch import persisted accounts: %+v", accounts)
 	}
 }
 

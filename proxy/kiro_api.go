@@ -26,7 +26,11 @@ const (
 var profileArnResolutionCooldowns sync.Map
 var discoveredModelTokenLimits sync.Map
 
-const maxModelListPages = 20
+const (
+	maxModelListPages   = 20
+	maxProfileListPages = 20
+	profileListPageSize = 50
+)
 
 type ModelTokenLimits struct {
 	MaxInputTokens  int `json:"maxInputTokens"`
@@ -757,46 +761,73 @@ func listProfileArnsInRegionContext(ctx context.Context, account *config.Account
 		ctx = context.Background()
 	}
 	endpoint := regionalizeURLForRegion(fmt.Sprintf("%s/ListAvailableProfiles", kiroRestAPIBase), region)
-	req, err := http.NewRequestWithContext(ctx, "POST", endpoint, strings.NewReader(`{"maxResults":10}`))
-	if err != nil {
-		return nil, err
-	}
-	setKiroHeaders(req, account)
-	req.Header.Set("Content-Type", "application/json")
-
 	client, err := GetRestClientForProxy(ResolveAccountProxyURL(account))
 	if err != nil {
 		return nil, classifyTransportError("ListAvailableProfiles", fmt.Errorf("configure outbound proxy: %w", err))
 	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, classifyTransportError("ListAvailableProfiles", err)
-	}
-	defer resp.Body.Close()
 
-	body, readErr := httpbody.ReadAll(resp.Body, httpbody.DefaultLimit)
-	if resp.StatusCode != 200 {
-		return nil, classifyUpstreamHTTPError(resp.StatusCode, "ListAvailableProfiles", body)
-	}
-	if readErr != nil {
-		return nil, readErr
-	}
+	profiles := make([]string, 0)
+	seenProfiles := make(map[string]bool)
+	seenTokens := make(map[string]bool)
+	nextToken := ""
+	for page := 0; page < maxProfileListPages; page++ {
+		requestBody := map[string]interface{}{"maxResults": profileListPageSize}
+		if nextToken != "" {
+			requestBody["nextToken"] = nextToken
+		}
+		payload, err := json.Marshal(requestBody)
+		if err != nil {
+			return nil, err
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(string(payload)))
+		if err != nil {
+			return nil, err
+		}
+		setKiroHeaders(req, account)
+		req.Header.Set("Content-Type", "application/json")
 
-	var result struct {
-		Profiles []struct {
-			Arn string `json:"arn"`
-		} `json:"profiles"`
-	}
-	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, err
-	}
-	profiles := make([]string, 0, len(result.Profiles))
-	for _, profile := range result.Profiles {
-		if profileArn := strings.TrimSpace(profile.Arn); profileArn != "" {
+		resp, err := client.Do(req)
+		if err != nil {
+			return nil, classifyTransportError("ListAvailableProfiles", err)
+		}
+		body, readErr := httpbody.ReadAll(resp.Body, httpbody.DefaultLimit)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return nil, classifyUpstreamHTTPError(resp.StatusCode, "ListAvailableProfiles", body)
+		}
+		if readErr != nil {
+			return nil, readErr
+		}
+
+		var result struct {
+			Profiles []struct {
+				Arn string `json:"arn"`
+			} `json:"profiles"`
+			NextToken string `json:"nextToken"`
+		}
+		if err := json.Unmarshal(body, &result); err != nil {
+			return nil, err
+		}
+		for _, profile := range result.Profiles {
+			profileArn := strings.TrimSpace(profile.Arn)
+			if profileArn == "" || seenProfiles[profileArn] {
+				continue
+			}
+			seenProfiles[profileArn] = true
 			profiles = append(profiles, profileArn)
 		}
+
+		next := strings.TrimSpace(result.NextToken)
+		if next == "" {
+			return profiles, nil
+		}
+		if seenTokens[next] {
+			return nil, fmt.Errorf("ListAvailableProfiles returned repeated nextToken")
+		}
+		seenTokens[next] = true
+		nextToken = next
 	}
-	return profiles, nil
+	return nil, fmt.Errorf("ListAvailableProfiles exceeded %d pages", maxProfileListPages)
 }
 
 func listProfileArnsWithRetryInRegionContext(ctx context.Context, account *config.Account, region string) ([]string, error) {

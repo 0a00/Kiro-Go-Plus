@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"kiro-go/config"
 	"net/http"
@@ -258,6 +259,60 @@ func TestDiscoverKiroProfilesAcrossRegions(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&calls); got != 2 {
 		t.Fatalf("profile request count = %d, want 2", got)
+	}
+}
+
+func TestListProfileArnsFollowsPaginationAndDeduplicates(t *testing.T) {
+	var calls int32
+	kiroRestHttpStore.Store(&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		call := atomic.AddInt32(&calls, 1)
+		if req.URL.Path != "/ListAvailableProfiles" {
+			t.Fatalf("unexpected profile request path: %s", req.URL.Path)
+		}
+		var requestBody struct {
+			MaxResults int    `json:"maxResults"`
+			NextToken  string `json:"nextToken"`
+		}
+		if err := json.NewDecoder(req.Body).Decode(&requestBody); err != nil {
+			t.Fatalf("decode profile request: %v", err)
+		}
+		if requestBody.MaxResults != 50 {
+			t.Fatalf("maxResults = %d, want 50", requestBody.MaxResults)
+		}
+		body := `{"profiles":[{"arn":"profile-one"},{"arn":"profile-shared"}],"nextToken":"page-two"}`
+		if call == 2 {
+			if requestBody.NextToken != "page-two" {
+				t.Fatalf("nextToken = %q, want page-two", requestBody.NextToken)
+			}
+			body = `{"profiles":[{"arn":"profile-shared"},{"arn":"profile-two"}]}`
+		}
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+	})})
+	t.Cleanup(func() { InitKiroHttpClient("") })
+
+	profiles, err := listProfileArnsInRegionContext(context.Background(), &config.Account{AccessToken: "token"}, "us-east-1")
+	if err != nil {
+		t.Fatalf("listProfileArnsInRegionContext: %v", err)
+	}
+	want := []string{"profile-one", "profile-shared", "profile-two"}
+	if !reflect.DeepEqual(profiles, want) || atomic.LoadInt32(&calls) != 2 {
+		t.Fatalf("profiles = %v calls=%d, want %v calls=2", profiles, calls, want)
+	}
+}
+
+func TestListProfileArnsRejectsRepeatedNextToken(t *testing.T) {
+	kiroRestHttpStore.Store(&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"profiles":[],"nextToken":"repeated"}`)),
+			Header:     make(http.Header),
+		}, nil
+	})})
+	t.Cleanup(func() { InitKiroHttpClient("") })
+
+	_, err := listProfileArnsInRegionContext(context.Background(), &config.Account{AccessToken: "token"}, "us-east-1")
+	if err == nil || !strings.Contains(err.Error(), "repeated nextToken") {
+		t.Fatalf("expected repeated nextToken error, got %v", err)
 	}
 }
 

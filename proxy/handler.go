@@ -4897,6 +4897,19 @@ type credentialImportResult struct {
 	action  string
 }
 
+type credentialImportRecovery struct {
+	email               string
+	rotatedRefreshToken string
+}
+
+type credentialImportRecoveryResponse struct {
+	Index               int    `json:"index,omitempty"`
+	Email               string `json:"email,omitempty"`
+	RotatedRefreshToken string `json:"rotatedRefreshToken"`
+}
+
+const rotatedRefreshTokenRecoveryHint = "The identity provider rotated the refresh token before the account was persisted; retry import with the returned token"
+
 func (e *credentialImportError) Error() string {
 	if e == nil || e.err == nil {
 		return ""
@@ -4906,6 +4919,30 @@ func (e *credentialImportError) Error() string {
 
 func newCredentialImportError(status int, message string) *credentialImportError {
 	return &credentialImportError{status: status, err: fmt.Errorf("%s", message)}
+}
+
+func credentialRecoveryResponse(index int, account config.Account, recovery credentialImportRecovery) *credentialImportRecoveryResponse {
+	if strings.TrimSpace(recovery.rotatedRefreshToken) == "" {
+		return nil
+	}
+	email := strings.TrimSpace(recovery.email)
+	if email == "" {
+		email = strings.TrimSpace(account.Email)
+	}
+	return &credentialImportRecoveryResponse{
+		Index:               index,
+		Email:               email,
+		RotatedRefreshToken: recovery.rotatedRefreshToken,
+	}
+}
+
+func writeCredentialImportError(w http.ResponseWriter, importErr *credentialImportError, recovery credentialImportRecovery) {
+	payload := map[string]string{"error": importErr.Error()}
+	if strings.TrimSpace(recovery.rotatedRefreshToken) != "" {
+		payload["rotatedRefreshToken"] = recovery.rotatedRefreshToken
+		payload["hint"] = rotatedRefreshTokenRecoveryHint
+	}
+	_ = json.NewEncoder(w).Encode(payload)
 }
 
 func decodeImportCredentialsRequests(raw []byte) ([]importCredentialsRequest, bool, error) {
@@ -5076,10 +5113,12 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 	if batch {
 		imported := make([]map[string]interface{}, 0, len(reqs))
 		errors := make([]string, 0)
+		recoveries := make([]credentialImportRecoveryResponse, 0)
 		status := http.StatusBadRequest
 		type preparedImport struct {
-			account config.Account
-			err     *credentialImportError
+			account  config.Account
+			recovery credentialImportRecovery
+			err      *credentialImportError
 		}
 		prepared := make([]preparedImport, len(reqs))
 		concurrency := config.GetAutoRefreshConfig().RefreshConcurrency
@@ -5099,7 +5138,9 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 			go func() {
 				defer workers.Done()
 				for index := range jobs {
-					prepared[index].account, prepared[index].err = h.prepareCredentialsAccountContext(r.Context(), reqs[index])
+					prepared[index].account, prepared[index].err = h.prepareCredentialsAccountContextWithRecovery(
+						r.Context(), reqs[index], &prepared[index].recovery,
+					)
 				}
 			}()
 		}
@@ -5117,6 +5158,9 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 					status = result.err.status
 				}
 				errors = append(errors, fmt.Sprintf("account %d: %s", i+1, result.err.Error()))
+				if recovery := credentialRecoveryResponse(i+1, result.account, result.recovery); recovery != nil {
+					recoveries = append(recoveries, *recovery)
+				}
 				continue
 			}
 			accountsToPersist = append(accountsToPersist, result.account)
@@ -5128,6 +5172,12 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 			if persistErr != nil {
 				status = http.StatusInternalServerError
 				errors = append(errors, "batch persist: "+persistErr.Error())
+				for _, index := range preparedIndexes {
+					result := prepared[index]
+					if recovery := credentialRecoveryResponse(index+1, result.account, result.recovery); recovery != nil {
+						recoveries = append(recoveries, *recovery)
+					}
+				}
 			} else {
 				for i, result := range persisted {
 					imported = append(imported, map[string]interface{}{
@@ -5146,18 +5196,24 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 		if len(imported) == 0 && len(errors) > 0 {
 			w.WriteHeader(status)
 		}
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		response := map[string]interface{}{
 			"success":  len(errors) == 0,
 			"accounts": imported,
 			"errors":   errors,
-		})
+		}
+		if len(recoveries) > 0 {
+			response["recoveries"] = recoveries
+			response["hint"] = rotatedRefreshTokenRecoveryHint
+		}
+		json.NewEncoder(w).Encode(response)
 		return
 	}
 
-	result, importErr := h.importCredentialsAccountContext(r.Context(), reqs[0])
+	recovery := credentialImportRecovery{}
+	result, importErr := h.importCredentialsAccountContextWithRecovery(r.Context(), reqs[0], &recovery)
 	if importErr != nil {
 		w.WriteHeader(importErr.status)
-		json.NewEncoder(w).Encode(map[string]string{"error": importErr.Error()})
+		writeCredentialImportError(w, importErr, recovery)
 		return
 	}
 	h.pool.Reload()
@@ -5177,8 +5233,26 @@ func (h *Handler) prepareCredentialsAccount(req importCredentialsRequest) (confi
 }
 
 func (h *Handler) prepareCredentialsAccountContext(ctx context.Context, req importCredentialsRequest) (config.Account, *credentialImportError) {
+	return h.prepareCredentialsAccountContextWithRecovery(ctx, req, nil)
+}
+
+func (h *Handler) prepareCredentialsAccountContextWithRecovery(ctx context.Context, req importCredentialsRequest, recovery *credentialImportRecovery) (config.Account, *credentialImportError) {
 	req = normalizeNestedCredentialImport(req)
-	req.AuthMethod = normalizeImportAuthMethod(req.AuthMethod, req.ClientID, req.ClientSecret, req.KiroApiKey, req.TokenEndpoint)
+	originalRefreshToken := strings.TrimSpace(req.RefreshToken)
+	clientSuppliedProfileArn := strings.TrimSpace(req.ProfileArn)
+	derivedTokenEndpoint, derivedIssuer, derivedScopes := auth.DeriveExternalIdpEndpoints(req.UserID, req.ClientID, req.AccessToken)
+	tokenEndpointHint := req.TokenEndpoint
+	if strings.TrimSpace(tokenEndpointHint) == "" {
+		tokenEndpointHint = derivedTokenEndpoint
+	}
+	issuerHint := req.IssuerURL
+	if strings.TrimSpace(issuerHint) == "" {
+		issuerHint = derivedIssuer
+	}
+	req.AuthMethod = normalizeImportAuthMethod(
+		req.AuthMethod, req.Provider, req.ClientID, req.ClientSecret,
+		req.KiroApiKey, tokenEndpointHint, issuerHint,
+	)
 	normalizeImportedIDCMetadata(&req)
 	if req.AuthMethod == "api_key" {
 		if req.KiroApiKey == "" {
@@ -5227,10 +5301,6 @@ func (h *Handler) prepareCredentialsAccountContext(ctx context.Context, req impo
 	if req.Region == "" {
 		req.Region = "us-east-1"
 	}
-	derivedTokenEndpoint, derivedIssuer, derivedScopes := auth.DeriveExternalIdpEndpoints(req.UserID, req.ClientID, req.AccessToken)
-	if derivedTokenEndpoint != "" && auth.ValidateExternalIdpEndpoint(derivedTokenEndpoint) == nil && req.AuthMethod != "external_idp" {
-		req.AuthMethod = "external_idp"
-	}
 	if req.AuthMethod == "external_idp" {
 		if req.TokenEndpoint == "" {
 			req.TokenEndpoint = derivedTokenEndpoint
@@ -5260,7 +5330,8 @@ func (h *Handler) prepareCredentialsAccountContext(ctx context.Context, req impo
 
 	var accessToken string
 	var expiresAt int64
-	profileArn := req.ProfileArn
+	profileArn := clientSuppliedProfileArn
+	refreshedProfileArn := ""
 	if req.AuthMethod == "external_idp" && req.AccessToken != "" {
 		if exp := auth.ExpFromAccessTokenJWT(req.AccessToken); exp > time.Now().Unix() {
 			accessToken = req.AccessToken
@@ -5279,14 +5350,16 @@ func (h *Handler) prepareCredentialsAccountContext(ctx context.Context, req impo
 			IssuerURL: req.IssuerURL, Scopes: string(req.Scopes),
 		}
 		var newRefreshToken string
-		var refreshedProfileArn string
 		var err error
-		accessToken, newRefreshToken, expiresAt, refreshedProfileArn, err = auth.RefreshToken(tempAccount)
+		accessToken, newRefreshToken, expiresAt, refreshedProfileArn, err = auth.RefreshTokenContext(ctx, tempAccount)
 		if err != nil {
 			return config.Account{}, newCredentialImportError(http.StatusBadRequest, "Token refresh failed: "+err.Error())
 		}
 		if newRefreshToken != "" {
 			req.RefreshToken = newRefreshToken
+			if recovery != nil && strings.TrimSpace(newRefreshToken) != originalRefreshToken {
+				recovery.rotatedRefreshToken = newRefreshToken
+			}
 		}
 		if refreshedProfileArn != "" {
 			profileArn = refreshedProfileArn
@@ -5327,6 +5400,31 @@ func (h *Handler) prepareCredentialsAccountContext(ctx context.Context, req impo
 	if account.Email == "" {
 		account.Email = email
 	}
+	if recovery != nil {
+		recovery.email = account.Email
+	}
+
+	// A client-supplied external-IdP profile must belong to this credential.
+	// A profile returned directly by the refresh endpoint is already upstream-
+	// authenticated and does not need a second lookup.
+	if req.AuthMethod == "external_idp" && clientSuppliedProfileArn != "" && strings.TrimSpace(refreshedProfileArn) == "" {
+		probe := account
+		probe.ProfileArn = ""
+		profiles, err := DiscoverKiroProfilesContext(ctx, &probe)
+		if err != nil {
+			return config.Account{}, newCredentialImportError(http.StatusBadGateway, "Unable to verify profileArn against Kiro profiles: "+err.Error())
+		}
+		offered := false
+		for _, profile := range profiles {
+			if profile.Arn == clientSuppliedProfileArn {
+				offered = true
+				break
+			}
+		}
+		if !offered {
+			return config.Account{}, newCredentialImportError(http.StatusBadRequest, "profileArn was not offered for this credential")
+		}
+	}
 
 	return account, nil
 }
@@ -5336,7 +5434,11 @@ func (h *Handler) importCredentialsAccount(req importCredentialsRequest) (*crede
 }
 
 func (h *Handler) importCredentialsAccountContext(ctx context.Context, req importCredentialsRequest) (*credentialImportResult, *credentialImportError) {
-	account, prepareErr := h.prepareCredentialsAccountContext(ctx, req)
+	return h.importCredentialsAccountContextWithRecovery(ctx, req, nil)
+}
+
+func (h *Handler) importCredentialsAccountContextWithRecovery(ctx context.Context, req importCredentialsRequest, recovery *credentialImportRecovery) (*credentialImportResult, *credentialImportError) {
+	account, prepareErr := h.prepareCredentialsAccountContextWithRecovery(ctx, req, recovery)
 	if prepareErr != nil {
 		return nil, prepareErr
 	}
@@ -5386,6 +5488,7 @@ func importAction(updated bool) string {
 var externalIdpAuthMethodAliases = map[string]bool{
 	"external_idp": true,
 	"azuread":      true,
+	"azure_ad":     true,
 	"azure":        true,
 	"entra":        true,
 	"entra_id":     true,
@@ -5395,35 +5498,85 @@ var externalIdpAuthMethodAliases = map[string]bool{
 	"external":     true,
 }
 
-func normalizeImportAuthMethod(authMethod, clientID, clientSecret, kiroAPIKey, tokenEndpoint string) string {
+var idcAuthMethodAliases = map[string]bool{
+	"idc":             true,
+	"builderid":       true,
+	"builder_id":      true,
+	"enterprise":      true,
+	"identity_center": true,
+	"aws_sso":         true,
+}
+
+var socialAuthMethodAliases = map[string]bool{
+	"social": true,
+	"google": true,
+	"github": true,
+}
+
+var apiKeyAuthMethodAliases = map[string]bool{
+	"api_key":      true,
+	"apikey":       true,
+	"kiro_api_key": true,
+}
+
+func normalizeImportAuthLabel(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	return strings.NewReplacer("-", "_", " ", "_").Replace(value)
+}
+
+func normalizeImportAuthMethod(authMethod, provider, clientID, clientSecret, kiroAPIKey, tokenEndpoint, issuerURL string) string {
 	if kiroAPIKey != "" {
 		return "api_key"
 	}
-	normalized := strings.ToLower(strings.TrimSpace(authMethod))
-	normalized = strings.ReplaceAll(normalized, "-", "_")
-	if externalIdpAuthMethodAliases[normalized] || strings.TrimSpace(tokenEndpoint) != "" {
+
+	normalizedMethod := normalizeImportAuthLabel(authMethod)
+	if normalizedMethod != "" {
+		switch {
+		case apiKeyAuthMethodAliases[normalizedMethod]:
+			return "api_key"
+		case idcAuthMethodAliases[normalizedMethod]:
+			return "idc"
+		case socialAuthMethodAliases[normalizedMethod]:
+			return "social"
+		case externalIdpAuthMethodAliases[normalizedMethod]:
+			return "external_idp"
+		default:
+			if clientID != "" && clientSecret != "" {
+				return "idc"
+			}
+			return "social"
+		}
+	}
+
+	normalizedProvider := normalizeImportAuthLabel(provider)
+	if normalizedProvider != "" {
+		switch {
+		case apiKeyAuthMethodAliases[normalizedProvider]:
+			return "api_key"
+		case idcAuthMethodAliases[normalizedProvider]:
+			return "idc"
+		case socialAuthMethodAliases[normalizedProvider]:
+			return "social"
+		case externalIdpAuthMethodAliases[normalizedProvider]:
+			return "external_idp"
+		default:
+			if clientID != "" && clientSecret != "" {
+				return "idc"
+			}
+			return "social"
+		}
+	}
+
+	// Endpoint metadata is only an inference hint when neither the method nor
+	// provider was explicit. This prevents mixed export templates from forcing
+	// IDC or social credentials through the external-IdP refresh path.
+	if strings.TrimSpace(tokenEndpoint) != "" || strings.TrimSpace(issuerURL) != "" {
 		return "external_idp"
 	}
-	if normalized == "" {
-		if clientID != "" {
-			return "idc"
-		}
-		return "social"
-	}
-	// 标准化 authMethod
-	switch normalized {
-	case "api_key", "apikey", "api-key", "kiro_api_key":
-		return "api_key"
-	case "idc", "builderid", "enterprise":
+	if clientID != "" {
 		return "idc"
-	case "social", "google", "github":
-		return "social"
-	default:
-		if clientID != "" && clientSecret != "" {
-			return "idc"
-		}
-		return "social"
 	}
+	return "social"
 }
 
 func maskedKiroAPIKeyLabel(key string) string {
@@ -6781,6 +6934,9 @@ func (h *Handler) apiExportAccountCredentials(w http.ResponseWriter, r *http.Req
 			continue
 		}
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"email":         account.Email,
+			"userId":        account.UserId,
+			"machineId":     account.MachineId,
 			"clientId":      account.ClientID,
 			"clientSecret":  account.ClientSecret,
 			"accessToken":   account.AccessToken,
@@ -6789,6 +6945,7 @@ func (h *Handler) apiExportAccountCredentials(w http.ResponseWriter, r *http.Req
 			"authMethod":    account.AuthMethod,
 			"provider":      account.Provider,
 			"region":        account.Region,
+			"startUrl":      account.StartUrl,
 			"profileArn":    account.ProfileArn,
 			"tokenEndpoint": account.TokenEndpoint,
 			"issuerUrl":     account.IssuerURL,
@@ -7128,6 +7285,7 @@ func (h *Handler) apiExportAccounts(w http.ResponseWriter, r *http.Request) {
 		ClientID      string `json:"clientId,omitempty"`
 		ClientSecret  string `json:"clientSecret,omitempty"`
 		Region        string `json:"region,omitempty"`
+		StartUrl      string `json:"startUrl,omitempty"`
 		ExpiresAt     int64  `json:"expiresAt"`
 		AuthMethod    string `json:"authMethod,omitempty"`
 		Provider      string `json:"provider,omitempty"`
@@ -7219,6 +7377,7 @@ func (h *Handler) apiExportAccounts(w http.ResponseWriter, r *http.Request) {
 				ClientID:      a.ClientID,
 				ClientSecret:  a.ClientSecret,
 				Region:        a.Region,
+				StartUrl:      a.StartUrl,
 				ExpiresAt:     a.ExpiresAt * 1000, // 转为毫秒时间戳
 				AuthMethod:    authMethod,
 				Provider:      a.Provider,

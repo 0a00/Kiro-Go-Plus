@@ -1,5 +1,5 @@
 {
-  "version": "1.2.29",
+  "version": "1.2.30",
   "changelog": "Add bulk API key creation with one-key-per-line input.\n新增 API Key 批量添加功能，支持一行一个 Key。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }

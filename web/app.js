@@ -1335,6 +1335,54 @@
       toast((e && e.message) || t('common.failed'), 'error');
     }
   }
+  function credentialImportPayloadFromFullAccount(account) {
+    const source = account || {};
+    const payload = {};
+    const fields = {
+      email: source.email,
+      userId: source.userId,
+      machineId: source.machineId,
+      clientId: source.clientId,
+      clientSecret: source.clientSecret,
+      accessToken: source.accessToken,
+      refreshToken: source.refreshToken,
+      kiroApiKey: source.kiroApiKey,
+      authMethod: source.authMethod,
+      provider: source.provider,
+      region: source.region,
+      startUrl: source.startUrl,
+      profileArn: source.profileArn,
+      tokenEndpoint: source.tokenEndpoint,
+      issuerUrl: source.issuerUrl,
+      scopes: source.scopes
+    };
+    Object.entries(fields).forEach(([key, value]) => {
+      if (value !== undefined && value !== null && value !== '') payload[key] = value;
+    });
+    return payload;
+  }
+  function credentialImportPayloadFromExportAccount(account) {
+    const source = account || {};
+    const credentials = source.credentials || {};
+    return credentialImportPayloadFromFullAccount({
+      email: source.email,
+      userId: source.userId,
+      machineId: source.machineId,
+      clientId: credentials.clientId,
+      clientSecret: credentials.clientSecret,
+      accessToken: credentials.accessToken,
+      refreshToken: credentials.refreshToken,
+      kiroApiKey: credentials.kiroApiKey,
+      authMethod: credentials.authMethod || source.authMethod,
+      provider: credentials.provider || source.provider || source.idp,
+      region: credentials.region || source.region,
+      startUrl: credentials.startUrl || source.startUrl,
+      profileArn: credentials.profileArn || source.profileArn,
+      tokenEndpoint: credentials.tokenEndpoint,
+      issuerUrl: credentials.issuerUrl,
+      scopes: credentials.scopes
+    });
+  }
   async function copyAccountJSON(id, btn) {
     const password = window.prompt(t('security.reauthPassword'));
     if (!password) return;
@@ -1347,8 +1395,7 @@
           throw new Error(failure.error || t('common.failed'));
         }
         const a = await res.json();
-        const { clientId, clientSecret, accessToken, refreshToken, kiroApiKey, authMethod, provider, region, profileArn, tokenEndpoint, issuerUrl, scopes } = a;
-        return JSON.stringify({ clientId, clientSecret, accessToken, refreshToken, kiroApiKey, authMethod, provider, region, profileArn, tokenEndpoint, issuerUrl, scopes }, null, 2);
+        return JSON.stringify(credentialImportPayloadFromFullAccount(a), null, 2);
       });
       if (await copyText(jsonPromise)) {
         flashCopySuccess(btn);
@@ -3530,6 +3577,51 @@
   }
 
   // Import handlers
+  const externalCredentialAuthAliases = new Set(['external_idp', 'azuread', 'azure_ad', 'azure', 'entra', 'entra_id', 'microsoft', 'm365', 'office365', 'external']);
+  const idcCredentialAuthAliases = new Set(['idc', 'builderid', 'builder_id', 'enterprise', 'identity_center', 'aws_sso']);
+  const socialCredentialAuthAliases = new Set(['social', 'google', 'github']);
+  const apiKeyCredentialAuthAliases = new Set(['api_key', 'apikey', 'kiro_api_key']);
+  function normalizeCredentialAuthLabel(value) {
+    return String(value || '').trim().toLowerCase().replace(/[-\s]+/g, '_');
+  }
+  function inferCredentialAuthMethod(item, hasKiroApiKey) {
+    if (hasKiroApiKey) return 'api_key';
+    const classify = label => {
+      if (apiKeyCredentialAuthAliases.has(label)) return 'api_key';
+      if (idcCredentialAuthAliases.has(label)) return 'idc';
+      if (socialCredentialAuthAliases.has(label)) return 'social';
+      if (externalCredentialAuthAliases.has(label)) return 'external_idp';
+      return '';
+    };
+    const explicitMethod = normalizeCredentialAuthLabel(item.authMethod);
+    if (explicitMethod) return classify(explicitMethod) || (item.clientId && item.clientSecret ? 'idc' : 'social');
+    const explicitProvider = normalizeCredentialAuthLabel(item.provider);
+    if (explicitProvider) return classify(explicitProvider) || (item.clientId && item.clientSecret ? 'idc' : 'social');
+    if (item.tokenEndpoint || item.issuerUrl) return 'external_idp';
+    return item.clientId ? 'idc' : 'social';
+  }
+  async function handleCredentialRecoveryResponse(data) {
+    const recoveries = Array.isArray(data?.recoveries) ? data.recoveries.slice() : [];
+    if (data?.rotatedRefreshToken) {
+      recoveries.push({ rotatedRefreshToken: data.rotatedRefreshToken });
+    }
+    if (recoveries.length === 0) return false;
+    const recoveryData = {
+      warning: data.hint || 'Refresh tokens rotated before account persistence completed.',
+      recoveries
+    };
+    const json = JSON.stringify(recoveryData, null, 2);
+    await copyText(json);
+    const blob = new Blob([json], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'kiro-refresh-token-recovery-' + new Date().toISOString().replace(/[:.]/g, '-') + '.json';
+    link.click();
+    URL.revokeObjectURL(url);
+    toastWarning(t('credentials.rotatedTokenRecovery', recoveries.length), { duration: 15000 });
+    return true;
+  }
   async function importLocalKiro() {
     const provider = $('localProvider').value;
     const tokenJson = $('localTokenJson').value.trim();
@@ -3559,7 +3651,7 @@
       closeModal(); loadAccounts(); loadStats();
       toastPrimary(t('local.importSuccess') + ': ' + (d.account?.email || d.account?.id));
       autoRefreshNewAccount(d.account?.id);
-    } else toastError(t('common.failed') + ': ' + (d.error || ''));
+    } else if (!(await handleCredentialRecoveryResponse(d))) toastError(t('common.failed') + ': ' + (d.error || ''));
   }
   async function importCredentials() {
     const raw = $('credJson').value.trim();
@@ -3589,16 +3681,11 @@
     let ok = 0, fail = 0;
     const payloads = [];
     for (const item of items) {
-      const hasKiroApiKey = !!(item.kiroApiKey || (String(item.authMethod || '').toLowerCase().replace(/[-\s]/g, '_') === 'api_key' && item.accessToken));
+      const declaredApiKey = apiKeyCredentialAuthAliases.has(normalizeCredentialAuthLabel(item.authMethod)) ||
+        apiKeyCredentialAuthAliases.has(normalizeCredentialAuthLabel(item.provider));
+      const hasKiroApiKey = !!(item.kiroApiKey || (declaredApiKey && item.accessToken));
       if (!item.refreshToken && !hasKiroApiKey) { fail++; continue; }
-      let authMethod = item.authMethod || '';
-      const normalizedAuth = String(authMethod).toLowerCase().replace(/[-\s]/g, '_');
-      const externalIdpAliases = ['external_idp', 'azuread', 'azure', 'entra', 'entra_id', 'microsoft', 'm365', 'office365', 'external'];
-      if (hasKiroApiKey || normalizedAuth === 'api_key' || normalizedAuth === 'apikey') authMethod = 'api_key';
-      else if (externalIdpAliases.includes(normalizedAuth) || item.tokenEndpoint) authMethod = 'external_idp';
-      else if (item.clientId && item.clientSecret) authMethod = 'idc';
-      else if (!authMethod || authMethod === 'social') authMethod = 'social';
-      else authMethod = authMethod.toLowerCase() === 'idc' ? 'idc' : 'social';
+      const authMethod = inferCredentialAuthMethod(item, hasKiroApiKey);
       let provider = item.provider || '';
       if (!provider && authMethod === 'social') provider = 'Google';
       if (!provider && authMethod === 'idc') provider = 'BuilderId';
@@ -3617,6 +3704,8 @@
         clientSecret: item.clientSecret || '',
         authMethod, provider,
         region: authMethod === 'api_key' ? (item.region || '') : (item.region || 'us-east-1'),
+        authRegion: item.authRegion || '',
+        startUrl: item.startUrl || '',
         profileArn: item.profileArn || '',
         tokenEndpoint: item.tokenEndpoint || '',
         issuerUrl: item.issuerUrl || '',
@@ -3637,6 +3726,10 @@
         ok = imported.length;
         fail += errors.length;
         if (!res.ok && imported.length === 0 && errors.length === 0) fail += payloads.length;
+        if (await handleCredentialRecoveryResponse(d)) {
+          loadAccounts(); loadStats();
+          return;
+        }
       } catch {
         fail += payloads.length;
       }
@@ -3658,6 +3751,8 @@
       clientId: c.clientId || item.clientId,
       clientSecret: c.clientSecret || item.clientSecret,
       region: c.region || item.region,
+      authRegion: c.authRegion || c.auth_region || item.authRegion || item.auth_region,
+      startUrl: c.startUrl || c.start_url || item.startUrl || item.start_url,
       authMethod: c.authMethod || item.authMethod,
       provider: c.provider || item.provider || item.idp,
       expiresAt: c.expiresAt || item.expiresAt,
@@ -3712,7 +3807,7 @@
       closeModal(); loadAccounts(); loadStats();
       toastPrimary(t('cookie.importSuccess') + ': ' + (d.account?.email || d.account?.id));
       autoRefreshNewAccount(d.account?.id);
-    } else toastError(t('common.failed') + ': ' + (d.error || ''));
+    } else if (!(await handleCredentialRecoveryResponse(d))) toastError(t('common.failed') + ': ' + (d.error || ''));
   }
   async function importSsoToken() {
     const res = await api('/auth/sso-token', {
@@ -3981,10 +4076,7 @@
     if (exportSelectedIds.size === 0) { toastWarning(t('export.noSelection')); return; }
     const jsonPromise = getExportData().then(data => {
       if (!data) throw new Error('no-data');
-      const filtered = (data.accounts || []).map(a => {
-        const { clientId, clientSecret, accessToken, refreshToken, kiroApiKey, authMethod, provider } = a.credentials || {};
-        return { clientId, clientSecret, accessToken, refreshToken, kiroApiKey, authMethod, provider };
-      });
+      const filtered = (data.accounts || []).map(credentialImportPayloadFromExportAccount);
       return JSON.stringify(filtered, null, 2);
     });
     try {
