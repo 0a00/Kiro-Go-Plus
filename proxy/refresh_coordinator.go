@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"kiro-go/auth"
 	"kiro-go/config"
+	"kiro-go/internal/outboundipv6"
 	"kiro-go/logger"
 	accountpool "kiro-go/pool"
 	"strings"
@@ -151,6 +152,9 @@ func (c *tokenRefreshCoordinator) execute(account *config.Account, refreshConfig
 	defer c.releaseSlot()
 
 	accessToken, refreshToken, expiresAt, profileArn, err := auth.RefreshTokenContext(ctx, account)
+	if outboundipv6.IsBindError(err) {
+		err = classifyRefreshFailure("token_refresh", err)
+	}
 	if auth.IsRefreshUpstreamBlocked(err) {
 		c.markRefreshUpstreamBlocked(refreshUpstreamBlockCooldown)
 	}
@@ -341,7 +345,11 @@ func classifyRefreshFailure(endpoint string, err error) *UpstreamError {
 	}
 	kind := UpstreamErrorTokenExpired
 	lower := strings.ToLower(message)
-	if auth.IsRefreshUpstreamBlocked(err) {
+	retryAccounts := true
+	if outboundipv6.IsBindError(err) || isLocalConfigurationError(err) {
+		kind = UpstreamErrorLocalConfiguration
+		retryAccounts = false
+	} else if auth.IsRefreshUpstreamBlocked(err) {
 		kind = UpstreamErrorEndpointUnavailable
 	} else if strings.Contains(lower, "invalid_grant") || strings.Contains(lower, "bad credentials") || strings.Contains(lower, "revoked") {
 		kind = UpstreamErrorAuthRevoked
@@ -351,6 +359,6 @@ func classifyRefreshFailure(endpoint string, err error) *UpstreamError {
 		Endpoint:            endpoint,
 		Message:             message,
 		Cause:               err,
-		RetryAcrossAccounts: true,
+		RetryAcrossAccounts: retryAccounts,
 	}
 }

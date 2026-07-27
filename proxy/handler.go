@@ -16,6 +16,7 @@ import (
 	"kiro-go/pool"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"sort"
 	"strconv"
@@ -630,6 +631,13 @@ func (h *Handler) refreshOneAccount(account *config.Account, autoRefresh config.
 		(account.AccessToken == "" || (account.ExpiresAt > 0 && now > account.ExpiresAt-tokenRefreshBefore))
 	if needsTokenRefresh {
 		if err := h.refreshAccountToken(account); err != nil {
+			if isLocalConfigurationError(err) {
+				logger.Errorf("[BackgroundRefresh] Local IPv6 configuration prevents token refresh: %v", err)
+				result.Status = "failed"
+				result.Reason = "local IPv6 configuration failed"
+				result.Err = err
+				return result
+			}
 			if auth.IsRefreshUpstreamBlocked(err) {
 				logger.Debugf("[BackgroundRefresh] Shared authentication upstream block for %s: %v", account.Email, err)
 				result.Reason = "authentication refresh upstream temporarily blocked"
@@ -4154,6 +4162,8 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 		h.apiUpdateOutboundIPv6(w, r)
 	case path == "/ipv6/test" && r.Method == "POST":
 		h.apiTestOutboundIPv6(w, r)
+	case path == "/ipv6/diagnose" && r.Method == "POST":
+		h.apiDiagnoseOutboundIPv6(w, r)
 	case path == "/prompt-filter" && r.Method == "GET":
 		h.apiGetPromptFilter(w, r)
 	case path == "/prompt-filter" && r.Method == "POST":
@@ -4207,6 +4217,10 @@ func (h *Handler) apiGetAccounts(w http.ResponseWriter, r *http.Request) {
 		stats := statsMap[a.ID]
 		health := healthMap[a.ID]
 		proxyURL, proxyPasswordSet := sanitizedProxyURL(a.ProxyURL)
+		assignedIPv6 := ""
+		if source, _, err := resolveAccountIPv6(&a, ResolveAccountProxyURL(&a)); err == nil {
+			assignedIPv6 = source
+		}
 
 		result[i] = map[string]interface{}{
 			"id":                a.ID,
@@ -4227,6 +4241,7 @@ func (h *Handler) apiGetAccounts(w http.ResponseWriter, r *http.Request) {
 			"weight":            a.Weight,
 			"priority":          a.Priority,
 			"maxConcurrency":    a.MaxConcurrency,
+			"assignedIPv6":      assignedIPv6,
 			"overageStatus":     a.OverageStatus,
 			"overageCapability": a.OverageCapability,
 			"overageCap":        a.OverageCap,
@@ -7397,7 +7412,279 @@ func (h *Handler) apiUpdateProxy(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) apiGetOutboundIPv6(w http.ResponseWriter, r *http.Request) {
-	json.NewEncoder(w).Encode(config.GetOutboundIPv6Config())
+	value := config.GetOutboundIPv6Config()
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"mode": value.Mode, "prefix": value.Prefix, "fallbackEnabled": value.FallbackEnabled,
+		"stats": outboundipv6.StatsSnapshot(),
+	})
+}
+
+type outboundIPv6EndpointDiagnostic struct {
+	Name        string   `json:"name"`
+	Host        string   `json:"host"`
+	Addresses   []string `json:"addresses,omitempty"`
+	Synthesized bool     `json:"synthesized,omitempty"`
+	Reachable   bool     `json:"reachable"`
+	Error       string   `json:"error,omitempty"`
+}
+
+type outboundIPv6Diagnostic struct {
+	Host               outboundipv6.HostInfo            `json:"host"`
+	Configured         outboundipv6.Config              `json:"configured"`
+	ProbeConfig        outboundipv6.Config              `json:"probeConfig"`
+	Recommended        outboundipv6.Config              `json:"recommended"`
+	RecommendationCode string                           `json:"recommendationCode"`
+	AssignedIPv6       string                           `json:"assignedIPv6,omitempty"`
+	ObservedIP         string                           `json:"observedIP,omitempty"`
+	Capacity           string                           `json:"capacity,omitempty"`
+	AccountCount       int                              `json:"accountCount"`
+	Ready              bool                             `json:"ready"`
+	Endpoints          []outboundIPv6EndpointDiagnostic `json:"endpoints"`
+	Warnings           []string                         `json:"warnings,omitempty"`
+	Stats              outboundipv6.Stats               `json:"stats"`
+}
+
+func (h *Handler) apiDiagnoseOutboundIPv6(w http.ResponseWriter, r *http.Request) {
+	requested := config.GetOutboundIPv6Config()
+	if r.Body != nil && r.ContentLength != 0 {
+		if err := json.NewDecoder(r.Body).Decode(&requested); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON"})
+			return
+		}
+	}
+	report := diagnoseOutboundIPv6(r.Context(), requested)
+	json.NewEncoder(w).Encode(report)
+}
+
+func diagnoseOutboundIPv6(parent context.Context, requested outboundipv6.Config) outboundIPv6Diagnostic {
+	host := outboundipv6.DetectHost()
+	accounts := config.GetAccounts()
+	report := outboundIPv6Diagnostic{
+		Host: host, Configured: requested, Stats: outboundipv6.StatsSnapshot(),
+		Recommended:        outboundipv6.Config{Mode: outboundipv6.ModeDisabled, Prefix: strings.TrimSpace(requested.Prefix)},
+		RecommendationCode: "no_prefix",
+	}
+	directAccounts := make([]config.Account, 0, len(accounts))
+	hasDirectAccount := false
+	if len(accounts) == 0 {
+		mode, _, err := outboundproxy.Parse(config.GetProxyURL())
+		hasDirectAccount = err == nil && mode == outboundproxy.Direct
+	} else {
+		for i := range accounts {
+			mode, _, err := outboundproxy.Parse(ResolveAccountProxyURL(&accounts[i]))
+			if err == nil && mode == outboundproxy.Direct {
+				hasDirectAccount = true
+				directAccounts = append(directAccounts, accounts[i])
+			}
+		}
+	}
+	report.AccountCount = len(directAccounts)
+	if !hasDirectAccount {
+		report.RecommendationCode = "no_direct_accounts"
+		return report
+	}
+	prefix := strings.TrimSpace(requested.Prefix)
+	if prefix == "" {
+		prefix = host.RecommendedPrefix
+		report.Recommended.Prefix = prefix
+	}
+	probe := outboundipv6.Config{Mode: outboundipv6.ModeStable, Prefix: prefix, FallbackEnabled: false}
+	report.ProbeConfig = probe
+	if prefix == "" {
+		if host.Container {
+			report.Warnings = append(report.Warnings, "container networking cannot reliably discover the host routed IPv6 prefix")
+		}
+		return report
+	}
+	if normalized, err := outboundipv6.Normalize(probe); err != nil {
+		report.RecommendationCode = "invalid_prefix"
+		report.Warnings = append(report.Warnings, err.Error())
+		return report
+	} else {
+		probe = normalized
+		report.ProbeConfig = normalized
+		report.Recommended.Prefix = normalized.Prefix
+	}
+	accountIDs := make([]string, 0, len(directAccounts))
+	for i, account := range directAccounts {
+		id := strings.TrimSpace(account.ID)
+		if id == "" {
+			id = fmt.Sprintf("diagnostic-account-%d", i)
+		}
+		accountIDs = append(accountIDs, id)
+	}
+	if err := outboundipv6.ValidateAssignments(probe, accountIDs); err != nil {
+		report.RecommendationCode = "insufficient_capacity"
+		report.Warnings = append(report.Warnings, err.Error())
+		return report
+	}
+	parsedPrefix, _ := netip.ParsePrefix(probe.Prefix)
+	capacity, saturated := outboundipv6.Capacity(parsedPrefix)
+	if saturated {
+		report.Capacity = "2^64+"
+	} else {
+		report.Capacity = strconv.FormatUint(capacity, 10)
+	}
+	if !host.IPNonlocalBindKnown || !host.IPNonlocalBind {
+		report.RecommendationCode = "nonlocal_bind_disabled"
+		return report
+	}
+	addr, err := outboundipv6.Address(probe, "ipv6-diagnostic")
+	if err != nil {
+		report.RecommendationCode = "assignment_failed"
+		report.Warnings = append(report.Warnings, err.Error())
+		return report
+	}
+	report.AssignedIPv6 = addr.String()
+
+	ctx, cancel := context.WithTimeout(parent, 20*time.Second)
+	defer cancel()
+	hosts := make(map[string]string)
+	addHost := func(rawURL, name string) {
+		parsed, err := url.Parse(rawURL)
+		if err == nil && parsed.Hostname() != "" {
+			if existing := hosts[parsed.Hostname()]; existing == "" {
+				hosts[parsed.Hostname()] = name
+			} else if !strings.Contains(existing, name) {
+				hosts[parsed.Hostname()] = existing + " / " + name
+			}
+		}
+	}
+	for _, endpoint := range kiroEndpoints {
+		addHost(endpoint.URL, endpoint.Name)
+	}
+	for i := range directAccounts {
+		account := &directAccounts[i]
+		for _, endpoint := range kiroEndpoints {
+			addHost(endpoint.ResolveURL(account, account.ProfileArn), endpoint.Name)
+		}
+		switch strings.ToLower(strings.TrimSpace(account.AuthMethod)) {
+		case "idc":
+			region := strings.TrimSpace(account.Region)
+			if region == "" {
+				region = "us-east-1"
+			}
+			addHost("https://oidc."+region+".amazonaws.com/token", "OIDC token refresh")
+		case "social":
+			addHost("https://prod.us-east-1.auth.desktop.kiro.dev/refreshToken", "Kiro social token refresh")
+		case "external_idp":
+			addHost(account.TokenEndpoint, "External IdP token refresh")
+		}
+	}
+	for endpointHost, name := range hosts {
+		entry := outboundIPv6EndpointDiagnostic{Name: name, Host: endpointHost}
+		addresses, lookupErr := net.DefaultResolver.LookupNetIP(ctx, "ip6", endpointHost)
+		ipv4Addresses, _ := net.DefaultResolver.LookupNetIP(ctx, "ip4", endpointHost)
+		nativeCount := 0
+		for _, candidate := range addresses {
+			if candidate.Is6() && !candidate.Is4In6() {
+				entry.Addresses = append(entry.Addresses, candidate.String())
+				if !looksLikeDNS64Address(candidate, ipv4Addresses) {
+					nativeCount++
+				}
+			}
+		}
+		entry.Synthesized = len(entry.Addresses) > 0 && nativeCount == 0
+		if lookupErr != nil {
+			entry.Error = lookupErr.Error()
+		} else if len(entry.Addresses) == 0 {
+			entry.Error = "no IPv6 address"
+		}
+		report.Endpoints = append(report.Endpoints, entry)
+	}
+	sort.Slice(report.Endpoints, func(i, j int) bool { return report.Endpoints[i].Host < report.Endpoints[j].Host })
+	for _, endpoint := range report.Endpoints {
+		if len(endpoint.Addresses) == 0 {
+			report.RecommendationCode = "kiro_no_ipv6"
+			return report
+		}
+		if endpoint.Synthesized {
+			report.RecommendationCode = "nat64_detected"
+			return report
+		}
+	}
+
+	transport, err := buildKiroTransportWithIPv6("direct", addr.String(), false)
+	if err != nil {
+		report.RecommendationCode = "transport_failed"
+		report.Warnings = append(report.Warnings, err.Error())
+		return report
+	}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Timeout: 12 * time.Second, Transport: transport}
+	var endpointWait sync.WaitGroup
+	for i := range report.Endpoints {
+		endpointWait.Add(1)
+		go func(index int) {
+			defer endpointWait.Done()
+			request, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+report.Endpoints[index].Host+"/", nil)
+			response, requestErr := client.Do(request)
+			if requestErr != nil {
+				report.Endpoints[index].Error = requestErr.Error()
+				return
+			}
+			response.Body.Close()
+			report.Endpoints[index].Reachable = true
+		}(i)
+	}
+	endpointWait.Wait()
+	allReachable := true
+	for _, endpoint := range report.Endpoints {
+		if !endpoint.Reachable {
+			allReachable = false
+			break
+		}
+	}
+	if !allReachable {
+		report.RecommendationCode = "kiro_unreachable"
+		return report
+	}
+	request, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://api64.ipify.org", nil)
+	response, err := client.Do(request)
+	if err != nil {
+		report.RecommendationCode = "egress_unreachable"
+		report.Warnings = append(report.Warnings, err.Error())
+		return report
+	}
+	body, readErr := io.ReadAll(io.LimitReader(response.Body, 256))
+	response.Body.Close()
+	if readErr != nil || response.StatusCode != http.StatusOK {
+		report.RecommendationCode = "egress_unreachable"
+		return report
+	}
+	report.ObservedIP = strings.TrimSpace(string(body))
+	observed, parseErr := netip.ParseAddr(report.ObservedIP)
+	if parseErr != nil || !observed.Is6() || observed.Is4In6() {
+		report.RecommendationCode = "egress_not_ipv6"
+		return report
+	}
+	report.Ready = true
+	report.RecommendationCode = "ready"
+	report.Recommended = outboundipv6.Config{Mode: outboundipv6.ModeStable, Prefix: probe.Prefix, FallbackEnabled: false}
+	return report
+}
+
+func looksLikeDNS64Address(candidate netip.Addr, ipv4Addresses []netip.Addr) bool {
+	if !candidate.Is6() || candidate.Is4In6() {
+		return false
+	}
+	for _, rawPrefix := range []string{"64:ff9b::/96", "64:ff9b:1::/48"} {
+		if netip.MustParsePrefix(rawPrefix).Contains(candidate) {
+			return true
+		}
+	}
+	raw := candidate.As16()
+	for _, ipv4 := range ipv4Addresses {
+		if !ipv4.Is4() {
+			continue
+		}
+		v4 := ipv4.As4()
+		if raw[12] == v4[0] && raw[13] == v4[1] && raw[14] == v4[2] && raw[15] == v4[3] {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *Handler) apiUpdateOutboundIPv6(w http.ResponseWriter, r *http.Request) {
@@ -7411,100 +7698,29 @@ func (h *Handler) apiUpdateOutboundIPv6(w http.ResponseWriter, r *http.Request) 
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
+	outboundipv6.ResetRandomAssignments()
+	proxyClientCache.Clear()
+	auth.ClearAccountClientCache()
 	json.NewEncoder(w).Encode(map[string]bool{"success": true})
 }
 
 func (h *Handler) apiTestOutboundIPv6(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		outboundipv6.Config
-		AccountID string `json:"accountId"`
-	}
+	var req outboundipv6.Config
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, `{"error":"Invalid JSON"}`, http.StatusBadRequest)
 		return
 	}
-	value, err := outboundipv6.Normalize(req.Config)
-	if err != nil || value.Mode == outboundipv6.ModeDisabled {
-		if err == nil {
-			err = fmt.Errorf("IPv6 mode is disabled")
-		}
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
-		return
-	}
-	accountID := strings.TrimSpace(req.AccountID)
-	if accountID == "" {
-		accountID = "ipv6-connectivity-test"
-	}
-	addr, err := outboundipv6.Address(value, accountID)
-	if err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
-		return
-	}
-	transport, err := buildKiroTransportWithIPv6("direct", addr.String(), value.FallbackEnabled)
-	if err != nil {
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
-		return
-	}
-	client := &http.Client{Timeout: 15 * time.Second, Transport: transport}
-	defer transport.CloseIdleConnections()
-	reqCtx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
-	defer cancel()
-	kiroIPs, err := net.DefaultResolver.LookupNetIP(reqCtx, "ip6", "runtime.us-east-1.kiro.dev")
-	hasNativeIPv6 := false
-	if err == nil {
-		for _, candidate := range kiroIPs {
-			if candidate.Is6() && !candidate.Is4In6() {
-				hasNativeIPv6 = true
-				break
-			}
-		}
-	}
-	if !hasNativeIPv6 {
+	report := diagnoseOutboundIPv6(r.Context(), req)
+	if !report.Ready {
 		w.WriteHeader(http.StatusBadGateway)
-		json.NewEncoder(w).Encode(map[string]string{
-			"error":        "Kiro upstream has no native IPv6 address; direct IPv6 egress requires DNS64/NAT64 or a dual-stack upstream",
-			"assignedIPv6": addr.String(),
-		})
-		return
-	}
-	kiroRequest, _ := http.NewRequestWithContext(reqCtx, http.MethodGet, "https://runtime.us-east-1.kiro.dev/", nil)
-	kiroResponse, err := client.Do(kiroRequest)
-	if err != nil {
-		w.WriteHeader(http.StatusBadGateway)
-		json.NewEncoder(w).Encode(map[string]string{
-			"error": "IPv6 can be assigned but cannot reach Kiro: " + err.Error(), "assignedIPv6": addr.String(),
-		})
-		return
-	}
-	kiroResponse.Body.Close()
-	request, _ := http.NewRequestWithContext(reqCtx, http.MethodGet, "https://api64.ipify.org", nil)
-	response, err := client.Do(request)
-	if err != nil {
-		w.WriteHeader(http.StatusBadGateway)
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error(), "assignedIPv6": addr.String()})
-		return
-	}
-	defer response.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(response.Body, 256))
-	if err != nil || response.StatusCode != http.StatusOK {
-		w.WriteHeader(http.StatusBadGateway)
-		json.NewEncoder(w).Encode(map[string]string{"error": "IPv6 check service failed", "assignedIPv6": addr.String()})
-		return
-	}
-	observed := strings.TrimSpace(string(body))
-	observedIP := net.ParseIP(observed)
-	if observedIP == nil || observedIP.To4() != nil {
-		w.WriteHeader(http.StatusBadGateway)
-		json.NewEncoder(w).Encode(map[string]string{
-			"error": "request did not exit through IPv6", "assignedIPv6": addr.String(), "observedIP": observed,
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": report.RecommendationCode, "recommendationCode": report.RecommendationCode,
+			"assignedIPv6": report.AssignedIPv6, "observedIP": report.ObservedIP,
 		})
 		return
 	}
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success": true, "assignedIPv6": addr.String(), "observedIP": observed,
+		"success": true, "assignedIPv6": report.AssignedIPv6, "observedIP": report.ObservedIP,
 	})
 }
 

@@ -869,6 +869,21 @@ func TestPrivacySensitiveDefaultsAndProxyValidation(t *testing.T) {
 	}
 }
 
+func TestOutboundIPv6AccountIDsOnlyIncludesDirectRoutes(t *testing.T) {
+	value := &Config{
+		ProxyURL: "http://proxy.example:8080",
+		Accounts: []Account{
+			{ID: "inherits-proxy"},
+			{ID: "explicit-proxy", ProxyURL: "socks5://proxy.example:1080"},
+			{ID: "direct", ProxyURL: "direct"},
+		},
+	}
+	got := outboundIPv6AccountIDs(value)
+	if len(got) != 1 || got[0] != "direct" {
+		t.Fatalf("direct IPv6 account IDs = %v, want [direct]", got)
+	}
+}
+
 func TestResolveListenAddressUsesDeploymentOverrides(t *testing.T) {
 	if err := Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatalf("init config: %v", err)

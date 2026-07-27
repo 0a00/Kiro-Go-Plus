@@ -340,7 +340,8 @@ func (h *Handler) handleAccountFailure(account *config.Account, err error) {
 
 	if upstreamErr, ok := asUpstreamError(err); ok {
 		switch upstreamErr.Kind {
-		case UpstreamErrorClientRequest, UpstreamErrorRetryBudget, UpstreamErrorModelUnavailable, UpstreamErrorCanceled:
+		case UpstreamErrorClientRequest, UpstreamErrorRetryBudget, UpstreamErrorModelUnavailable, UpstreamErrorCanceled,
+			UpstreamErrorLocalConfiguration:
 			return
 		case UpstreamErrorQuota:
 			h.disableAccountOverage(account)
@@ -435,7 +436,7 @@ func (h *Handler) acquireAccountForModel(model, routeKey string, excluded map[st
 func (h *Handler) callKiroAPIWithHealth(account *config.Account, payload *KiroPayload, callback *KiroStreamCallback) error {
 	startedAt := time.Now()
 	err := CallKiroAPI(account, payload, callback)
-	if h != nil && h.pool != nil && account != nil {
+	if h != nil && h.pool != nil && account != nil && !isLocalConfigurationError(err) {
 		h.pool.RecordAccountOutcome(account.ID, time.Since(startedAt), err == nil)
 	}
 	return err

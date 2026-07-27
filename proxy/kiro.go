@@ -221,8 +221,19 @@ func buildKiroTransportWithIPv6(proxyURL, sourceIPv6 string, fallback bool) (*ht
 			if err == nil {
 				return conn, nil
 			}
+			outboundipv6.WrapBindError(sourceIPv6, err)
+			outboundipv6.RecordFallback()
 			logger.Warnf("IPv6 source bind %s failed, falling back to default route: %v", sourceIPv6, err)
 			return plain.DialContext(ctx, network, address)
+		}
+	} else if sourceIPv6 != "" {
+		boundDial := dialContext
+		dialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+			conn, err := boundDial(ctx, network, address)
+			if err != nil {
+				return nil, outboundipv6.WrapBindError(sourceIPv6, err)
+			}
+			return conn, nil
 		}
 	}
 	t := &http.Transport{
@@ -989,6 +1000,9 @@ endpointLoop:
 					lastErr = classifyTransportError(ep.Name, err)
 				}
 				detailTrace.recordAttempt(accountID, accountEmail, ep.Name, endpointHost, attemptStartedAt, 0, "error", lastErr, requestDetailRetryReason(lastErr))
+				if isLocalConfigurationError(lastErr) {
+					return lastErr
+				}
 				if payload != nil {
 					payload.attemptBudget.recordFailure(ep.Name, lastErr)
 				}

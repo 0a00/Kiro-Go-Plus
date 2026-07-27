@@ -22,6 +22,10 @@ var httpClientStore atomic.Pointer[http.Client]
 // authProxyClientCache caches per-proxy auth HTTP clients.
 var authProxyClientCache = clientcache.New(1024, 30*time.Minute)
 
+func ClearAccountClientCache() {
+	authProxyClientCache.Clear()
+}
+
 // httpClient 返回当前全局 auth HTTP 客户端
 func httpClient() *http.Client {
 	return httpClientStore.Load()
@@ -113,8 +117,19 @@ func buildAuthTransportWithIPv6(proxyURL, sourceIPv6 string, fallback bool) (*ht
 				if err == nil {
 					return conn, nil
 				}
+				outboundipv6.WrapBindError(sourceIPv6, err)
+				outboundipv6.RecordFallback()
 				logger.Warnf("Auth IPv6 source bind %s failed, falling back to default route: %v", sourceIPv6, err)
 				return plain.DialContext(ctx, network, address)
+			}
+		} else {
+			boundDial := dialContext
+			dialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+				conn, err := boundDial(ctx, network, address)
+				if err != nil {
+					return nil, outboundipv6.WrapBindError(sourceIPv6, err)
+				}
+				return conn, nil
 			}
 		}
 	}

@@ -32,6 +32,7 @@
   let kiroSsoPollTimer = null;
   let exportSelectedIds = new Set();
   let currentVersion = '';
+  let ipv6DiagnosticReport = null;
   let testLogs = [];
   let testModalAccountId = '';
   let testModalModels = [];
@@ -198,6 +199,7 @@
     renderVersionBadge();
     renderAccounts();
     renderPromptRules();
+	if (ipv6DiagnosticReport) renderIPv6Diagnostic(ipv6DiagnosticReport);
   }
   function updateLangButtons() {
     qsa('.lang-btn').forEach(btn => btn.classList.toggle('active', btn.dataset.lang === currentLang));
@@ -1541,6 +1543,7 @@
       detailItem(t('detail.userId'), a.userId || '-') +
       detailItem(t('detail.authMethod'), formatAuthMethod(a.provider || a.authMethod)) +
       detailItem(t('detail.region'), a.region || 'us-east-1') +
+	  detailItem(t('detail.assignedIPv6'), a.assignedIPv6 || '-') +
       '</div></div>' +
 
       '<div class="detail-section"><h4>' + escapeHtml(t('detail.machineId')) + '</h4><div class="machine-id-row">' +
@@ -2508,6 +2511,7 @@
     $('ipv6Prefix').value = d.prefix || '';
     $('ipv6Fallback').checked = d.fallbackEnabled === true;
     onIPv6ModeChange();
+	diagnoseIPv6Config(false);
   }
   function onIPv6ModeChange() {
     $('ipv6Fields').classList.toggle('hidden', $('ipv6Mode').value === 'disabled');
@@ -2532,10 +2536,65 @@
       const res = await api('/ipv6/test', { method: 'POST', body: JSON.stringify(currentIPv6Payload()) });
       const d = await res.json();
       if (res.ok && d.success) toast(t('settings.ipv6TestSuccess', d.assignedIPv6, d.observedIP), 'success');
-      else toast(t('settings.ipv6TestFailed') + ': ' + (d.error || ''), 'error');
+      else toast(t('settings.ipv6TestFailed') + ': ' + (d.recommendationCode ? ipv6RecommendationLabel(d.recommendationCode) : (d.error || '')), 'error');
     } finally {
       button.disabled = false;
     }
+  }
+  function ipv6RecommendationLabel(code) {
+    return t('settings.ipv6Recommendation.' + (code || 'unknown'));
+  }
+  function renderIPv6Diagnostic(report) {
+    ipv6DiagnosticReport = report || null;
+    const target = $('ipv6Diagnostic');
+    const applyButton = $('applyIPv6RecommendationBtn');
+    if (!target || !applyButton || !report) return;
+    const host = report.host || {};
+    const stats = report.stats || {};
+    const endpoints = Array.isArray(report.endpoints) ? report.endpoints : [];
+    const rows = [
+      t('settings.ipv6RecommendationLabel') + ': ' + ipv6RecommendationLabel(report.recommendationCode),
+      t('settings.ipv6DetectedAddresses') + ': ' + ((host.globalAddresses || []).join(', ') || '-'),
+      t('settings.ipv6DetectedPrefixes') + ': ' + ((host.candidatePrefixes || []).join(', ') || '-'),
+      'ip_nonlocal_bind: ' + (host.ipNonlocalBindKnown ? (host.ipNonlocalBind ? '1' : '0') : '?'),
+      t('settings.ipv6Capacity') + ': ' + (report.capacity || '-') + ' / ' + t('settings.ipv6Accounts') + ': ' + (report.accountCount || 0),
+      t('settings.ipv6Assigned') + ': ' + (report.assignedIPv6 || '-') + ' / ' + t('settings.ipv6Observed') + ': ' + (report.observedIP || '-'),
+      t('settings.ipv6BindFailures') + ': ' + (stats.bindFailures || 0) + ' / ' + t('settings.ipv6Fallbacks') + ': ' + (stats.fallbacks || 0)
+    ];
+    endpoints.forEach(endpoint => {
+      rows.push(endpoint.name + ' (' + endpoint.host + '): ' +
+        (endpoint.synthesized ? t('settings.ipv6Synthesized') :
+          (endpoint.reachable ? t('settings.ipv6Reachable') : (endpoint.error || t('settings.ipv6Unreachable')))));
+    });
+    (report.warnings || []).forEach(warning => rows.push(t('settings.ipv6Warning') + ': ' + warning));
+    target.innerHTML = rows.map(row => '<div>' + escapeHtml(row) + '</div>').join('');
+    applyButton.disabled = !report.recommended;
+  }
+  async function diagnoseIPv6Config(showResult = true) {
+    const button = $('diagnoseIPv6Btn');
+    if (button) button.disabled = true;
+    try {
+      const res = await api('/ipv6/diagnose', { method: 'POST', body: JSON.stringify(currentIPv6Payload()) });
+      const report = await res.json();
+      if (!res.ok) throw new Error(report.error || t('settings.ipv6DiagnosisFailed'));
+      renderIPv6Diagnostic(report);
+      if (showResult) toast(ipv6RecommendationLabel(report.recommendationCode), report.ready ? 'success' : 'warning');
+      return report;
+    } catch (e) {
+      if (showResult) toast((e && e.message) || t('settings.ipv6DiagnosisFailed'), 'error');
+      return null;
+    } finally {
+      if (button) button.disabled = false;
+    }
+  }
+  async function applyIPv6Recommendation() {
+    const report = ipv6DiagnosticReport || await diagnoseIPv6Config(false);
+    if (!report || !report.recommended) return;
+    $('ipv6Mode').value = report.recommended.mode || 'disabled';
+    $('ipv6Prefix').value = report.recommended.prefix || '';
+    $('ipv6Fallback').checked = report.recommended.fallbackEnabled === true;
+    onIPv6ModeChange();
+    await saveIPv6Config();
   }
   async function saveRequireApiKey() {
     try {
@@ -4486,6 +4545,8 @@
 	$('ipv6Mode').addEventListener('change', onIPv6ModeChange);
 	$('saveIPv6Btn').addEventListener('click', saveIPv6Config);
 	$('testIPv6Btn').addEventListener('click', testIPv6Config);
+	$('diagnoseIPv6Btn').addEventListener('click', () => diagnoseIPv6Config(true));
+	$('applyIPv6RecommendationBtn').addEventListener('click', applyIPv6Recommendation);
     $('resetStatsBtn').addEventListener('click', resetStats);
     bindApiKeyEvents();
   }

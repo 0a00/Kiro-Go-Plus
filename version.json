@@ -1,5 +1,5 @@
 {
-  "version": "1.2.34",
-  "changelog": "Add random-per-account and stable-per-account IPv6 egress binding for direct connections, including Admin configuration and live connectivity testing.\n新增直连请求的每账号随机和固定 IPv6 出口绑定，包含后台配置与实时连通性测试。",
+  "version": "1.2.35",
+  "changelog": "Add host-aware IPv6 diagnostics and safe recommendations, prevent local IPv6 failures from penalizing or rotating accounts, guarantee unique random assignments, and expose account IPv6/status metrics.\n新增服务器感知的 IPv6 检测与安全推荐，避免本地 IPv6 故障处罚或轮询账号，保证随机地址唯一，并展示账号 IPv6 与运行统计。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"kiro-go/config"
+	"kiro-go/internal/outboundipv6"
 	"net"
 	"net/http"
 	"strconv"
@@ -35,6 +36,7 @@ const (
 	UpstreamErrorCanceled            UpstreamErrorKind = "canceled"
 	UpstreamErrorEmptyResponse       UpstreamErrorKind = "empty_response"
 	UpstreamErrorRetryBudget         UpstreamErrorKind = "retry_budget_exhausted"
+	UpstreamErrorLocalConfiguration  UpstreamErrorKind = "local_configuration"
 )
 
 type UpstreamError struct {
@@ -179,7 +181,8 @@ func mapDownstreamError(err error) downstreamError {
 		mapped.Status = http.StatusTooManyRequests
 		mapped.ClaudeType = "rate_limit_error"
 		mapped.OpenAIType = "rate_limit_error"
-	case UpstreamErrorTokenExpired, UpstreamErrorAuthRevoked, UpstreamErrorModelUnavailable, UpstreamErrorRetryBudget:
+	case UpstreamErrorTokenExpired, UpstreamErrorAuthRevoked, UpstreamErrorModelUnavailable, UpstreamErrorRetryBudget,
+		UpstreamErrorLocalConfiguration:
 		// These credentials and models belong to the proxy, not the caller.
 		// Returning 401 would incorrectly tell clients their own API key failed.
 		mapped.Status = http.StatusServiceUnavailable
@@ -309,6 +312,13 @@ func classifyUpstreamHTTPError(statusCode int, endpoint string, body []byte) *Up
 }
 
 func classifyTransportError(endpoint string, err error) *UpstreamError {
+	if outboundipv6.IsBindError(err) {
+		return &UpstreamError{
+			Kind: UpstreamErrorLocalConfiguration, Endpoint: endpoint,
+			Message: "local IPv6 egress configuration failed", Cause: err,
+			RetryAcrossEndpoints: false, RetryAcrossAccounts: false,
+		}
+	}
 	kind := UpstreamErrorTransient
 	message := "upstream transport failed"
 	if errors.Is(err, context.DeadlineExceeded) {
@@ -331,6 +341,11 @@ func classifyTransportError(endpoint string, err error) *UpstreamError {
 		RetryAcrossEndpoints: true,
 		RetryAcrossAccounts:  true,
 	}
+}
+
+func isLocalConfigurationError(err error) bool {
+	upstreamErr, ok := asUpstreamError(err)
+	return ok && upstreamErr.Kind == UpstreamErrorLocalConfiguration
 }
 
 func classifyRequestCancellation(endpoint string, err error) *UpstreamError {

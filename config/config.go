@@ -513,7 +513,7 @@ const (
 )
 
 // Version current version
-const Version = "1.2.34"
+const Version = "1.2.35"
 
 var (
 	cfg           *Config
@@ -701,6 +701,9 @@ func loadLocked() error {
 		return fmt.Errorf("outboundIPv6: %w", err)
 	} else {
 		c.OutboundIPv6 = normalized
+	}
+	if err := outboundipv6.ValidateAssignments(c.OutboundIPv6, outboundIPv6AccountIDs(&c)); err != nil {
+		return fmt.Errorf("outboundIPv6: %w", err)
 	}
 	cfg = &c
 	migrateCountTokensProviderLocked()
@@ -2226,7 +2229,12 @@ func AddAccount(account Account) error {
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
 	normalizeKiroAPIKeyAccount(&account)
+	previous := append([]Account(nil), cfg.Accounts...)
 	cfg.Accounts = append(cfg.Accounts, account)
+	if err := validateOutboundIPv6AssignmentsLocked(); err != nil {
+		cfg.Accounts = previous
+		return err
+	}
 	return Save()
 }
 
@@ -2238,8 +2246,13 @@ func UpdateAccount(id string, account Account) error {
 	defer cfgLock.Unlock()
 	for i, a := range cfg.Accounts {
 		if a.ID == id {
+			previous := cfg.Accounts[i]
 			normalizeKiroAPIKeyAccount(&account)
 			cfg.Accounts[i] = account
+			if err := validateOutboundIPv6AssignmentsLocked(); err != nil {
+				cfg.Accounts[i] = previous
+				return err
+			}
 			return Save()
 		}
 	}
@@ -2306,6 +2319,10 @@ func UpsertAccountByIdentity(account Account) (Account, bool, error) {
 	defer cfgLock.Unlock()
 	previous := append([]Account(nil), cfg.Accounts...)
 	upserted, updated := upsertAccountByIdentityLocked(account)
+	if err := validateOutboundIPv6AssignmentsLocked(); err != nil {
+		cfg.Accounts = previous
+		return Account{}, false, err
+	}
 	if err := Save(); err != nil {
 		cfg.Accounts = previous
 		return Account{}, false, err
@@ -2330,6 +2347,10 @@ func UpsertAccountsByIdentity(accounts []Account) ([]AccountUpsertResult, error)
 	for _, account := range accounts {
 		upserted, updated := upsertAccountByIdentityLocked(account)
 		results = append(results, AccountUpsertResult{Account: upserted, Updated: updated})
+	}
+	if err := validateOutboundIPv6AssignmentsLocked(); err != nil {
+		cfg.Accounts = previous
+		return nil, err
 	}
 	if err := Save(); err != nil {
 		cfg.Accounts = previous
@@ -3079,8 +3100,44 @@ func UpdateOutboundIPv6Config(value outboundipv6.Config) error {
 	}
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
+	if err := outboundipv6.ValidateAssignments(normalized, outboundIPv6AccountIDs(cfg)); err != nil {
+		return err
+	}
 	cfg.OutboundIPv6 = normalized
 	return Save()
+}
+
+func outboundIPv6AccountIDs(value *Config) []string {
+	if value == nil {
+		return nil
+	}
+	ids := make([]string, 0, len(value.Accounts))
+	for i, account := range value.Accounts {
+		proxyURL := strings.TrimSpace(account.ProxyURL)
+		if proxyURL == "" {
+			proxyURL = value.ProxyURL
+		}
+		mode, _, err := outboundproxy.Parse(proxyURL)
+		if err != nil || mode != outboundproxy.Direct {
+			continue
+		}
+		id := strings.TrimSpace(account.ID)
+		if id == "" {
+			id = fmt.Sprintf("missing-account-id-%d", i)
+		}
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+func validateOutboundIPv6AssignmentsLocked() error {
+	if cfg == nil {
+		return nil
+	}
+	if err := outboundipv6.ValidateAssignments(cfg.OutboundIPv6, outboundIPv6AccountIDs(cfg)); err != nil {
+		return fmt.Errorf("outboundIPv6: %w", err)
+	}
+	return nil
 }
 
 func validateAccountProxy(account Account) error {
