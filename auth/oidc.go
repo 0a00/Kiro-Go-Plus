@@ -55,16 +55,9 @@ func RefreshTokenContext(ctx context.Context, account *config.Account) (string, 
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	// An empty account proxy uses the already configured global client. Explicit
-	// account values, including direct, get an isolated client.
-	proxyURL := strings.TrimSpace(account.ProxyURL)
-	client := httpClient()
-	if proxyURL != "" {
-		var err error
-		client, err = GetAuthClientForProxy(proxyURL)
-		if err != nil {
-			return "", "", 0, "", fmt.Errorf("configure outbound proxy: %w", err)
-		}
+	client, err := GetAuthClientForAccount(account)
+	if err != nil {
+		return "", "", 0, "", fmt.Errorf("configure outbound network: %w", err)
 	}
 
 	if strings.EqualFold(strings.TrimSpace(account.AuthMethod), "external_idp") {

@@ -10,6 +10,7 @@ import (
 	"kiro-go/auth"
 	"kiro-go/config"
 	"kiro-go/internal/httpbody"
+	"kiro-go/internal/outboundipv6"
 	"kiro-go/internal/outboundproxy"
 	"kiro-go/logger"
 	"kiro-go/pool"
@@ -4147,6 +4148,12 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 		h.apiGetProxy(w, r)
 	case path == "/proxy" && r.Method == "POST":
 		h.apiUpdateProxy(w, r)
+	case path == "/ipv6" && r.Method == "GET":
+		h.apiGetOutboundIPv6(w, r)
+	case path == "/ipv6" && r.Method == "POST":
+		h.apiUpdateOutboundIPv6(w, r)
+	case path == "/ipv6/test" && r.Method == "POST":
+		h.apiTestOutboundIPv6(w, r)
 	case path == "/prompt-filter" && r.Method == "GET":
 		h.apiGetPromptFilter(w, r)
 	case path == "/prompt-filter" && r.Method == "POST":
@@ -6833,7 +6840,7 @@ func (h *Handler) testKiroGenerationEndpoint(account *config.Account, payload *K
 	req.Header.Set("Amz-Sdk-Request", "attempt=1; max=3")
 	req.Header.Set("Amz-Sdk-Invocation-Id", uuid.New().String())
 
-	client, err := GetClientForProxy(ResolveAccountProxyURL(account))
+	client, err := GetClientForAccount(account)
 	if err != nil {
 		check.Error = "configure outbound proxy: " + err.Error()
 		return check
@@ -7387,6 +7394,118 @@ func (h *Handler) apiUpdateProxy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	json.NewEncoder(w).Encode(map[string]bool{"success": true})
+}
+
+func (h *Handler) apiGetOutboundIPv6(w http.ResponseWriter, r *http.Request) {
+	json.NewEncoder(w).Encode(config.GetOutboundIPv6Config())
+}
+
+func (h *Handler) apiUpdateOutboundIPv6(w http.ResponseWriter, r *http.Request) {
+	var req outboundipv6.Config
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `{"error":"Invalid JSON"}`, http.StatusBadRequest)
+		return
+	}
+	if err := config.UpdateOutboundIPv6Config(req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]bool{"success": true})
+}
+
+func (h *Handler) apiTestOutboundIPv6(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		outboundipv6.Config
+		AccountID string `json:"accountId"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `{"error":"Invalid JSON"}`, http.StatusBadRequest)
+		return
+	}
+	value, err := outboundipv6.Normalize(req.Config)
+	if err != nil || value.Mode == outboundipv6.ModeDisabled {
+		if err == nil {
+			err = fmt.Errorf("IPv6 mode is disabled")
+		}
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	accountID := strings.TrimSpace(req.AccountID)
+	if accountID == "" {
+		accountID = "ipv6-connectivity-test"
+	}
+	addr, err := outboundipv6.Address(value, accountID)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	transport, err := buildKiroTransportWithIPv6("direct", addr.String(), value.FallbackEnabled)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	client := &http.Client{Timeout: 15 * time.Second, Transport: transport}
+	defer transport.CloseIdleConnections()
+	reqCtx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	kiroIPs, err := net.DefaultResolver.LookupNetIP(reqCtx, "ip6", "runtime.us-east-1.kiro.dev")
+	hasNativeIPv6 := false
+	if err == nil {
+		for _, candidate := range kiroIPs {
+			if candidate.Is6() && !candidate.Is4In6() {
+				hasNativeIPv6 = true
+				break
+			}
+		}
+	}
+	if !hasNativeIPv6 {
+		w.WriteHeader(http.StatusBadGateway)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error":        "Kiro upstream has no native IPv6 address; direct IPv6 egress requires DNS64/NAT64 or a dual-stack upstream",
+			"assignedIPv6": addr.String(),
+		})
+		return
+	}
+	kiroRequest, _ := http.NewRequestWithContext(reqCtx, http.MethodGet, "https://runtime.us-east-1.kiro.dev/", nil)
+	kiroResponse, err := client.Do(kiroRequest)
+	if err != nil {
+		w.WriteHeader(http.StatusBadGateway)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": "IPv6 can be assigned but cannot reach Kiro: " + err.Error(), "assignedIPv6": addr.String(),
+		})
+		return
+	}
+	kiroResponse.Body.Close()
+	request, _ := http.NewRequestWithContext(reqCtx, http.MethodGet, "https://api64.ipify.org", nil)
+	response, err := client.Do(request)
+	if err != nil {
+		w.WriteHeader(http.StatusBadGateway)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error(), "assignedIPv6": addr.String()})
+		return
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(response.Body, 256))
+	if err != nil || response.StatusCode != http.StatusOK {
+		w.WriteHeader(http.StatusBadGateway)
+		json.NewEncoder(w).Encode(map[string]string{"error": "IPv6 check service failed", "assignedIPv6": addr.String()})
+		return
+	}
+	observed := strings.TrimSpace(string(body))
+	observedIP := net.ParseIP(observed)
+	if observedIP == nil || observedIP.To4() != nil {
+		w.WriteHeader(http.StatusBadGateway)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": "request did not exit through IPv6", "assignedIPv6": addr.String(), "observedIP": observed,
+		})
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true, "assignedIPv6": addr.String(), "observedIP": observed,
+	})
 }
 
 // apiGetVersion 获取版本信息

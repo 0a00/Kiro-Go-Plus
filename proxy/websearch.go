@@ -424,7 +424,7 @@ func callMCPWebSearchURL(ctx context.Context, account *config.Account, rawURL st
 		req.Header.Set("tokentype", "API_KEY")
 	}
 
-	client, err := GetRestClientForProxy(ResolveAccountProxyURL(account))
+	client, err := GetRestClientForAccount(account)
 	if err != nil {
 		return nil, classifyTransportError("Kiro MCP WebSearch", fmt.Errorf("configure outbound proxy: %w", err))
 	}

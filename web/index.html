@@ -1129,6 +1129,34 @@
         </div>
 
         <!-- Prompt filter -->
+        <div class="card settings-card" data-settings-group="integrations">
+          <div class="card-header"><span class="card-title" data-i18n="settings.ipv6Settings"></span></div>
+          <div class="form-group">
+            <label data-i18n="settings.ipv6Mode"></label>
+            <select id="ipv6Mode">
+              <option value="disabled" data-i18n="settings.ipv6Disabled"></option>
+              <option value="random" data-i18n="settings.ipv6Random"></option>
+              <option value="stable" data-i18n="settings.ipv6Stable"></option>
+            </select>
+          </div>
+          <div id="ipv6Fields" class="hidden">
+            <div class="form-group">
+              <label data-i18n="settings.ipv6Prefix"></label>
+              <input type="text" id="ipv6Prefix" placeholder="2001:db8:1234:5678::/64" autocomplete="off" spellcheck="false" />
+              <small data-i18n="settings.ipv6PrefixHint"></small>
+            </div>
+            <label class="flex items-center gap-2">
+              <span class="switch"><input type="checkbox" id="ipv6Fallback" /><span class="slider"></span></span>
+              <span data-i18n="settings.ipv6Fallback"></span>
+            </label>
+          </div>
+          <div class="action-row mt-3">
+            <button class="btn btn-primary" id="saveIPv6Btn" data-i18n="settings.saveIPv6"></button>
+            <button class="btn btn-secondary" id="testIPv6Btn" data-i18n="settings.testIPv6"></button>
+          </div>
+        </div>
+
+        <!-- Prompt filter -->
         <div class="card settings-card" data-settings-group="security">
           <div class="card-header"><span class="card-title" data-i18n="settings.promptFilter"></span></div>
           <div class="form-group">

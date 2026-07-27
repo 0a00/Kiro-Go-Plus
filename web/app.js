@@ -1924,6 +1924,7 @@
     $('allowOverUsage').checked = d.allowOverUsage || false;
     await Promise.all([
       loadRuntimeConfig(),
+	  loadIPv6Config(),
       loadRoutingConfig(),
       loadAutoRefreshConfig(),
       loadRetryConfig(),
@@ -2499,6 +2500,42 @@
     const d = await res.json();
     if (d.success) toast(t('settings.proxySaved'), 'success');
     else toast(t('common.saveFailed') + ': ' + (d.error || ''), 'error');
+  }
+  async function loadIPv6Config() {
+    const res = await api('/ipv6');
+    const d = await res.json();
+    $('ipv6Mode').value = d.mode || 'disabled';
+    $('ipv6Prefix').value = d.prefix || '';
+    $('ipv6Fallback').checked = d.fallbackEnabled === true;
+    onIPv6ModeChange();
+  }
+  function onIPv6ModeChange() {
+    $('ipv6Fields').classList.toggle('hidden', $('ipv6Mode').value === 'disabled');
+  }
+  function currentIPv6Payload() {
+    return {
+      mode: $('ipv6Mode').value,
+      prefix: $('ipv6Prefix').value.trim(),
+      fallbackEnabled: $('ipv6Fallback').checked
+    };
+  }
+  async function saveIPv6Config() {
+    const res = await api('/ipv6', { method: 'POST', body: JSON.stringify(currentIPv6Payload()) });
+    const d = await res.json();
+    if (res.ok && d.success) toast(t('settings.ipv6Saved'), 'success');
+    else toast(t('common.saveFailed') + ': ' + (d.error || ''), 'error');
+  }
+  async function testIPv6Config() {
+    const button = $('testIPv6Btn');
+    button.disabled = true;
+    try {
+      const res = await api('/ipv6/test', { method: 'POST', body: JSON.stringify(currentIPv6Payload()) });
+      const d = await res.json();
+      if (res.ok && d.success) toast(t('settings.ipv6TestSuccess', d.assignedIPv6, d.observedIP), 'success');
+      else toast(t('settings.ipv6TestFailed') + ': ' + (d.error || ''), 'error');
+    } finally {
+      button.disabled = false;
+    }
   }
   async function saveRequireApiKey() {
     try {
@@ -4446,6 +4483,9 @@
     $('changePasswordBtn').addEventListener('click', changePassword);
     $('proxyType').addEventListener('change', onProxyTypeChange);
     $('saveProxyBtn').addEventListener('click', saveProxyConfig);
+	$('ipv6Mode').addEventListener('change', onIPv6ModeChange);
+	$('saveIPv6Btn').addEventListener('click', saveIPv6Config);
+	$('testIPv6Btn').addEventListener('click', testIPv6Config);
     $('resetStatsBtn').addEventListener('click', resetStats);
     bindApiKeyEvents();
   }

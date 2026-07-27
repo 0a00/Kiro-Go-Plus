@@ -347,7 +347,7 @@ func getUsageLimitsForRegion(ctx context.Context, account *config.Account, regio
 
 	setKiroHeaders(req, account)
 
-	client, err := GetRestClientForProxy(ResolveAccountProxyURL(account))
+	client, err := GetRestClientForAccount(account)
 	if err != nil {
 		return nil, classifyTransportError("GetUsageLimits", fmt.Errorf("configure outbound proxy: %w", err))
 	}
@@ -412,7 +412,7 @@ func getUserInfoForRegion(ctx context.Context, account *config.Account, region s
 	setKiroHeaders(req, account)
 	req.Header.Set("Content-Type", "application/json")
 
-	client, err := GetRestClientForProxy(ResolveAccountProxyURL(account))
+	client, err := GetRestClientForAccount(account)
 	if err != nil {
 		return nil, classifyTransportError("GetUserInfo", fmt.Errorf("configure outbound proxy: %w", err))
 	}
@@ -453,7 +453,7 @@ func ListAvailableModelsContext(ctx context.Context, account *config.Account) ([
 	models := make([]ModelInfo, 0, 16)
 	nextToken := ""
 	seenTokens := make(map[string]struct{})
-	client, err := GetRestClientForProxy(ResolveAccountProxyURL(account))
+	client, err := GetRestClientForAccount(account)
 	if err != nil {
 		return nil, classifyTransportError("ListAvailableModels", fmt.Errorf("configure outbound proxy: %w", err))
 	}
@@ -767,7 +767,7 @@ func listProfileArnsInRegionContext(ctx context.Context, account *config.Account
 		ctx = context.Background()
 	}
 	endpoint := regionalizeURLForRegion(fmt.Sprintf("%s/ListAvailableProfiles", kiroRestAPIBase), region)
-	client, err := GetRestClientForProxy(ResolveAccountProxyURL(account))
+	client, err := GetRestClientForAccount(account)
 	if err != nil {
 		return nil, classifyTransportError("ListAvailableProfiles", fmt.Errorf("configure outbound proxy: %w", err))
 	}

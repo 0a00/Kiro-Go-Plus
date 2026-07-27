@@ -16,6 +16,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"kiro-go/internal/outboundipv6"
 	"kiro-go/internal/outboundproxy"
 	"os"
 	"path/filepath"
@@ -435,6 +436,10 @@ type Config struct {
 	// process HTTP_PROXY/HTTPS_PROXY environment.
 	ProxyURL string `json:"proxyURL,omitempty"`
 
+	// OutboundIPv6 optionally binds direct account traffic to an address from
+	// a routed IPv6 prefix. Explicit HTTP/SOCKS proxies retain their own exit IP.
+	OutboundIPv6 outboundipv6.Config `json:"outboundIPv6,omitempty"`
+
 	// SanitizeClaudeCodePrompt is kept for backward-compatible JSON loading only.
 	// Migrated to FilterClaudeCode on first load. Do not use directly.
 	SanitizeClaudeCodePrompt bool `json:"sanitizeClaudeCodePrompt,omitempty"`
@@ -508,7 +513,7 @@ const (
 )
 
 // Version current version
-const Version = "1.2.33"
+const Version = "1.2.34"
 
 var (
 	cfg           *Config
@@ -548,6 +553,7 @@ func loadLocked() error {
 				Port:                      8080,
 				Host:                      "0.0.0.0",
 				ProxyURL:                  "direct",
+				OutboundIPv6:              outboundipv6.Config{Mode: outboundipv6.ModeDisabled},
 				RequireApiKey:             false,
 				Accounts:                  []Account{},
 				UpstreamProtection:        defaultUpstreamProtectionConfig(),
@@ -685,8 +691,16 @@ func loadLocked() error {
 	if !rawConfigHasKey(data, "proxyURL") {
 		c.ProxyURL = "direct"
 	}
+	if !rawConfigHasKey(data, "outboundIPv6") {
+		c.OutboundIPv6.Mode = outboundipv6.ModeDisabled
+	}
 	if err := validateOutboundProxyConfig(&c); err != nil {
 		return err
+	}
+	if normalized, err := outboundipv6.Normalize(c.OutboundIPv6); err != nil {
+		return fmt.Errorf("outboundIPv6: %w", err)
+	} else {
+		c.OutboundIPv6 = normalized
 	}
 	cfg = &c
 	migrateCountTokensProviderLocked()
@@ -3046,6 +3060,26 @@ func UpdateProxySettings(proxyURL string) error {
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
 	cfg.ProxyURL = proxyURL
+	return Save()
+}
+
+func GetOutboundIPv6Config() outboundipv6.Config {
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	if cfg == nil {
+		return outboundipv6.Config{Mode: outboundipv6.ModeDisabled}
+	}
+	return cfg.OutboundIPv6
+}
+
+func UpdateOutboundIPv6Config(value outboundipv6.Config) error {
+	normalized, err := outboundipv6.Normalize(value)
+	if err != nil {
+		return err
+	}
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	cfg.OutboundIPv6 = normalized
 	return Save()
 }
 

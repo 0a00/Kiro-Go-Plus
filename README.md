@@ -200,6 +200,18 @@ go build -o kiro-go .
 
 The display name is Kiro-Go Plus. The Go module, binary, Compose service, and data format retain the `kiro-go` identifiers for compatibility with existing deployments and update scripts.
 
+## Per-account IPv6 Egress
+
+Admin Settings can bind direct account traffic to addresses from a routed IPv6 prefix:
+
+- **Random per account** assigns one address for the lifetime of the process.
+- **Fixed per account** derives a repeatable address from the account ID.
+- Explicit HTTP/SOCKS proxies are unaffected because the proxy controls the exit IP.
+
+The entire CIDR must be routed to the server. Non-local addresses usually require `net.ipv6.ip_nonlocal_bind=1` on the host and, with Docker bridge networking, in the container network namespace. Keep fallback disabled when strict account-to-IP isolation is required. Use **Test IPv6** before enabling production traffic.
+
+Kiro endpoints are currently commonly IPv4-only. A large IPv6 allocation alone cannot provide distinct Kiro-visible exits; direct IPv6 mode requires native dual-stack endpoints or operator-provided DNS64/NAT64. NAT64 may still collapse traffic onto one public IPv4, so verify the upstream-visible address before relying on it for account isolation.
+
 ## Data and Security
 
 Never commit or publish:

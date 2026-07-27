@@ -12,6 +12,7 @@ import (
 	"kiro-go/config"
 	"kiro-go/internal/clientcache"
 	"kiro-go/internal/httpbody"
+	"kiro-go/internal/outboundipv6"
 	"kiro-go/internal/outboundproxy"
 	"kiro-go/logger"
 	"net"
@@ -108,6 +109,23 @@ func GetClientForProxy(proxyURL string) (*http.Client, error) {
 	}), nil
 }
 
+func GetClientForAccount(account *config.Account) (*http.Client, error) {
+	proxyURL := ResolveAccountProxyURL(account)
+	source, fallback, err := resolveAccountIPv6(account, proxyURL)
+	if err != nil {
+		return nil, err
+	}
+	if source == "" {
+		return GetClientForProxy(proxyURL)
+	}
+	cacheKey := "stream:" + proxyURL + "|ipv6:" + source + "|fallback:" + strconv.FormatBool(fallback)
+	transport, err := buildKiroTransportWithIPv6(proxyURL, source, fallback)
+	if err != nil {
+		return nil, err
+	}
+	return proxyClientCache.Get(cacheKey, func() *http.Client { return &http.Client{Transport: transport} }), nil
+}
+
 // GetRestClientForProxy returns a rest http.Client (30s timeout) for the given proxy URL.
 // If proxyURL is empty, returns the global kiro REST HTTP client.
 func GetRestClientForProxy(proxyURL string) (*http.Client, error) {
@@ -128,6 +146,44 @@ func GetRestClientForProxy(proxyURL string) (*http.Client, error) {
 	}), nil
 }
 
+func GetRestClientForAccount(account *config.Account) (*http.Client, error) {
+	proxyURL := ResolveAccountProxyURL(account)
+	source, fallback, err := resolveAccountIPv6(account, proxyURL)
+	if err != nil {
+		return nil, err
+	}
+	if source == "" {
+		return GetRestClientForProxy(proxyURL)
+	}
+	cacheKey := "rest:" + proxyURL + "|ipv6:" + source + "|fallback:" + strconv.FormatBool(fallback)
+	transport, err := buildKiroTransportWithIPv6(proxyURL, source, fallback)
+	if err != nil {
+		return nil, err
+	}
+	return proxyClientCache.Get(cacheKey, func() *http.Client {
+		return &http.Client{Timeout: 30 * time.Second, Transport: transport}
+	}), nil
+}
+
+func resolveAccountIPv6(account *config.Account, proxyURL string) (string, bool, error) {
+	mode, _, err := outboundproxy.Parse(proxyURL)
+	if err != nil {
+		return "", false, err
+	}
+	if mode != outboundproxy.Direct || account == nil {
+		return "", false, nil
+	}
+	value := config.GetOutboundIPv6Config()
+	addr, err := outboundipv6.Address(value, account.ID)
+	if err != nil {
+		return "", false, fmt.Errorf("resolve account IPv6: %w", err)
+	}
+	if !addr.IsValid() {
+		return "", false, nil
+	}
+	return addr.String(), value.FallbackEnabled, nil
+}
+
 // ResolveAccountProxyURL returns the effective proxy URL for an account.
 // Falls back to global config.GetProxyURL() if the account has no per-account proxy.
 func ResolveAccountProxyURL(account *config.Account) string {
@@ -145,11 +201,32 @@ func ResolveAccountProxyURL(account *config.Account) string {
 
 // buildKiroTransport constructs an HTTP Transport with optional outbound proxy support.
 func buildKiroTransport(proxyURL string) (*http.Transport, error) {
+	return buildKiroTransportWithIPv6(proxyURL, "", false)
+}
+
+func buildKiroTransportWithIPv6(proxyURL, sourceIPv6 string, fallback bool) (*http.Transport, error) {
+	dialer := &net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}
+	if sourceIPv6 != "" {
+		ip := net.ParseIP(sourceIPv6)
+		if ip == nil || ip.To4() != nil {
+			return nil, fmt.Errorf("invalid source IPv6 address")
+		}
+		dialer.LocalAddr = &net.TCPAddr{IP: ip}
+	}
+	dialContext := dialer.DialContext
+	if sourceIPv6 != "" && fallback {
+		plain := &net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}
+		dialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+			conn, err := dialer.DialContext(ctx, network, address)
+			if err == nil {
+				return conn, nil
+			}
+			logger.Warnf("IPv6 source bind %s failed, falling back to default route: %v", sourceIPv6, err)
+			return plain.DialContext(ctx, network, address)
+		}
+	}
 	t := &http.Transport{
-		DialContext: (&net.Dialer{
-			Timeout:   15 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
+		DialContext:           dialContext,
 		MaxIdleConns:          100,
 		MaxIdleConnsPerHost:   20,
 		IdleConnTimeout:       90 * time.Second,
@@ -717,7 +794,7 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 	var lastErr error
 	var lastCircuitError error
 	effectiveProxyURL := ResolveAccountProxyURL(account)
-	client, err := GetClientForProxy(effectiveProxyURL)
+	client, err := GetClientForAccount(account)
 	if err != nil {
 		return classifyTransportError("outbound proxy", fmt.Errorf("configure outbound proxy: %w", err))
 	}

@@ -1,5 +1,5 @@
 {
-  "version": "1.2.33",
-  "changelog": "Separate OAuth authentication regions from Profile ARN data-plane regions, resolve profiles before WebSearch and overage calls, and add configurable same-endpoint retries for streams that fail before client-visible output.\n分离 OAuth 认证区域与 Profile ARN 数据面区域，在 WebSearch 和超额查询前解析 Profile，并新增可配置的流式输出前同端点重试。",
+  "version": "1.2.34",
+  "changelog": "Add random-per-account and stable-per-account IPv6 egress binding for direct connections, including Admin configuration and live connectivity testing.\n新增直连请求的每账号随机和固定 IPv6 出口绑定，包含后台配置与实时连通性测试。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }
