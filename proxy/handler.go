@@ -6151,6 +6151,8 @@ func (h *Handler) apiUpdateRetryConfig(w http.ResponseWriter, r *http.Request) {
 		MaxAccountAttempts             *int `json:"maxAccountAttempts"`
 		AccountSelectionTimeoutSeconds *int `json:"accountSelectionTimeoutSeconds"`
 		MaxRetryDurationSeconds        *int `json:"maxRetryDurationSeconds"`
+		PreOutputStreamRetries         *int `json:"preOutputStreamRetries"`
+		PreOutputRetryBackoffMs        *int `json:"preOutputRetryBackoffMs"`
 		ToolAssemblyTimeoutSeconds     *int `json:"toolAssemblyTimeoutSeconds"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&update); err != nil {
@@ -6176,6 +6178,17 @@ func (h *Handler) apiUpdateRetryConfig(w http.ResponseWriter, r *http.Request) {
 	} else {
 		req.MaxRetryDurationSeconds = *update.MaxRetryDurationSeconds
 	}
+	if update.PreOutputStreamRetries == nil {
+		req.PreOutputStreamRetries = current.PreOutputStreamRetries
+	} else {
+		value := *update.PreOutputStreamRetries
+		req.PreOutputStreamRetries = &value
+	}
+	if update.PreOutputRetryBackoffMs == nil {
+		req.PreOutputRetryBackoffMs = current.PreOutputRetryBackoffMs
+	} else {
+		req.PreOutputRetryBackoffMs = *update.PreOutputRetryBackoffMs
+	}
 	if update.ToolAssemblyTimeoutSeconds == nil {
 		req.ToolAssemblyTimeoutSeconds = current.ToolAssemblyTimeoutSeconds
 	} else {
@@ -6188,6 +6201,8 @@ func (h *Handler) apiUpdateRetryConfig(w http.ResponseWriter, r *http.Request) {
 		req.AccountSelectionTimeoutSeconds < 10 || req.AccountSelectionTimeoutSeconds > 3600 ||
 		req.MaxUpstreamAttempts < 1 || req.MaxUpstreamAttempts > 200 ||
 		req.MaxRetryDurationSeconds < 0 || req.MaxRetryDurationSeconds > 86400 ||
+		req.PreOutputStreamRetries == nil || *req.PreOutputStreamRetries < 0 || *req.PreOutputStreamRetries > 3 ||
+		req.PreOutputRetryBackoffMs < 100 || req.PreOutputRetryBackoffMs > 5000 ||
 		req.FirstTokenTimeoutSeconds < 5 || req.FirstTokenTimeoutSeconds > 600 ||
 		req.StreamIdleTimeoutSeconds < 15 || req.StreamIdleTimeoutSeconds > 3600 ||
 		(req.ToolAssemblyTimeoutSeconds != 0 && (req.ToolAssemblyTimeoutSeconds < 30 || req.ToolAssemblyTimeoutSeconds > 3600)) ||

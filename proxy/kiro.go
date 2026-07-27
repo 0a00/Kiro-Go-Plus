@@ -634,6 +634,15 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 		observed.detailToolNameMap = payload.ToolNameMap
 		callback = &observed
 	}
+	if callback != nil && callback.OnResponseStart != nil {
+		originalOnResponseStart := callback.OnResponseStart
+		var responseStartOnce sync.Once
+		wrapped := *callback
+		wrapped.OnResponseStart = func() {
+			responseStartOnce.Do(originalOnResponseStart)
+		}
+		callback = &wrapped
+	}
 
 	// Keep request diagnostics useful without writing prompts, tool arguments or
 	// image content to logs.
@@ -741,6 +750,14 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 		}()
 	}
 
+	retryConfig := config.GetRetryConfig()
+	preOutputStreamRetries := 0
+	if retryConfig.PreOutputStreamRetries != nil {
+		preOutputStreamRetries = *retryConfig.PreOutputStreamRetries
+	}
+	preOutputRetryBackoff := time.Duration(retryConfig.PreOutputRetryBackoffMs) * time.Millisecond
+
+endpointLoop:
 	for _, ep := range endpoints {
 		attemptStartedAt := time.Now()
 		if err := requestContext.Err(); err != nil {
@@ -768,298 +785,374 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 		}
 		endpointCircuitKey := ep.Key + "|" + endpointHost
 		endpointCircuitLabel := ep.Name + " (" + endpointHost + ")"
-		if !sharedUpstreamHealth.beginEndpoint(endpointCircuitKey, endpointCircuitLabel) {
-			lastErr = &UpstreamError{
-				Kind:                 UpstreamErrorEndpointUnavailable,
-				Endpoint:             ep.Name,
-				Message:              "endpoint circuit is open",
-				RetryAcrossEndpoints: true,
-				RetryAcrossAccounts:  true,
+		invocationID := uuid.New().String()
+		for endpointAttempt := 0; endpointAttempt <= preOutputStreamRetries; endpointAttempt++ {
+			attemptStartedAt = time.Now()
+			if err := requestContext.Err(); err != nil {
+				return classifyRequestCancellation(ep.Name, err)
 			}
-			detailTrace.recordAttempt(accountID, accountEmail, ep.Name, endpointHost, attemptStartedAt, 0, "skipped", lastErr, requestDetailRetryReason(lastErr))
-			continue
-		}
-		if payload != nil && !payload.attemptBudget.take() {
-			sharedUpstreamHealth.releaseEndpoint(endpointCircuitKey)
-			lastErr = newRetryBudgetError(payload.attemptBudget)
-			detailTrace.recordAttempt(accountID, accountEmail, ep.Name, endpointHost, attemptStartedAt, 0, "rejected", lastErr, requestDetailRetryReason(lastErr))
-			return lastErr
-		}
-		upstreamContext := requestContext
-		var cancelRequest context.CancelFunc
-		if payload != nil {
-			if deadline, ok := payload.attemptBudget.deadline(); ok {
-				upstreamContext, cancelRequest = context.WithDeadline(requestContext, deadline)
-			}
-		}
-		if cancelRequest == nil {
-			upstreamContext, cancelRequest = context.WithCancel(requestContext)
-		}
-		req, err := http.NewRequestWithContext(upstreamContext, "POST", endpointURL, bytes.NewReader(reqBody))
-		if err != nil {
-			cancelRequest()
-			sharedUpstreamHealth.releaseEndpoint(endpointCircuitKey)
-			lastErr = err
-			if payload != nil {
-				payload.attemptBudget.recordFailure(ep.Name, lastErr)
-			}
-			detailTrace.recordAttempt(accountID, accountEmail, ep.Name, endpointHost, attemptStartedAt, 0, "error", lastErr, requestDetailRetryReason(lastErr))
-			continue
-		}
-
-		host := ""
-		if parsedURL, parseErr := url.Parse(endpointURL); parseErr == nil {
-			host = parsedURL.Host
-		}
-		headerValues := buildStreamingHeaderValues(account, host)
-
-		contentType := ep.ContentType
-		if contentType == "" {
-			contentType = "application/json"
-		}
-		req.Header.Set("Content-Type", contentType)
-		req.Header.Set("Accept", "*/*")
-		if ep.AmzTarget != "" {
-			req.Header.Set("X-Amz-Target", ep.AmzTarget)
-		}
-		applyKiroBaseHeaders(req, account, headerValues)
-		if requestID := requestIDFromContext(requestContext); requestID != "" {
-			req.Header.Set("X-Request-Id", requestID)
-		}
-		req.Header.Set("x-amzn-kiro-agent-mode", "vibe")
-		req.Header.Set("x-amzn-codewhisperer-optout", "true")
-		req.Header.Set("Amz-Sdk-Request", "attempt=1; max=3")
-		req.Header.Set("Amz-Sdk-Invocation-Id", uuid.New().String())
-
-		var firstTokenTimedOut atomic.Bool
-		firstTokenTimeout := time.Duration(config.GetRetryConfig().FirstTokenTimeoutSeconds) * time.Second
-		var firstTokenTimer *time.Timer
-		wrappedCallback, meaningfulGate := wrapMeaningfulStreamCallback(callback, func() {
-			if firstTokenTimer != nil {
-				firstTokenTimer.Stop()
-			}
-			if payload != nil {
-				payload.recordUpstreamActivity()
-			}
-		}, payload != nil && payload.requireActionableOutput, payload != nil && payload.requireToolUse, payload != nil && payload.deferTextUntilComplete, payload != nil && payload.streamThinkingPrecommit)
-		toolAssemblyTimeout := time.Duration(config.GetRetryConfig().ToolAssemblyTimeoutSeconds) * time.Second
-		wrappedCallback, toolMonitor := wrapToolAssemblyMonitor(wrappedCallback, toolAssemblyTimeout, func(toolAssemblySnapshot) {
-			cancelRequest()
-		})
-		var actionableOutputTimedOut atomic.Bool
-		actionableOutputTimeout := resolveLongToolActionableOutputTimeout(payload)
-		var actionableOutputTimer *time.Timer
-		if firstTokenTimeout > 0 {
-			firstTokenTimer = time.AfterFunc(firstTokenTimeout, func() {
-				firstTokenTimedOut.Store(true)
-				cancelRequest()
-			})
-		}
-		if actionableOutputTimeout > 0 {
-			actionableOutputTimer = time.AfterFunc(actionableOutputTimeout, func() {
-				if meaningfulGate.hasActionableOutput() {
-					return
+			if !sharedUpstreamHealth.beginEndpoint(endpointCircuitKey, endpointCircuitLabel) {
+				lastErr = &UpstreamError{
+					Kind:                 UpstreamErrorEndpointUnavailable,
+					Endpoint:             ep.Name,
+					Message:              "endpoint circuit is open",
+					RetryAcrossEndpoints: true,
+					RetryAcrossAccounts:  true,
 				}
-				actionableOutputTimedOut.Store(true)
-				cancelRequest()
-			})
-		}
-
-		resp, err := client.Do(req)
-		if err != nil {
-			stopAndRecordToolAssembly(payload, toolMonitor)
-			if firstTokenTimer != nil {
-				firstTokenTimer.Stop()
+				detailTrace.recordAttempt(accountID, accountEmail, ep.Name, endpointHost, attemptStartedAt, 0, "skipped", lastErr, requestDetailRetryReason(lastErr))
+				continue endpointLoop
 			}
-			if actionableOutputTimer != nil {
-				actionableOutputTimer.Stop()
-			}
-			cancelRequest()
-			if requestContext.Err() != nil {
-				lastErr = classifyRequestCancellation(ep.Name, requestContext.Err())
-				detailTrace.recordAttempt(accountID, accountEmail, ep.Name, endpointHost, attemptStartedAt, 0, "canceled", lastErr, requestDetailRetryReason(lastErr))
-				return lastErr
-			}
-			if actionableOutputTimedOut.Load() {
-				lastErr = newActionableOutputTimeoutError(ep.Name, actionableOutputTimeout)
-			} else {
-				if firstTokenTimedOut.Load() {
-					err = context.DeadlineExceeded
-				}
-				lastErr = classifyTransportError(ep.Name, err)
-			}
-			detailTrace.recordAttempt(accountID, accountEmail, ep.Name, endpointHost, attemptStartedAt, 0, "error", lastErr, requestDetailRetryReason(lastErr))
-			if payload != nil {
-				payload.attemptBudget.recordFailure(ep.Name, lastErr)
-			}
-			if cooldown := sharedAccountEndpointRoutes.recordFailure(accountID, modelKey, ep, lastErr); cooldown > 0 {
-				logger.Warnf("[EndpointRouting] Account %s model %s endpoint %s cooling for %s after transport error: %v", accountID, modelKey, ep.Name, cooldown, lastErr)
-			}
-			if circuitEligibleFailure(lastErr) {
-				lastCircuitError = lastErr
-				proxyTransportFailed = true
-				sharedUpstreamHealth.endpointFailure(endpointCircuitKey, lastErr, time.Since(attemptStartedAt))
-			} else {
-				sharedUpstreamHealth.endpointSuccess(endpointCircuitKey, time.Since(attemptStartedAt))
-			}
-			logger.Warnf("[KiroAPI] Endpoint %s failed: %v", ep.Name, err)
-			if payload != nil && payload.attemptBudget.expired() && requestContext.Err() == nil {
-				return newRetryBudgetError(payload.attemptBudget)
-			}
-			if shouldRetryAcrossEndpoints(lastErr) {
-				continue
-			}
-			return lastErr
-		}
-		proxyTransportSucceeded = true
-
-		if resp.StatusCode != 200 {
-			stopAndRecordToolAssembly(payload, toolMonitor)
-			errBody := httpbody.ReadAllTruncated(resp.Body, httpbody.DefaultLimit)
-			resp.Body.Close()
-			if firstTokenTimer != nil {
-				firstTokenTimer.Stop()
-			}
-			if actionableOutputTimer != nil {
-				actionableOutputTimer.Stop()
-			}
-			cancelRequest()
-			classifiedErr := classifyUpstreamHTTPError(resp.StatusCode, ep.Name, errBody)
-			classifiedErr.RetryAfter = parseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
-			lastErr = classifiedErr
-			detailTrace.recordAttempt(accountID, accountEmail, ep.Name, endpointHost, attemptStartedAt, resp.StatusCode, "http_error", lastErr, requestDetailRetryReason(lastErr))
-			if payload != nil {
-				payload.attemptBudget.recordFailure(ep.Name, lastErr)
-			}
-			if cooldown := sharedAccountEndpointRoutes.recordFailure(accountID, modelKey, ep, lastErr); cooldown > 0 {
-				logger.Warnf("[EndpointRouting] Account %s model %s endpoint %s cooling for %s after %v", accountID, modelKey, ep.Name, cooldown, lastErr)
-			}
-			if circuitEligibleFailure(lastErr) {
-				lastCircuitError = lastErr
-				sharedUpstreamHealth.endpointFailure(endpointCircuitKey, lastErr, time.Since(attemptStartedAt))
-			} else {
-				sharedUpstreamHealth.endpointSuccess(endpointCircuitKey, time.Since(attemptStartedAt))
-			}
-			if upstreamErr, ok := asUpstreamError(lastErr); ok && upstreamErr.RefreshToken &&
-				payload != nil && payload.takeTokenRefreshAttempt(account) && !isKiroAPIKeyAccount(account) {
-				if refreshErr := sharedTokenRefreshCoordinator.RefreshContext(requestContext, account, true); refreshErr == nil {
-					return CallKiroAPI(account, payload, callback)
-				} else {
-					return classifyRefreshFailure(ep.Name, refreshErr)
-				}
-			}
-			logger.Warnf("[KiroAPI] Endpoint %s error: %v", ep.Name, lastErr)
-			if shouldRetryAcrossEndpoints(lastErr) {
-				continue
-			}
-			return lastErr
-		}
-		if wrappedCallback != nil && wrappedCallback.OnResponseStart != nil {
-			wrappedCallback.OnResponseStart()
-		}
-
-		var streamIdleTimedOut atomic.Bool
-		idleTimeout := time.Duration(config.GetRetryConfig().StreamIdleTimeoutSeconds) * time.Second
-		err = func() error {
-			defer stopAndRecordToolAssembly(payload, toolMonitor)
-			if firstTokenTimer != nil {
-				defer firstTokenTimer.Stop()
-			}
-			if actionableOutputTimer != nil {
-				defer actionableOutputTimer.Stop()
-			}
-			defer cancelRequest()
-			return parseAndCloseEventStream(resp.Body, idleTimeout, func() {
-				streamIdleTimedOut.Store(true)
-				cancelRequest()
-			}, wrappedCallback)
-		}()
-		if err == nil && meaningfulGate.hasInvalidCommittedToolUse() {
-			err = &EventStreamError{
-				Kind:    EventStreamInvalidPayload,
-				Message: "tool use arguments are not valid JSON",
-			}
-		}
-		if err != nil {
-			if toolSnapshot, timedOut := toolMonitor.TimedOut(); timedOut {
-				err = newToolAssemblyTimeoutError(ep.Name, toolSnapshot.Name, toolSnapshot.ArgumentBytes, toolAssemblyTimeout)
-			}
-			if requestContext.Err() != nil {
+			if payload != nil && !payload.attemptBudget.take() {
 				sharedUpstreamHealth.releaseEndpoint(endpointCircuitKey)
-				lastErr = classifyRequestCancellation(ep.Name, requestContext.Err())
-				detailTrace.recordAttempt(accountID, accountEmail, ep.Name, endpointHost, attemptStartedAt, http.StatusOK, "canceled", lastErr, requestDetailRetryReason(lastErr))
+				lastErr = newRetryBudgetError(payload.attemptBudget)
+				detailTrace.recordAttempt(accountID, accountEmail, ep.Name, endpointHost, attemptStartedAt, 0, "rejected", lastErr, requestDetailRetryReason(lastErr))
 				return lastErr
 			}
-			if actionableOutputTimedOut.Load() && !meaningfulGate.hasActionableOutput() {
-				err = newActionableOutputTimeoutError(ep.Name, actionableOutputTimeout)
-			} else if streamIdleTimedOut.Load() {
-				err = classifyTransportError(ep.Name, context.DeadlineExceeded)
-			} else if firstTokenTimedOut.Load() && !meaningfulGate.hasActivity() {
-				err = classifyTransportError(ep.Name, context.DeadlineExceeded)
-			} else {
-				var streamErr *EventStreamError
-				if errors.As(err, &streamErr) && streamErr.Kind == EventStreamIncompleteToolUse {
-					truncatedErr := newToolOutputTruncatedError(ep.Name, streamErr)
-					allowRetry := payload != nil && payload.recordToolTruncation(streamErr.ArgumentBytes, streamErr.FragmentCount, !meaningfulGate.hasActionableOutput())
-					truncatedErr.RetryAcrossEndpoints = allowRetry
-					truncatedErr.RetryAcrossAccounts = allowRetry
-					err = truncatedErr
+			upstreamContext := requestContext
+			var cancelRequest context.CancelFunc
+			if payload != nil {
+				if deadline, ok := payload.attemptBudget.deadline(); ok {
+					upstreamContext, cancelRequest = context.WithDeadline(requestContext, deadline)
 				}
 			}
-			if _, ok := asUpstreamError(err); !ok {
-				err = classifyTransportError(ep.Name, err)
+			if cancelRequest == nil {
+				upstreamContext, cancelRequest = context.WithCancel(requestContext)
 			}
-			lastErr = err
-			attemptStatus := "stream_error"
-			if meaningfulGate.hasActionableOutput() {
-				attemptStatus = "partial_stream_error"
+			req, err := http.NewRequestWithContext(upstreamContext, "POST", endpointURL, bytes.NewReader(reqBody))
+			if err != nil {
+				cancelRequest()
+				sharedUpstreamHealth.releaseEndpoint(endpointCircuitKey)
+				lastErr = err
+				if payload != nil {
+					payload.attemptBudget.recordFailure(ep.Name, lastErr)
+				}
+				detailTrace.recordAttempt(accountID, accountEmail, ep.Name, endpointHost, attemptStartedAt, 0, "error", lastErr, requestDetailRetryReason(lastErr))
+				continue endpointLoop
 			}
-			detailTrace.recordAttempt(accountID, accountEmail, ep.Name, endpointHost, attemptStartedAt, http.StatusOK, attemptStatus, lastErr, requestDetailRetryReason(lastErr))
-			if payload != nil {
-				payload.attemptBudget.recordFailure(ep.Name, lastErr)
+
+			host := ""
+			if parsedURL, parseErr := url.Parse(endpointURL); parseErr == nil {
+				host = parsedURL.Host
 			}
-			if cooldown := sharedAccountEndpointRoutes.recordFailure(accountID, modelKey, ep, lastErr); cooldown > 0 {
-				logger.Warnf("[EndpointRouting] Account %s model %s endpoint %s cooling for %s after stream error: %v", accountID, modelKey, ep.Name, cooldown, lastErr)
+			headerValues := buildStreamingHeaderValues(account, host)
+
+			contentType := ep.ContentType
+			if contentType == "" {
+				contentType = "application/json"
 			}
-			if meaningfulGate.hasActionableOutput() || !circuitEligibleFailure(err) {
-				sharedUpstreamHealth.endpointSuccess(endpointCircuitKey, time.Since(attemptStartedAt))
-			} else {
-				lastCircuitError = err
-				sharedUpstreamHealth.endpointFailure(endpointCircuitKey, err, time.Since(attemptStartedAt))
+			req.Header.Set("Content-Type", contentType)
+			req.Header.Set("Accept", "*/*")
+			if ep.AmzTarget != "" {
+				req.Header.Set("X-Amz-Target", ep.AmzTarget)
 			}
-			if payload != nil && payload.attemptBudget.expired() && requestContext.Err() == nil {
-				return newRetryBudgetError(payload.attemptBudget)
+			applyKiroBaseHeaders(req, account, headerValues)
+			if requestID := requestIDFromContext(requestContext); requestID != "" {
+				req.Header.Set("X-Request-Id", requestID)
 			}
-			if meaningfulGate.hasActionableOutput() || !shouldRetryAcrossEndpoints(err) {
-				return err
+			req.Header.Set("x-amzn-kiro-agent-mode", "vibe")
+			req.Header.Set("x-amzn-codewhisperer-optout", "true")
+			req.Header.Set("Amz-Sdk-Request", fmt.Sprintf("attempt=%d; max=%d", endpointAttempt+1, preOutputStreamRetries+1))
+			req.Header.Set("Amz-Sdk-Invocation-Id", invocationID)
+
+			var firstTokenTimedOut atomic.Bool
+			firstTokenTimeout := time.Duration(retryConfig.FirstTokenTimeoutSeconds) * time.Second
+			var firstTokenTimer *time.Timer
+			wrappedCallback, meaningfulGate := wrapMeaningfulStreamCallback(callback, func() {
+				if firstTokenTimer != nil {
+					firstTokenTimer.Stop()
+				}
+				if payload != nil {
+					payload.recordUpstreamActivity()
+				}
+			}, payload != nil && payload.requireActionableOutput, payload != nil && payload.requireToolUse, payload != nil && payload.deferTextUntilComplete, payload != nil && payload.streamThinkingPrecommit)
+			toolAssemblyTimeout := time.Duration(retryConfig.ToolAssemblyTimeoutSeconds) * time.Second
+			wrappedCallback, toolMonitor := wrapToolAssemblyMonitor(wrappedCallback, toolAssemblyTimeout, func(toolAssemblySnapshot) {
+				cancelRequest()
+			})
+			var actionableOutputTimedOut atomic.Bool
+			actionableOutputTimeout := resolveLongToolActionableOutputTimeout(payload)
+			var actionableOutputTimer *time.Timer
+			if firstTokenTimeout > 0 {
+				firstTokenTimer = time.AfterFunc(firstTokenTimeout, func() {
+					firstTokenTimedOut.Store(true)
+					cancelRequest()
+				})
 			}
-			continue
+			if actionableOutputTimeout > 0 {
+				actionableOutputTimer = time.AfterFunc(actionableOutputTimeout, func() {
+					if meaningfulGate.hasActionableOutput() {
+						return
+					}
+					actionableOutputTimedOut.Store(true)
+					cancelRequest()
+				})
+			}
+
+			resp, err := client.Do(req)
+			if err != nil {
+				stopAndRecordToolAssembly(payload, toolMonitor)
+				if firstTokenTimer != nil {
+					firstTokenTimer.Stop()
+				}
+				if actionableOutputTimer != nil {
+					actionableOutputTimer.Stop()
+				}
+				cancelRequest()
+				if requestContext.Err() != nil {
+					lastErr = classifyRequestCancellation(ep.Name, requestContext.Err())
+					detailTrace.recordAttempt(accountID, accountEmail, ep.Name, endpointHost, attemptStartedAt, 0, "canceled", lastErr, requestDetailRetryReason(lastErr))
+					return lastErr
+				}
+				if actionableOutputTimedOut.Load() {
+					lastErr = newActionableOutputTimeoutError(ep.Name, actionableOutputTimeout)
+				} else {
+					if firstTokenTimedOut.Load() {
+						err = context.DeadlineExceeded
+					}
+					lastErr = classifyTransportError(ep.Name, err)
+				}
+				detailTrace.recordAttempt(accountID, accountEmail, ep.Name, endpointHost, attemptStartedAt, 0, "error", lastErr, requestDetailRetryReason(lastErr))
+				if payload != nil {
+					payload.attemptBudget.recordFailure(ep.Name, lastErr)
+				}
+				if cooldown := sharedAccountEndpointRoutes.recordFailure(accountID, modelKey, ep, lastErr); cooldown > 0 {
+					logger.Warnf("[EndpointRouting] Account %s model %s endpoint %s cooling for %s after transport error: %v", accountID, modelKey, ep.Name, cooldown, lastErr)
+				}
+				if circuitEligibleFailure(lastErr) {
+					lastCircuitError = lastErr
+					proxyTransportFailed = true
+					sharedUpstreamHealth.endpointFailure(endpointCircuitKey, lastErr, time.Since(attemptStartedAt))
+				} else {
+					sharedUpstreamHealth.endpointSuccess(endpointCircuitKey, time.Since(attemptStartedAt))
+				}
+				logger.Warnf("[KiroAPI] Endpoint %s failed: %v", ep.Name, err)
+				if payload != nil && payload.attemptBudget.expired() && requestContext.Err() == nil {
+					return newRetryBudgetError(payload.attemptBudget)
+				}
+				if shouldRetryAcrossEndpoints(lastErr) {
+					continue endpointLoop
+				}
+				return lastErr
+			}
+			proxyTransportSucceeded = true
+
+			if resp.StatusCode != 200 {
+				stopAndRecordToolAssembly(payload, toolMonitor)
+				errBody := httpbody.ReadAllTruncated(resp.Body, httpbody.DefaultLimit)
+				resp.Body.Close()
+				if firstTokenTimer != nil {
+					firstTokenTimer.Stop()
+				}
+				if actionableOutputTimer != nil {
+					actionableOutputTimer.Stop()
+				}
+				cancelRequest()
+				classifiedErr := classifyUpstreamHTTPError(resp.StatusCode, ep.Name, errBody)
+				classifiedErr.RetryAfter = parseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
+				lastErr = classifiedErr
+				detailTrace.recordAttempt(accountID, accountEmail, ep.Name, endpointHost, attemptStartedAt, resp.StatusCode, "http_error", lastErr, requestDetailRetryReason(lastErr))
+				if payload != nil {
+					payload.attemptBudget.recordFailure(ep.Name, lastErr)
+				}
+				if cooldown := sharedAccountEndpointRoutes.recordFailure(accountID, modelKey, ep, lastErr); cooldown > 0 {
+					logger.Warnf("[EndpointRouting] Account %s model %s endpoint %s cooling for %s after %v", accountID, modelKey, ep.Name, cooldown, lastErr)
+				}
+				if circuitEligibleFailure(lastErr) {
+					lastCircuitError = lastErr
+					sharedUpstreamHealth.endpointFailure(endpointCircuitKey, lastErr, time.Since(attemptStartedAt))
+				} else {
+					sharedUpstreamHealth.endpointSuccess(endpointCircuitKey, time.Since(attemptStartedAt))
+				}
+				if upstreamErr, ok := asUpstreamError(lastErr); ok && upstreamErr.RefreshToken &&
+					payload != nil && payload.takeTokenRefreshAttempt(account) && !isKiroAPIKeyAccount(account) {
+					if refreshErr := sharedTokenRefreshCoordinator.RefreshContext(requestContext, account, true); refreshErr == nil {
+						return CallKiroAPI(account, payload, callback)
+					} else {
+						return classifyRefreshFailure(ep.Name, refreshErr)
+					}
+				}
+				logger.Warnf("[KiroAPI] Endpoint %s error: %v", ep.Name, lastErr)
+				if shouldRetryAcrossEndpoints(lastErr) {
+					continue endpointLoop
+				}
+				return lastErr
+			}
+			if wrappedCallback != nil && wrappedCallback.OnResponseStart != nil {
+				wrappedCallback.OnResponseStart()
+			}
+
+			var streamIdleTimedOut atomic.Bool
+			idleTimeout := time.Duration(retryConfig.StreamIdleTimeoutSeconds) * time.Second
+			err = func() error {
+				defer stopAndRecordToolAssembly(payload, toolMonitor)
+				if firstTokenTimer != nil {
+					defer firstTokenTimer.Stop()
+				}
+				if actionableOutputTimer != nil {
+					defer actionableOutputTimer.Stop()
+				}
+				defer cancelRequest()
+				return parseAndCloseEventStream(resp.Body, idleTimeout, func() {
+					streamIdleTimedOut.Store(true)
+					cancelRequest()
+				}, wrappedCallback)
+			}()
+			if err == nil && meaningfulGate.hasInvalidCommittedToolUse() {
+				err = &EventStreamError{
+					Kind:    EventStreamInvalidPayload,
+					Message: "tool use arguments are not valid JSON",
+				}
+			}
+			if err != nil {
+				if toolSnapshot, timedOut := toolMonitor.TimedOut(); timedOut {
+					err = newToolAssemblyTimeoutError(ep.Name, toolSnapshot.Name, toolSnapshot.ArgumentBytes, toolAssemblyTimeout)
+				}
+				if requestContext.Err() != nil {
+					sharedUpstreamHealth.releaseEndpoint(endpointCircuitKey)
+					lastErr = classifyRequestCancellation(ep.Name, requestContext.Err())
+					detailTrace.recordAttempt(accountID, accountEmail, ep.Name, endpointHost, attemptStartedAt, http.StatusOK, "canceled", lastErr, requestDetailRetryReason(lastErr))
+					return lastErr
+				}
+				if actionableOutputTimedOut.Load() && !meaningfulGate.hasActionableOutput() {
+					err = newActionableOutputTimeoutError(ep.Name, actionableOutputTimeout)
+				} else if streamIdleTimedOut.Load() {
+					err = classifyTransportError(ep.Name, context.DeadlineExceeded)
+				} else if firstTokenTimedOut.Load() && !meaningfulGate.hasActivity() {
+					err = classifyTransportError(ep.Name, context.DeadlineExceeded)
+				} else {
+					var streamErr *EventStreamError
+					if errors.As(err, &streamErr) && streamErr.Kind == EventStreamIncompleteToolUse {
+						truncatedErr := newToolOutputTruncatedError(ep.Name, streamErr)
+						allowRetry := payload != nil && payload.recordToolTruncation(streamErr.ArgumentBytes, streamErr.FragmentCount, !meaningfulGate.hasActionableOutput())
+						truncatedErr.RetryAcrossEndpoints = allowRetry
+						truncatedErr.RetryAcrossAccounts = allowRetry
+						err = truncatedErr
+					}
+				}
+				if _, ok := asUpstreamError(err); !ok {
+					err = classifyTransportError(ep.Name, err)
+				}
+				lastErr = err
+				retrySameEndpoint := endpointAttempt < preOutputStreamRetries &&
+					isRetryablePreOutputStreamError(err, meaningfulGate)
+				attemptStatus := "stream_error"
+				if meaningfulGate.hasEmittedOutput() {
+					attemptStatus = "partial_stream_error"
+				} else if retrySameEndpoint {
+					attemptStatus = "stream_error_retry"
+				}
+				detailTrace.recordAttempt(accountID, accountEmail, ep.Name, endpointHost, attemptStartedAt, http.StatusOK, attemptStatus, lastErr, requestDetailRetryReason(lastErr))
+				if payload != nil {
+					payload.attemptBudget.recordFailure(ep.Name, lastErr)
+				}
+				if cooldown := sharedAccountEndpointRoutes.recordFailure(accountID, modelKey, ep, lastErr); cooldown > 0 {
+					logger.Warnf("[EndpointRouting] Account %s model %s endpoint %s cooling for %s after stream error: %v", accountID, modelKey, ep.Name, cooldown, lastErr)
+				}
+				if meaningfulGate.hasEmittedOutput() || !circuitEligibleFailure(err) {
+					sharedUpstreamHealth.endpointSuccess(endpointCircuitKey, time.Since(attemptStartedAt))
+				} else {
+					lastCircuitError = err
+					sharedUpstreamHealth.endpointFailure(endpointCircuitKey, err, time.Since(attemptStartedAt))
+				}
+				if payload != nil && payload.attemptBudget.expired() && requestContext.Err() == nil {
+					return newRetryBudgetError(payload.attemptBudget)
+				}
+				if meaningfulGate.hasEmittedOutput() || !shouldRetryAcrossEndpoints(err) {
+					return err
+				}
+				if retrySameEndpoint {
+					logger.Warnf("[KiroAPI] Endpoint %s stream failed before client-visible output (attempt %d/%d); retrying after %s: %v",
+						ep.Name, endpointAttempt+1, preOutputStreamRetries+1, preOutputRetryBackoff, err)
+					if waitErr := waitForPreOutputStreamRetryWithinBudget(requestContext, payload, ep.Name, preOutputRetryBackoff); waitErr != nil {
+						return waitErr
+					}
+					continue
+				}
+				continue endpointLoop
+			}
+			if !meaningfulGate.hasActionableOutput() {
+				retry := payload != nil && payload.attemptBudget.recordEmpty()
+				lastErr = newEmptyResponseError(ep.Name, retry)
+				if payload != nil {
+					payload.attemptBudget.recordFailure(ep.Name, lastErr)
+				}
+				retrySameEndpoint := retry && endpointAttempt < preOutputStreamRetries
+				attemptStatus := "empty_response"
+				if retrySameEndpoint {
+					attemptStatus = "empty_response_retry"
+				}
+				detailTrace.recordAttempt(accountID, accountEmail, ep.Name, endpointHost, attemptStartedAt, http.StatusOK, attemptStatus, lastErr, requestDetailRetryReason(lastErr))
+				lastCircuitError = lastErr
+				sharedUpstreamHealth.endpointFailure(endpointCircuitKey, lastErr, time.Since(attemptStartedAt))
+				if retrySameEndpoint {
+					logger.Warnf("[KiroAPI] Endpoint %s returned no client-visible output (attempt %d/%d); retrying after %s",
+						ep.Name, endpointAttempt+1, preOutputStreamRetries+1, preOutputRetryBackoff)
+					if waitErr := waitForPreOutputStreamRetryWithinBudget(requestContext, payload, ep.Name, preOutputRetryBackoff); waitErr != nil {
+						return waitErr
+					}
+					continue
+				}
+				if retry {
+					continue endpointLoop
+				}
+				return lastErr
+			}
+			sharedUpstreamHealth.endpointSuccess(endpointCircuitKey, time.Since(attemptStartedAt))
+			sharedAccountEndpointRoutes.recordSuccess(accountID, modelKey, ep)
+			payload.setSuccessfulEndpoint(ep.Name)
+			detailTrace.recordAttempt(accountID, accountEmail, ep.Name, endpointHost, attemptStartedAt, http.StatusOK, "success", nil, "")
+			return nil
 		}
-		if !meaningfulGate.hasActionableOutput() {
-			retry := payload != nil && payload.attemptBudget.recordEmpty()
-			lastErr = newEmptyResponseError(ep.Name, retry)
-			if payload != nil {
-				payload.attemptBudget.recordFailure(ep.Name, lastErr)
-			}
-			detailTrace.recordAttempt(accountID, accountEmail, ep.Name, endpointHost, attemptStartedAt, http.StatusOK, "empty_response", lastErr, requestDetailRetryReason(lastErr))
-			lastCircuitError = lastErr
-			sharedUpstreamHealth.endpointFailure(endpointCircuitKey, lastErr, time.Since(attemptStartedAt))
-			if retry {
-				continue
-			}
-			return lastErr
-		}
-		sharedUpstreamHealth.endpointSuccess(endpointCircuitKey, time.Since(attemptStartedAt))
-		sharedAccountEndpointRoutes.recordSuccess(accountID, modelKey, ep)
-		payload.setSuccessfulEndpoint(ep.Name)
-		detailTrace.recordAttempt(accountID, accountEmail, ep.Name, endpointHost, attemptStartedAt, http.StatusOK, "success", nil, "")
-		return nil
 	}
 
 	if lastErr != nil {
 		return lastErr
 	}
 	return fmt.Errorf("all endpoints failed")
+}
+
+func isRetryablePreOutputStreamError(err error, gate *meaningfulStreamCallback) bool {
+	if err == nil || gate == nil || gate.hasEmittedOutput() {
+		return false
+	}
+	upstreamErr, ok := asUpstreamError(err)
+	return ok && upstreamErr.Kind == UpstreamErrorTransient && upstreamErr.RetryAcrossEndpoints
+}
+
+func waitForPreOutputStreamRetry(ctx context.Context, delay time.Duration) error {
+	if delay <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func waitForPreOutputStreamRetryWithinBudget(ctx context.Context, payload *KiroPayload, endpoint string, delay time.Duration) error {
+	waitContext := ctx
+	cancelWait := func() {}
+	if payload != nil && payload.attemptBudget != nil {
+		if deadline, ok := payload.attemptBudget.deadline(); ok {
+			waitContext, cancelWait = context.WithDeadline(ctx, deadline)
+		}
+	}
+	waitErr := waitForPreOutputStreamRetry(waitContext, delay)
+	cancelWait()
+	if waitErr == nil {
+		return nil
+	}
+	if ctx.Err() != nil {
+		return classifyRequestCancellation(endpoint, ctx.Err())
+	}
+	if payload != nil && payload.attemptBudget != nil && payload.attemptBudget.expired() {
+		return newRetryBudgetError(payload.attemptBudget)
+	}
+	return classifyRequestCancellation(endpoint, waitErr)
 }
 
 func accountEmailForLog(account *config.Account) string {

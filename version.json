@@ -1,5 +1,5 @@
 {
-  "version": "1.2.32",
-  "changelog": "Improve Claude Sonnet 5 and GPT-5.6 model compatibility, preserve repeated stream deltas and image-adjacent tool results, add optional safe unlisted-model pass-through, and support bounded multi-round WebSearch with mixed client tools and account failover.\n改进 Claude Sonnet 5 和 GPT-5.6 模型兼容，保留重复流式增量与图片相邻的工具结果，新增可选的安全格式未列出模型透传，并支持有界多轮 WebSearch、混合客户端工具和账号故障切换。",
+  "version": "1.2.33",
+  "changelog": "Separate OAuth authentication regions from Profile ARN data-plane regions, resolve profiles before WebSearch and overage calls, and add configurable same-endpoint retries for streams that fail before client-visible output.\n分离 OAuth 认证区域与 Profile ARN 数据面区域，在 WebSearch 和超额查询前解析 Profile，并新增可配置的流式输出前同端点重试。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }

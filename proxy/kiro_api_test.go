@@ -74,6 +74,22 @@ func TestRegionalizeURLForProfileUsesPayloadProfileArnRegion(t *testing.T) {
 	}
 }
 
+func TestRegionalizeURLDoesNotUseOAuthAuthenticationRegion(t *testing.T) {
+	account := &config.Account{AuthMethod: "idc", Region: "ap-southeast-2"}
+	rawURL := "https://q.us-east-1.amazonaws.com/generateAssistantResponse"
+	if got := regionalizeURL(rawURL, account); got != rawURL {
+		t.Fatalf("OAuth authentication region changed data-plane URL: %q", got)
+	}
+}
+
+func TestRegionalizeURLUsesAPIKeyDataPlaneRegion(t *testing.T) {
+	account := &config.Account{AuthMethod: "api_key", KiroApiKey: "ksk_test", Region: "eu-central-1"}
+	want := "https://q.eu-central-1.amazonaws.com/generateAssistantResponse"
+	if got := regionalizeURL("https://q.us-east-1.amazonaws.com/generateAssistantResponse", account); got != want {
+		t.Fatalf("API key data-plane URL = %q, want %q", got, want)
+	}
+}
+
 func TestKiroProfileRegionCandidates(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -83,7 +99,7 @@ func TestKiroProfileRegionCandidates(t *testing.T) {
 		{
 			name:    "external idp probes built-in fallbacks",
 			account: &config.Account{AuthMethod: "external_idp", Region: "eu-central-1"},
-			want:    []string{"eu-central-1", "us-east-1"},
+			want:    []string{"us-east-1", "eu-central-1"},
 		},
 		{
 			name:    "account without region probes defaults",
@@ -91,16 +107,24 @@ func TestKiroProfileRegionCandidates(t *testing.T) {
 			want:    []string{"us-east-1", "eu-central-1"},
 		},
 		{
-			name:    "established OAuth account stays in its region",
+			name:    "OAuth authentication region is not a profile region",
 			account: &config.Account{AuthMethod: "idc", Region: "ap-southeast-2"},
-			want:    []string{"ap-southeast-2"},
+			want:    []string{"us-east-1", "eu-central-1"},
 		},
 		{
 			name: "enterprise account probes management fallbacks",
 			account: &config.Account{
 				AuthMethod: "idc", Provider: "Enterprise", Region: "eu-north-1",
 			},
-			want: []string{"eu-north-1", "us-east-1", "eu-central-1"},
+			want: []string{"us-east-1", "eu-central-1"},
+		},
+		{
+			name: "cached profile region is tried first",
+			account: &config.Account{
+				AuthMethod: "idc", Region: "eu-north-1",
+				ProfileArn: "arn:aws:codewhisperer:eu-central-1:123456789012:profile/test",
+			},
+			want: []string{"eu-central-1", "us-east-1"},
 		},
 	}
 	for _, test := range tests {
@@ -210,7 +234,7 @@ func TestRefreshEnterpriseAccountUsesGetUserInfoFallback(t *testing.T) {
 func TestKiroProfileRegionCandidatesHonorsEnvironmentOverride(t *testing.T) {
 	t.Setenv("KIRO_PROFILE_REGIONS", "eu-west-1, ap-south-1,eu-west-1")
 	account := &config.Account{AuthMethod: "external_idp", Region: "us-east-1"}
-	want := []string{"us-east-1", "eu-west-1", "ap-south-1"}
+	want := []string{"eu-west-1", "ap-south-1"}
 	if got := kiroProfileRegionCandidates(account); !reflect.DeepEqual(got, want) {
 		t.Fatalf("candidate regions = %v, want %v", got, want)
 	}

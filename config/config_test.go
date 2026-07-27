@@ -521,6 +521,7 @@ func TestOperationalConfigDefaults(t *testing.T) {
 
 	retry := GetRetryConfig()
 	if retry.MaxAccountAttempts != 8 || retry.AccountSelectionTimeoutSeconds != 120 || retry.MaxUpstreamAttempts != 12 || retry.MaxRetryDurationSeconds != 900 ||
+		retry.PreOutputStreamRetries == nil || *retry.PreOutputStreamRetries != 1 || retry.PreOutputRetryBackoffMs != 700 ||
 		retry.FirstTokenTimeoutSeconds != 45 || retry.ToolAssemblyTimeoutSeconds != 180 || retry.EmptyResponseRetries != 2 {
 		t.Fatalf("unexpected retry defaults: %+v", retry)
 	}
@@ -558,6 +559,39 @@ func TestRetryConfigPersistsUnlimitedAccountAttempts(t *testing.T) {
 	}
 	if got := GetRetryConfig().MaxAccountAttempts; got != 0 {
 		t.Fatalf("max account attempts = %d, want unlimited value 0", got)
+	}
+}
+
+func TestRetryConfigPersistsDisabledPreOutputStreamRetry(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := Init(path); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	retry := GetRetryConfig()
+	disabled := 0
+	retry.PreOutputStreamRetries = &disabled
+	retry.PreOutputRetryBackoffMs = 1200
+	if err := UpdateRetryConfig(retry); err != nil {
+		t.Fatalf("update retry config: %v", err)
+	}
+	if err := Init(path); err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	got := GetRetryConfig()
+	if got.PreOutputStreamRetries == nil || *got.PreOutputStreamRetries != 0 || got.PreOutputRetryBackoffMs != 1200 {
+		t.Fatalf("pre-output retry config was not persisted: %+v", got)
+	}
+}
+
+func TestGetRetryConfigReturnsIndependentPreOutputRetryPointer(t *testing.T) {
+	if err := Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	retry := GetRetryConfig()
+	*retry.PreOutputStreamRetries = 3
+	got := GetRetryConfig()
+	if got.PreOutputStreamRetries == nil || *got.PreOutputStreamRetries != 1 {
+		t.Fatalf("caller mutated shared retry config: %+v", got)
 	}
 }
 
@@ -610,6 +644,8 @@ func TestRetryConfigMissingNewTimeoutFieldsUsesDefaults(t *testing.T) {
 	retry := document["retry"].(map[string]interface{})
 	delete(retry, "accountSelectionTimeoutSeconds")
 	delete(retry, "maxRetryDurationSeconds")
+	delete(retry, "preOutputStreamRetries")
+	delete(retry, "preOutputRetryBackoffMs")
 	delete(retry, "toolAssemblyTimeoutSeconds")
 	raw, err = json.Marshal(document)
 	if err != nil {
@@ -622,7 +658,8 @@ func TestRetryConfigMissingNewTimeoutFieldsUsesDefaults(t *testing.T) {
 		t.Fatalf("reload config: %v", err)
 	}
 	got := GetRetryConfig()
-	if got.AccountSelectionTimeoutSeconds != 120 || got.MaxRetryDurationSeconds != 900 || got.ToolAssemblyTimeoutSeconds != 180 {
+	if got.AccountSelectionTimeoutSeconds != 120 || got.MaxRetryDurationSeconds != 900 || got.PreOutputStreamRetries == nil ||
+		*got.PreOutputStreamRetries != 1 || got.PreOutputRetryBackoffMs != 700 || got.ToolAssemblyTimeoutSeconds != 180 {
 		t.Fatalf("missing timeout fields were not migrated: %+v", got)
 	}
 }

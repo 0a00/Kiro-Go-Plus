@@ -54,6 +54,7 @@ type meaningfulStreamCallback struct {
 	streamToolFrames        bool
 	activity                atomic.Bool
 	actionable              atomic.Bool
+	emitted                 atomic.Bool
 	invalidCommittedTool    atomic.Bool
 
 	mu           sync.Mutex
@@ -266,22 +267,27 @@ func (g *meaningfulStreamCallback) dispatch(event pendingStreamEvent) {
 	switch event.kind {
 	case pendingText:
 		if g.target.OnText != nil {
+			g.emitted.Store(true)
 			g.target.OnText(event.text, event.isThinking)
 		}
 	case pendingToolUse:
 		if g.target.OnToolUse != nil {
+			g.emitted.Store(true)
 			g.target.OnToolUse(event.toolUse)
 		}
 	case pendingToolUseStart:
 		if g.target.OnToolUseStart != nil {
+			g.emitted.Store(true)
 			g.target.OnToolUseStart(event.toolUseID, event.toolName)
 		}
 	case pendingToolUseDelta:
 		if g.target.OnToolUseDelta != nil {
+			g.emitted.Store(true)
 			g.target.OnToolUseDelta(event.toolUseID, event.text)
 		}
 	case pendingToolUseStop:
 		if g.target.OnToolUseStop != nil {
+			g.emitted.Store(true)
 			g.target.OnToolUseStop(event.toolUseID)
 		}
 	case pendingComplete:
@@ -340,6 +346,10 @@ func (g *meaningfulStreamCallback) hasActivity() bool {
 
 func (g *meaningfulStreamCallback) hasActionableOutput() bool {
 	return g != nil && g.actionable.Load()
+}
+
+func (g *meaningfulStreamCallback) hasEmittedOutput() bool {
+	return g != nil && g.emitted.Load()
 }
 
 func (g *meaningfulStreamCallback) hasInvalidCommittedToolUse() bool {

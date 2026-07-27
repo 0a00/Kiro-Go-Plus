@@ -282,6 +282,9 @@ func TestRetryConfigAPIAcceptsUnlimitedAccountPolling(t *testing.T) {
 	retry.MaxAccountAttempts = 0
 	retry.AccountSelectionTimeoutSeconds = 300
 	retry.MaxRetryDurationSeconds = 1200
+	preOutputRetries := 2
+	retry.PreOutputStreamRetries = &preOutputRetries
+	retry.PreOutputRetryBackoffMs = 900
 	retry.ToolAssemblyTimeoutSeconds = 240
 	body, err := json.Marshal(retry)
 	if err != nil {
@@ -297,7 +300,8 @@ func TestRetryConfigAPIAcceptsUnlimitedAccountPolling(t *testing.T) {
 		t.Fatalf("max account attempts = %d, want 0", got)
 	}
 	got := config.GetRetryConfig()
-	if got.AccountSelectionTimeoutSeconds != 300 || got.MaxRetryDurationSeconds != 1200 || got.ToolAssemblyTimeoutSeconds != 240 {
+	if got.AccountSelectionTimeoutSeconds != 300 || got.MaxRetryDurationSeconds != 1200 || got.PreOutputStreamRetries == nil ||
+		*got.PreOutputStreamRetries != 2 || got.PreOutputRetryBackoffMs != 900 || got.ToolAssemblyTimeoutSeconds != 240 {
 		t.Fatalf("retry timeout settings were not persisted: %+v", got)
 	}
 }
@@ -312,6 +316,9 @@ func TestRetryConfigAPIPreservesNewTimeoutsWhenOmitted(t *testing.T) {
 	retry := config.GetRetryConfig()
 	retry.AccountSelectionTimeoutSeconds = 300
 	retry.MaxRetryDurationSeconds = 1200
+	preOutputRetries := 2
+	retry.PreOutputStreamRetries = &preOutputRetries
+	retry.PreOutputRetryBackoffMs = 900
 	retry.ToolAssemblyTimeoutSeconds = 240
 	if err := config.UpdateRetryConfig(retry); err != nil {
 		t.Fatalf("seed retry config: %v", err)
@@ -325,6 +332,8 @@ func TestRetryConfigAPIPreservesNewTimeoutsWhenOmitted(t *testing.T) {
 		t.Fatalf("parse retry config: %v", err)
 	}
 	delete(document, "maxRetryDurationSeconds")
+	delete(document, "preOutputStreamRetries")
+	delete(document, "preOutputRetryBackoffMs")
 	delete(document, "toolAssemblyTimeoutSeconds")
 	delete(document, "accountSelectionTimeoutSeconds")
 	body, err = json.Marshal(document)
@@ -339,7 +348,8 @@ func TestRetryConfigAPIPreservesNewTimeoutsWhenOmitted(t *testing.T) {
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 	got := config.GetRetryConfig()
-	if got.AccountSelectionTimeoutSeconds != 300 || got.MaxRetryDurationSeconds != 1200 || got.ToolAssemblyTimeoutSeconds != 240 {
+	if got.AccountSelectionTimeoutSeconds != 300 || got.MaxRetryDurationSeconds != 1200 || got.PreOutputStreamRetries == nil ||
+		*got.PreOutputStreamRetries != 2 || got.PreOutputRetryBackoffMs != 900 || got.ToolAssemblyTimeoutSeconds != 240 {
 		t.Fatalf("omitted timeout settings were reset: %+v", got)
 	}
 }

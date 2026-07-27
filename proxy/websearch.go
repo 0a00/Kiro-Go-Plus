@@ -357,6 +357,14 @@ func webSearchRegionCandidates(account *config.Account) []string {
 }
 
 func callMCPWebSearchContext(ctx context.Context, account *config.Account, query string) (*webSearchResults, error) {
+	if account == nil {
+		return nil, fmt.Errorf("account is nil")
+	}
+	if !isKiroAPIKeyAccount(account) {
+		if err := ensureRestProfileArnContext(ctx, account); err != nil {
+			return nil, fmt.Errorf("resolve profileArn: %w", err)
+		}
+	}
 	body, err := json.Marshal(mcpRequest{
 		ID:      "web_search_tooluse_" + uuid.New().String(),
 		JSONRPC: "2.0",

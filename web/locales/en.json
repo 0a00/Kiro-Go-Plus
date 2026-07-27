@@ -263,6 +263,8 @@
   "settings.retryAccountSelectionTimeout": "Account selection timeout (seconds)",
   "settings.retryUpstreamAttempts": "Maximum total upstream attempts",
   "settings.retryMaxDuration": "Maximum retry duration per request (seconds, 0 = unlimited)",
+  "settings.retryPreOutputStream": "Pre-output stream retries / backoff (milliseconds)",
+  "settings.retryPreOutputStreamHint": "Retries the same endpoint only when a 200 stream fails before any text, thinking, or tool output reaches the client.",
   "settings.retryFirstTokenTimeout": "First meaningful output timeout (seconds)",
   "settings.retryStreamIdleTimeout": "Streaming event idle timeout (seconds)",
   "settings.retryToolAssemblyTimeout": "Tool-call assembly timeout per attempt (seconds, 0 = unlimited)",

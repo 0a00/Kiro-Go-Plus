@@ -479,16 +479,29 @@ func TestSetPayloadProfileArnForAccountPreservesExplicitPayloadArn(t *testing.T)
 	}
 }
 
-func TestKiroIDEEndpointResolvesAccountRegion(t *testing.T) {
+func TestKiroIDEEndpointIgnoresOAuthAuthenticationRegion(t *testing.T) {
 	ep := kiroEndpoint{
 		URL:    "https://q.us-east-1.amazonaws.com/generateAssistantResponse",
 		Origin: "AI_EDITOR",
 		Name:   "Kiro IDE",
 	}
 
-	got := ep.ResolveURL(&config.Account{Region: "eu-west-1"})
+	got := ep.ResolveURL(&config.Account{AuthMethod: "idc", Region: "eu-west-1"})
+	if got != "https://q.us-east-1.amazonaws.com/generateAssistantResponse" {
+		t.Fatalf("expected default data-plane endpoint, got %q", got)
+	}
+}
+
+func TestKiroIDEEndpointUsesAPIKeyRegion(t *testing.T) {
+	ep := kiroEndpoint{
+		URL:    "https://q.us-east-1.amazonaws.com/generateAssistantResponse",
+		Origin: "AI_EDITOR",
+		Name:   "Kiro IDE",
+	}
+
+	got := ep.ResolveURL(&config.Account{AuthMethod: "api_key", KiroApiKey: "ksk_test", Region: "eu-west-1"})
 	if got != "https://q.eu-west-1.amazonaws.com/generateAssistantResponse" {
-		t.Fatalf("expected account region endpoint, got %q", got)
+		t.Fatalf("expected API key region endpoint, got %q", got)
 	}
 }
 

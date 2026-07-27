@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -171,6 +172,165 @@ func TestEmptyResponseRetryExhaustionStillAllowsAccountFailover(t *testing.T) {
 	}
 	if !err.RetryAcrossAccounts {
 		t.Fatal("exhausted empty response should still allow account failover")
+	}
+}
+
+func TestCallKiroAPIRetriesSameEndpointBeforeVisibleOutput(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	retry := config.GetRetryConfig()
+	preOutputRetries := 1
+	retry.PreOutputStreamRetries = &preOutputRetries
+	retry.PreOutputRetryBackoffMs = 100
+	retry.MaxUpstreamAttempts = 3
+	if err := config.UpdateRetryConfig(retry); err != nil {
+		t.Fatalf("update retry config: %v", err)
+	}
+	_ = config.UpdatePreferredEndpoint("kiro")
+	_ = config.UpdateEndpointFallback(false)
+
+	var requests atomic.Int32
+	var invocationIDs []string
+	var sdkAttempts []string
+	var headerMu sync.Mutex
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempt := requests.Add(1)
+		headerMu.Lock()
+		invocationIDs = append(invocationIDs, r.Header.Get("Amz-Sdk-Invocation-Id"))
+		sdkAttempts = append(sdkAttempts, r.Header.Get("Amz-Sdk-Request"))
+		headerMu.Unlock()
+		w.WriteHeader(http.StatusOK)
+		if attempt == 1 {
+			frame := awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "discarded"})
+			_, _ = w.Write(frame[:5])
+			return
+		}
+		_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "recovered"}))
+		_, _ = w.Write(awsEventStreamFrame(t, "meteringEvent", map[string]interface{}{"usage": 1.0}))
+	}))
+	defer server.Close()
+
+	oldEndpoints := kiroEndpoints
+	kiroEndpoints = []kiroEndpoint{{Key: "kiro", URL: server.URL, Name: "Kiro IDE"}}
+	t.Cleanup(func() { kiroEndpoints = oldEndpoints })
+
+	var output strings.Builder
+	var responseStarts atomic.Int32
+	err := CallKiroAPI(&config.Account{ID: "same-endpoint-retry", AccessToken: "token"}, &KiroPayload{}, &KiroStreamCallback{
+		OnResponseStart: func() { responseStarts.Add(1) },
+		OnText:          func(text string, _ bool) { output.WriteString(text) },
+	})
+	if err != nil {
+		t.Fatalf("same-endpoint retry failed: %v", err)
+	}
+	if requests.Load() != 2 || output.String() != "recovered" {
+		t.Fatalf("unexpected retry result: requests=%d output=%q", requests.Load(), output.String())
+	}
+	if responseStarts.Load() != 1 {
+		t.Fatalf("response start callback count = %d, want 1", responseStarts.Load())
+	}
+	if len(invocationIDs) != 2 || invocationIDs[0] == "" || invocationIDs[0] != invocationIDs[1] {
+		t.Fatalf("SDK invocation ID was not reused: %v", invocationIDs)
+	}
+	if !reflect.DeepEqual(sdkAttempts, []string{"attempt=1; max=2", "attempt=2; max=2"}) {
+		t.Fatalf("unexpected SDK attempt headers: %v", sdkAttempts)
+	}
+}
+
+func TestCallKiroAPIRetriesEmptyStreamOnSameEndpoint(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	retry := config.GetRetryConfig()
+	preOutputRetries := 1
+	retry.PreOutputStreamRetries = &preOutputRetries
+	retry.PreOutputRetryBackoffMs = 100
+	retry.EmptyResponseRetries = 1
+	if err := config.UpdateRetryConfig(retry); err != nil {
+		t.Fatalf("update retry config: %v", err)
+	}
+	_ = config.UpdatePreferredEndpoint("kiro")
+	_ = config.UpdateEndpointFallback(false)
+
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempt := requests.Add(1)
+		w.WriteHeader(http.StatusOK)
+		if attempt == 1 {
+			_, _ = w.Write(awsEventStreamFrame(t, "meteringEvent", map[string]interface{}{"usage": 1.0}))
+			return
+		}
+		_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "recovered-empty"}))
+		_, _ = w.Write(awsEventStreamFrame(t, "meteringEvent", map[string]interface{}{"usage": 1.0}))
+	}))
+	defer server.Close()
+
+	oldEndpoints := kiroEndpoints
+	kiroEndpoints = []kiroEndpoint{{Key: "kiro", URL: server.URL, Name: "Kiro IDE"}}
+	t.Cleanup(func() { kiroEndpoints = oldEndpoints })
+
+	var output strings.Builder
+	err := CallKiroAPI(&config.Account{ID: "same-endpoint-empty", AccessToken: "token"}, &KiroPayload{}, &KiroStreamCallback{
+		OnText: func(text string, _ bool) { output.WriteString(text) },
+	})
+	if err != nil {
+		t.Fatalf("empty-stream retry failed: %v", err)
+	}
+	if requests.Load() != 2 || output.String() != "recovered-empty" {
+		t.Fatalf("unexpected empty retry result: requests=%d output=%q", requests.Load(), output.String())
+	}
+}
+
+func TestCallKiroAPIDoesNotRetryAfterVisibleOutput(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	retry := config.GetRetryConfig()
+	preOutputRetries := 1
+	retry.PreOutputStreamRetries = &preOutputRetries
+	retry.PreOutputRetryBackoffMs = 100
+	if err := config.UpdateRetryConfig(retry); err != nil {
+		t.Fatalf("update retry config: %v", err)
+	}
+	_ = config.UpdatePreferredEndpoint("kiro")
+	_ = config.UpdateEndpointFallback(false)
+
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "visible"}))
+		frame := awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "tail"})
+		_, _ = w.Write(frame[:5])
+	}))
+	defer server.Close()
+
+	oldEndpoints := kiroEndpoints
+	kiroEndpoints = []kiroEndpoint{{Key: "kiro", URL: server.URL, Name: "Kiro IDE"}}
+	t.Cleanup(func() { kiroEndpoints = oldEndpoints })
+
+	var output strings.Builder
+	err := CallKiroAPI(&config.Account{ID: "visible-no-retry", AccessToken: "token"}, &KiroPayload{}, &KiroStreamCallback{
+		OnText: func(text string, _ bool) { output.WriteString(text) },
+	})
+	if err == nil {
+		t.Fatal("expected truncated stream error")
+	}
+	if requests.Load() != 1 || output.String() != "visible" {
+		t.Fatalf("visible output was retried or lost: requests=%d output=%q", requests.Load(), output.String())
+	}
+}
+
+func TestWaitForPreOutputStreamRetryHonorsCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	startedAt := time.Now()
+	if err := waitForPreOutputStreamRetry(ctx, time.Second); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected cancellation, got %v", err)
+	}
+	if elapsed := time.Since(startedAt); elapsed > 100*time.Millisecond {
+		t.Fatalf("canceled retry wait took too long: %s", elapsed)
 	}
 }
 

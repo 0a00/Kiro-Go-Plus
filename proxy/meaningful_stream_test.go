@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -21,11 +22,25 @@ func TestStrictMeaningfulStreamRejectsThinkingAndStructuralTail(t *testing.T) {
 	wrapper.OnText("}", false)
 	wrapper.OnComplete(10, 20)
 
-	if !gate.hasActivity() || gate.hasActionableOutput() {
-		t.Fatalf("unexpected gate state: activity=%v actionable=%v", gate.hasActivity(), gate.hasActionableOutput())
+	if !gate.hasActivity() || gate.hasActionableOutput() || gate.hasEmittedOutput() {
+		t.Fatalf("unexpected gate state: activity=%v actionable=%v emitted=%v", gate.hasActivity(), gate.hasActionableOutput(), gate.hasEmittedOutput())
 	}
 	if len(received) != 0 {
 		t.Fatalf("invalid response leaked to downstream: %#v", received)
+	}
+}
+
+func TestThinkingPrecommitTracksClientVisibleOutput(t *testing.T) {
+	var received strings.Builder
+	wrapper, gate := wrapMeaningfulStreamCallback(&KiroStreamCallback{
+		OnText: func(text string, _ bool) { received.WriteString(text) },
+	}, nil, true, true, false, true)
+
+	wrapper.OnText("visible reasoning", true)
+
+	if gate.hasActionableOutput() || !gate.hasEmittedOutput() || received.String() != "visible reasoning" {
+		t.Fatalf("unexpected thinking precommit state: actionable=%v emitted=%v output=%q",
+			gate.hasActionableOutput(), gate.hasEmittedOutput(), received.String())
 	}
 }
 

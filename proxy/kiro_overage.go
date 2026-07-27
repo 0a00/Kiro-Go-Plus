@@ -52,6 +52,9 @@ func FetchOverageStatus(account *config.Account) (*OverageSnapshot, error) {
 	if account == nil {
 		return nil, fmt.Errorf("account is nil")
 	}
+	if err := ensureRestProfileArn(account); err != nil {
+		return nil, fmt.Errorf("resolve profileArn: %w", err)
+	}
 
 	rawURL := regionalizeURL(kiroQAPIBase+"/getUsageLimits?origin=AI_EDITOR&resourceType=AGENTIC_REQUEST&isEmailRequired=true", account)
 	if profileArn := strings.TrimSpace(account.ProfileArn); profileArn != "" {

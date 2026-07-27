@@ -19,10 +19,10 @@ Kiro-Go Plus preserves Kiro-Go's API and deployment compatibility while adding p
 - Upstream routing: Kiro Runtime as the primary path with legacy Kiro / CodeWhisperer / Amazon Q fallback
 - Multi-account scheduling: weighted, priority, and balanced modes; per-account concurrency, sticky routing, and failover
 - Refresh coordination: deduplication, bounded queues, timeouts, jitter, and adaptive batches for tens or hundreds of accounts
-- Failure protection: model-window-aware input truncation, first-output timeout, actionable-output and required-tool validation, selectable safe/adaptive/balanced/live tool streams, long-tool truncation recovery, endpoint circuits, durable cooldowns, and bounded retries
+- Failure protection: model-window-aware input truncation, first-output timeout, safe same-endpoint retry before client-visible output, actionable-output and required-tool validation, selectable safe/adaptive/balanced/live tool streams, long-tool truncation recovery, endpoint circuits, durable cooldowns, and bounded retries
 - Token controls: bounded enabled/adaptive thinking, native Kiro reasoning effort, configurable default thinking/output/context budgets, and client-value precedence
 - Streaming validation: AWS EventStream length and CRC validation, idle timeout, and truncated-response detection
-- Authentication: Builder ID, IAM Identity Center, Kiro hosted SSO, Microsoft 365 / Entra ID, SSO Token, API key, and native/KAM JSON import; `ksk_` keys discover and validate their data-plane region before persistence
+- Authentication: Builder ID, IAM Identity Center, Kiro hosted SSO, Microsoft 365 / Entra ID, SSO Token, API key, and native/KAM JSON import; OAuth authentication regions remain separate from Profile ARN data-plane regions, while `ksk_` keys discover and validate their data-plane region before persistence
 - Prompt Cache accounting: configurable creation/read ranges, 5m/1h TTLs, sharded LRU, API-key isolation, optional restart-safe fingerprint persistence, hit statistics, and miss-reason diagnostics
 - Extensions: Claude Opus 5 and Sonnet 5 metadata, GPT-5.6 aliases, dynamic model capability/effort discovery, optional safe unlisted-model pass-through, text/thinking/tool self-tests, multi-round Web Search, external token counting, and Responses history
 - Operations: account inventory diagnostics with latency/error EWMAs and affinity rates, persisted request metadata, account-selection and first SSE/thinking/text/tool timing, maximum event gaps, optional complete logs with sanitized request/output, retries and stream timelines, diagnostic events, webhook alerts, `/health`, and `/ready`
@@ -38,7 +38,7 @@ Open `/admin` to manage:
 
 - Account import, routability/inventory diagnostics, enable/disable state, weights, priority, per-account concurrency, and proxies
 - Runtime/legacy endpoint preference and automatic fallback
-- Load balancing, retries, timeouts, circuits, and upstream protection
+- Load balancing, retries, pre-output same-endpoint backoff, timeouts, circuits, and upstream protection
 - Token/model refresh intervals, concurrency, and batch sizes
 - Prompt Cache creation/read ranges, TTL, capacity, and isolation
 - Web Search enablement and per-request round limit, token counting, Responses storage, diagnostics, complete request logging, and alerts
@@ -48,6 +48,8 @@ Open `/admin` to manage:
 Settings apply immediately unless the panel explicitly reports that a process restart is required.
 
 Tool stream modes trade retry coverage for latency: **Adaptive** keeps ordinary tools live but buffers high-risk `Write`/`Edit`/`Bash`-style calls so an incomplete JSON tail can be retried; **Live** forwards every tool argument delta immediately; **Balanced** buffers all tool arguments; **Safe** also defers guarded text for maximum retry coverage. Explicit `tool_choice` requests remain strictly validated in every mode.
+
+Pre-output stream retry defaults to one same-endpoint retry after 700 ms. It applies only when an HTTP 200 stream fails before any text, thinking, or tool output reaches the client; cancellation and timeout failures are not replayed. Every retry consumes the shared upstream-attempt and duration budgets.
 
 Long-tool protection is enabled by default with one recovery retry and an 8192-token guidance limit. Optional preflight model fallback is disabled by default because model availability differs between accounts.
 

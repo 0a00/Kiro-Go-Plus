@@ -92,8 +92,12 @@ func kiroRegionForProfile(account *config.Account, profileArn string) string {
 		if region := regionFromProfileArn(account.ProfileArn); region != "" {
 			return region
 		}
-		if region := strings.TrimSpace(account.Region); region != "" {
-			return region
+		// API key credentials use Region for the CLI runtime data plane.
+		// OAuth credentials use Region for authentication only.
+		if isKiroAPIKeyAccount(account) {
+			if region := strings.TrimSpace(account.Region); region != "" {
+				return region
+			}
 		}
 	}
 	return "us-east-1"
@@ -225,10 +229,9 @@ func kiroProfileRegionCandidates(account *config.Account) []string {
 		regions = append(regions, region)
 	}
 	if account != nil {
-		add(account.Region)
-	}
-	if !shouldProbeFallbackProfileRegions(account) {
-		return regions
+		// The profile ARN is authoritative. account.Region is the authentication
+		// region and may not host an Amazon Q Developer profile.
+		add(regionFromProfileArn(account.ProfileArn))
 	}
 	if configured := strings.TrimSpace(os.Getenv("KIRO_PROFILE_REGIONS")); configured != "" {
 		for _, region := range strings.Split(configured, ",") {
@@ -240,13 +243,6 @@ func kiroProfileRegionCandidates(account *config.Account) []string {
 		add(region)
 	}
 	return regions
-}
-
-func shouldProbeFallbackProfileRegions(account *config.Account) bool {
-	if account == nil || strings.TrimSpace(account.Region) == "" {
-		return true
-	}
-	return strings.EqualFold(strings.TrimSpace(account.AuthMethod), "external_idp") || isEnterpriseIDCAccount(account)
 }
 
 func isEnterpriseIDCAccount(account *config.Account) bool {
@@ -272,12 +268,16 @@ func kiroManagementRegionCandidates(account *config.Account) []string {
 		seen[region] = true
 		regions = append(regions, region)
 	}
-	add(kiroRegion(account))
+	if account != nil {
+		// Management APIs follow the authentication region, unlike Kiro data-plane
+		// calls which follow the profile ARN region.
+		add(account.Region)
+	}
+	if len(regions) == 0 {
+		add(kiroRegion(account))
+	}
 	if !isEnterpriseIDCAccount(account) {
 		return regions
-	}
-	if account != nil {
-		add(account.Region)
 	}
 	if configured := strings.TrimSpace(os.Getenv("KIRO_PROFILE_REGIONS")); configured != "" {
 		for _, region := range strings.Split(configured, ",") {

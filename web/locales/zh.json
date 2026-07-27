@@ -263,6 +263,8 @@
   "settings.retryAccountSelectionTimeout": "账号选择总超时（秒）",
   "settings.retryUpstreamAttempts": "单请求上游总尝试数",
   "settings.retryMaxDuration": "单请求最大重试时长（秒，0 = 不限制）",
+  "settings.retryPreOutputStream": "输出前同端点重试次数 / 退避（毫秒）",
+  "settings.retryPreOutputStreamHint": "仅当 200 流在正文、思考或工具输出到达客户端前异常中断时，延迟后重试当前端点。",
   "settings.retryFirstTokenTimeout": "首个有效输出超时（秒）",
   "settings.retryStreamIdleTimeout": "流式事件空闲超时（秒）",
   "settings.retryToolAssemblyTimeout": "单次工具调用组装超时（秒，0 = 不限制）",

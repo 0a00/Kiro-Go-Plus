@@ -237,18 +237,20 @@ type AutoRefreshConfig struct {
 
 // RetryConfig bounds retries across accounts and upstream endpoint fallbacks.
 type RetryConfig struct {
-	MaxAccountAttempts             int `json:"maxAccountAttempts"`
-	AccountSelectionTimeoutSeconds int `json:"accountSelectionTimeoutSeconds"`
-	MaxUpstreamAttempts            int `json:"maxUpstreamAttempts"`
-	MaxRetryDurationSeconds        int `json:"maxRetryDurationSeconds"`
-	FirstTokenTimeoutSeconds       int `json:"firstTokenTimeoutSeconds"`
-	StreamIdleTimeoutSeconds       int `json:"streamIdleTimeoutSeconds"`
-	ToolAssemblyTimeoutSeconds     int `json:"toolAssemblyTimeoutSeconds"`
-	EmptyResponseRetries           int `json:"emptyResponseRetries"`
-	EndpointFailureThreshold       int `json:"endpointFailureThreshold"`
-	EndpointCircuitCooldownSeconds int `json:"endpointCircuitCooldownSeconds"`
-	ProxyFailureThreshold          int `json:"proxyFailureThreshold"`
-	ProxyCircuitCooldownSeconds    int `json:"proxyCircuitCooldownSeconds"`
+	MaxAccountAttempts             int  `json:"maxAccountAttempts"`
+	AccountSelectionTimeoutSeconds int  `json:"accountSelectionTimeoutSeconds"`
+	MaxUpstreamAttempts            int  `json:"maxUpstreamAttempts"`
+	MaxRetryDurationSeconds        int  `json:"maxRetryDurationSeconds"`
+	PreOutputStreamRetries         *int `json:"preOutputStreamRetries,omitempty"`
+	PreOutputRetryBackoffMs        int  `json:"preOutputRetryBackoffMs"`
+	FirstTokenTimeoutSeconds       int  `json:"firstTokenTimeoutSeconds"`
+	StreamIdleTimeoutSeconds       int  `json:"streamIdleTimeoutSeconds"`
+	ToolAssemblyTimeoutSeconds     int  `json:"toolAssemblyTimeoutSeconds"`
+	EmptyResponseRetries           int  `json:"emptyResponseRetries"`
+	EndpointFailureThreshold       int  `json:"endpointFailureThreshold"`
+	EndpointCircuitCooldownSeconds int  `json:"endpointCircuitCooldownSeconds"`
+	ProxyFailureThreshold          int  `json:"proxyFailureThreshold"`
+	ProxyCircuitCooldownSeconds    int  `json:"proxyCircuitCooldownSeconds"`
 }
 
 // LongToolConfig protects large file/command tool calls from upstream
@@ -506,7 +508,7 @@ const (
 )
 
 // Version current version
-const Version = "1.2.32"
+const Version = "1.2.33"
 
 var (
 	cfg           *Config
@@ -1058,11 +1060,14 @@ func normalizeAutoRefreshLocked() {
 }
 
 func defaultRetryConfig() RetryConfig {
+	preOutputStreamRetries := 1
 	return RetryConfig{
 		MaxAccountAttempts:             8,
 		AccountSelectionTimeoutSeconds: 120,
 		MaxUpstreamAttempts:            12,
 		MaxRetryDurationSeconds:        900,
+		PreOutputStreamRetries:         &preOutputStreamRetries,
+		PreOutputRetryBackoffMs:        700,
 		FirstTokenTimeoutSeconds:       45,
 		StreamIdleTimeoutSeconds:       120,
 		ToolAssemblyTimeoutSeconds:     180,
@@ -1099,6 +1104,23 @@ func normalizeRetryLocked() {
 	}
 	if cfg.Retry.MaxRetryDurationSeconds > 86400 {
 		cfg.Retry.MaxRetryDurationSeconds = 86400
+	}
+	if cfg.Retry.PreOutputStreamRetries == nil {
+		value := *defaults.PreOutputStreamRetries
+		cfg.Retry.PreOutputStreamRetries = &value
+	} else {
+		if *cfg.Retry.PreOutputStreamRetries < 0 {
+			*cfg.Retry.PreOutputStreamRetries = 0
+		}
+		if *cfg.Retry.PreOutputStreamRetries > 3 {
+			*cfg.Retry.PreOutputStreamRetries = 3
+		}
+	}
+	if cfg.Retry.PreOutputRetryBackoffMs < 100 {
+		cfg.Retry.PreOutputRetryBackoffMs = defaults.PreOutputRetryBackoffMs
+	}
+	if cfg.Retry.PreOutputRetryBackoffMs > 5000 {
+		cfg.Retry.PreOutputRetryBackoffMs = 5000
 	}
 	if cfg.Retry.FirstTokenTimeoutSeconds < 5 {
 		cfg.Retry.FirstTokenTimeoutSeconds = defaults.FirstTokenTimeoutSeconds
@@ -1779,6 +1801,10 @@ func GetRetryConfig() RetryConfig {
 	}
 	out := cfg.Retry
 	defaults := defaultRetryConfig()
+	if out.PreOutputStreamRetries != nil {
+		value := *out.PreOutputStreamRetries
+		out.PreOutputStreamRetries = &value
+	}
 	if out.MaxAccountAttempts < 0 {
 		out.MaxAccountAttempts = defaults.MaxAccountAttempts
 	}
@@ -1790,6 +1816,13 @@ func GetRetryConfig() RetryConfig {
 	}
 	if out.MaxRetryDurationSeconds < 0 {
 		out.MaxRetryDurationSeconds = defaults.MaxRetryDurationSeconds
+	}
+	if out.PreOutputStreamRetries == nil {
+		value := *defaults.PreOutputStreamRetries
+		out.PreOutputStreamRetries = &value
+	}
+	if out.PreOutputRetryBackoffMs < 100 {
+		out.PreOutputRetryBackoffMs = defaults.PreOutputRetryBackoffMs
 	}
 	if out.FirstTokenTimeoutSeconds < 5 {
 		out.FirstTokenTimeoutSeconds = defaults.FirstTokenTimeoutSeconds
@@ -1821,6 +1854,10 @@ func GetRetryConfig() RetryConfig {
 func UpdateRetryConfig(retry RetryConfig) error {
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
+	if retry.PreOutputStreamRetries != nil {
+		value := *retry.PreOutputStreamRetries
+		retry.PreOutputStreamRetries = &value
+	}
 	cfg.Retry = retry
 	normalizeRetryLocked()
 	return Save()
