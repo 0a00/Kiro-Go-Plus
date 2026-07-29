@@ -111,6 +111,7 @@ type Handler struct {
 	diagnosticLog        *diagnosticLog
 	alerts               *healthAlertManager
 	autoRefreshMu        sync.Mutex
+	autoRefreshRunning   atomic.Bool
 	autoRefreshFail      map[string]int64
 	autoRefreshNext      int
 	autoRefreshModelNext int
@@ -132,6 +133,10 @@ type autoRefreshStatus struct {
 	LastRunSkipped    int                                 `json:"lastRunSkipped"`
 	Cursor            int                                 `json:"cursor"`
 	CooldownCount     int                                 `json:"cooldownCount"`
+	DueCount          int                                 `json:"dueCount"`
+	TokenDueCount     int                                 `json:"tokenDueCount"`
+	StaleCount        int                                 `json:"staleCount"`
+	FailedCount       int                                 `json:"failedCount"`
 	Recent            map[string]autoRefreshAccountStatus `json:"recent,omitempty"`
 }
 
@@ -524,6 +529,20 @@ func (h *Handler) refreshAllAccountsWithConfig(autoRefresh config.AutoRefreshCon
 	accounts := config.GetAccounts()
 	due := h.dueAutoRefreshAccounts(accounts, autoRefresh)
 	selected := h.nextAutoRefreshAccounts(due, autoRefresh.MaxAccountsPerRun)
+	h.refreshSelectedAccounts(selected, autoRefresh)
+}
+
+func (h *Handler) refreshSelectedAccounts(selected []*config.Account, autoRefresh config.AutoRefreshConfig) bool {
+	if !h.autoRefreshRunning.CompareAndSwap(false, true) {
+		return false
+	}
+	h.refreshSelectedAccountsLocked(selected, autoRefresh)
+	return true
+}
+
+func (h *Handler) refreshSelectedAccountsLocked(selected []*config.Account, autoRefresh config.AutoRefreshConfig) {
+	defer h.autoRefreshRunning.Store(false)
+
 	startedAt := time.Now()
 	h.beginAutoRefreshRun(startedAt.Unix(), len(selected))
 	if len(selected) == 0 {
@@ -579,7 +598,9 @@ func (h *Handler) refreshAllAccountsWithConfig(autoRefresh config.AutoRefreshCon
 		}
 	}
 	h.finishAutoRefreshRun(startedAt, runResults)
-	h.pool.Reload()
+	if h.pool != nil {
+		h.pool.Reload()
+	}
 }
 
 func boundedRefreshConcurrency(total int) int {
@@ -962,7 +983,6 @@ func (h *Handler) pruneAutoRefreshStatusLocked() {
 
 func (h *Handler) getAutoRefreshStatusSnapshot() autoRefreshStatus {
 	h.autoRefreshMu.Lock()
-	defer h.autoRefreshMu.Unlock()
 	now := time.Now().Unix()
 	h.autoRefreshStat.Cursor = h.autoRefreshNext
 	h.autoRefreshStat.CooldownCount = h.countActiveAutoRefreshCooldownsLocked(now)
@@ -976,7 +996,34 @@ func (h *Handler) getAutoRefreshStatusSnapshot() autoRefreshStatus {
 			snapshot.Recent[k] = v
 		}
 	}
+	h.autoRefreshMu.Unlock()
+	h.populateAutoRefreshCounts(&snapshot, now)
 	return snapshot
+}
+
+func (h *Handler) populateAutoRefreshCounts(snapshot *autoRefreshStatus, now int64) {
+	if snapshot == nil {
+		return
+	}
+	autoRefresh := config.GetAutoRefreshConfig()
+	refreshBefore := autoRefresh.TokenRefreshBeforeSeconds
+	if refreshBefore <= 0 {
+		refreshBefore = tokenRefreshSkewSeconds
+	}
+	due := h.dueAutoRefreshAccounts(config.GetAccounts(), autoRefresh)
+	snapshot.DueCount = len(due)
+	for _, account := range due {
+		if urgent, _ := tokenRefreshUrgency(account, now, refreshBefore); urgent {
+			snapshot.TokenDueCount++
+		} else {
+			snapshot.StaleCount++
+		}
+	}
+	for _, item := range snapshot.Recent {
+		if item.Status == "failed" {
+			snapshot.FailedCount++
+		}
+	}
 }
 
 func truncateAutoRefreshError(err error) string {
@@ -4080,6 +4127,8 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 		h.apiUpdateAutoRefresh(w, r)
 	case path == "/auto-refresh/status" && r.Method == "GET":
 		h.apiGetAutoRefreshStatus(w, r)
+	case path == "/auto-refresh/run" && r.Method == "POST":
+		h.apiRunAutoRefresh(w, r)
 	case path == "/retry" && r.Method == "GET":
 		h.apiGetRetryConfig(w, r)
 	case path == "/retry" && r.Method == "POST":
@@ -6077,6 +6126,56 @@ func (h *Handler) apiGetAutoRefreshStatus(w http.ResponseWriter, r *http.Request
 		"config": config.GetAutoRefreshConfig(),
 		"status": h.getAutoRefreshStatusSnapshot(),
 	})
+}
+
+func (h *Handler) apiRunAutoRefresh(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Mode string `json:"mode"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON"})
+		return
+	}
+	if !h.autoRefreshRunning.CompareAndSwap(false, true) {
+		w.WriteHeader(http.StatusConflict)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "auto refresh is already running"})
+		return
+	}
+
+	autoRefresh := config.GetAutoRefreshConfig()
+	accounts := config.GetAccounts()
+	var selected []*config.Account
+	switch req.Mode {
+	case "due":
+		selected = h.nextAutoRefreshAccounts(h.dueAutoRefreshAccounts(accounts, autoRefresh), autoRefresh.MaxAccountsPerRun)
+	case "failed":
+		status := h.getAutoRefreshStatusSnapshot()
+		for i := range accounts {
+			item, ok := status.Recent[accounts[i].ID]
+			if !ok || item.Status != "failed" || !accounts[i].Enabled {
+				continue
+			}
+			h.clearAutoRefreshFailure(accounts[i].ID)
+			selected = append(selected, &accounts[i])
+		}
+		if autoRefresh.MaxAccountsPerRun > 0 && len(selected) > autoRefresh.MaxAccountsPerRun {
+			selected = selected[:autoRefresh.MaxAccountsPerRun]
+		}
+	default:
+		h.autoRefreshRunning.Store(false)
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "mode must be due or failed"})
+		return
+	}
+
+	if len(selected) == 0 {
+		h.autoRefreshRunning.Store(false)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "started": false, "selected": 0})
+		return
+	}
+	go h.refreshSelectedAccountsLocked(selected, autoRefresh)
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "started": true, "selected": len(selected)})
 }
 
 func (h *Handler) apiUpdateAutoRefresh(w http.ResponseWriter, r *http.Request) {

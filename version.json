@@ -1,5 +1,5 @@
 {
-  "version": "1.2.35",
-  "changelog": "Add host-aware IPv6 diagnostics and safe recommendations, prevent local IPv6 failures from penalizing or rotating accounts, guarantee unique random assignments, and expose account IPv6/status metrics.\n新增服务器感知的 IPv6 检测与安全推荐，避免本地 IPv6 故障处罚或轮询账号，保证随机地址唯一，并展示账号 IPv6 与运行统计。",
+  "version": "1.2.36",
+  "changelog": "Add auto-refresh observability, due-account refresh and failed-account retry controls, with overlap protection for scheduled and manual runs.\n新增自动刷新可观测统计、到期账号立即刷新和失败账号重试，并防止定时与手动任务重叠运行。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }

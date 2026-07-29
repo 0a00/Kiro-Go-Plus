@@ -39,7 +39,7 @@ Open `/admin` to manage:
 - Account import, routability/inventory diagnostics, enable/disable state, weights, priority, per-account concurrency, and proxies
 - Runtime/legacy endpoint preference and automatic fallback
 - Load balancing, retries, pre-output same-endpoint backoff, timeouts, circuits, and upstream protection
-- Token/model refresh intervals, concurrency, and batch sizes
+- Token/model refresh intervals, concurrency, batch sizes, due-account refresh, and failed-account retry controls
 - Prompt Cache creation/read ranges, TTL, capacity, and isolation
 - Web Search enablement and per-request round limit, token counting, Responses storage, diagnostics, complete request logging, and alerts
 - Claude Agent tool enforcement, thinking/output/context token defaults, response formats, long-tool protection, and safe/adaptive/balanced/live stream modes

@@ -2364,13 +2364,17 @@
     const problemItems = recent
       .filter(item => item.status === 'failed' || item.cooldownUntil)
       .sort((a, b) => (b.lastFailureAt || b.lastStartedAt || 0) - (a.lastFailureAt || a.lastStartedAt || 0))
-      .slice(0, 5);
+      .slice(0, 20);
     const finished = status.lastRunFinishedAt ? formatTime(status.lastRunFinishedAt) : '-';
     let html =
       '<div class="request-summary auto-refresh-summary">' +
       '<div class="request-summary-item"><span>' + escapeHtml(t('settings.autoRefreshLastRun')) + '</span><strong>' + escapeHtml(status.running ? t('settings.autoRefreshRunning') : finished) + '</strong></div>' +
       '<div class="request-summary-item"><span>' + escapeHtml(t('settings.autoRefreshSelected')) + '</span><strong>' + escapeHtml(String(status.lastRunSelected || 0)) + '</strong></div>' +
       '<div class="request-summary-item"><span>' + escapeHtml(t('settings.autoRefreshResult')) + '</span><strong>' + escapeHtml((status.lastRunSuccess || 0) + '/' + (status.lastRunFailed || 0) + '/' + (status.lastRunSkipped || 0)) + '</strong></div>' +
+      '<div class="request-summary-item"><span>' + escapeHtml(t('settings.autoRefreshDue')) + '</span><strong>' + escapeHtml(String(status.dueCount || 0)) + '</strong></div>' +
+      '<div class="request-summary-item"><span>' + escapeHtml(t('settings.autoRefreshTokenDue')) + '</span><strong>' + escapeHtml(String(status.tokenDueCount || 0)) + '</strong></div>' +
+      '<div class="request-summary-item"><span>' + escapeHtml(t('settings.autoRefreshStale')) + '</span><strong>' + escapeHtml(String(status.staleCount || 0)) + '</strong></div>' +
+      '<div class="request-summary-item"><span>' + escapeHtml(t('settings.autoRefreshFailed')) + '</span><strong>' + escapeHtml(String(status.failedCount || 0)) + '</strong></div>' +
       '<div class="request-summary-item"><span>' + escapeHtml(t('settings.autoRefreshCooldowns')) + '</span><strong>' + escapeHtml(String(status.cooldownCount || 0)) + '</strong></div>' +
       '</div>';
     if (problemItems.length) {
@@ -2384,6 +2388,22 @@
       html += '</div>';
     }
     el.innerHTML = html;
+  }
+  async function runAutoRefresh(mode) {
+    const button = mode === 'failed' ? $('retryFailedAutoRefreshBtn') : $('runDueAutoRefreshBtn');
+    if (button) button.disabled = true;
+    try {
+      const res = await api('/auto-refresh/run', { method: 'POST', body: JSON.stringify({ mode }) });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok || d.success === false) throw new Error(d.error || t('common.failed'));
+      toast(d.started ? t('settings.autoRefreshStarted', d.selected || 0) : t('settings.autoRefreshNothing'), d.started ? 'success' : 'info');
+      setTimeout(loadAutoRefreshStatus, 500);
+      setTimeout(loadAutoRefreshStatus, 2500);
+    } catch (e) {
+      toast((e && e.message) || t('common.failed'), 'error');
+    } finally {
+      if (button) button.disabled = false;
+    }
   }
   async function loadThinkingConfig() {
     const res = await api('/thinking');
@@ -4520,6 +4540,8 @@
     $('saveRuntimeBtn').addEventListener('click', saveRuntimeConfig);
     $('saveRoutingBtn').addEventListener('click', saveRoutingConfig);
     $('saveAutoRefreshBtn').addEventListener('click', saveAutoRefreshConfig);
+    $('runDueAutoRefreshBtn').addEventListener('click', () => runAutoRefresh('due'));
+    $('retryFailedAutoRefreshBtn').addEventListener('click', () => runAutoRefresh('failed'));
     $('saveRetryBtn').addEventListener('click', saveRetryConfig);
     $('saveLongToolBtn').addEventListener('click', saveLongToolConfig);
     $('saveResponsesStorageBtn').addEventListener('click', saveResponsesStorageConfig);

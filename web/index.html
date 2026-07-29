@@ -527,7 +527,11 @@
             </div>
           </div>
           <div id="autoRefreshStatus" class="auto-refresh-status"></div>
-          <button class="btn btn-primary" id="saveAutoRefreshBtn" data-i18n="settings.saveAutoRefresh"></button>
+          <div class="flex flex-wrap gap-2">
+            <button class="btn btn-primary" id="saveAutoRefreshBtn" data-i18n="settings.saveAutoRefresh"></button>
+            <button class="btn btn-secondary" id="runDueAutoRefreshBtn" data-i18n="settings.refreshDueNow"></button>
+            <button class="btn btn-secondary" id="retryFailedAutoRefreshBtn" data-i18n="settings.retryFailedNow"></button>
+          </div>
         </div>
 
         <!-- Retry policy -->

@@ -541,6 +541,64 @@ func TestAutoRefreshSelectionPrioritizesExpiringTokens(t *testing.T) {
 	}
 }
 
+func TestAutoRefreshStatusCountsDueAndFailedAccounts(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	now := time.Now()
+	accounts := []config.Account{
+		{ID: "token-due", Enabled: true, AccessToken: "token", RefreshToken: "refresh", ExpiresAt: now.Add(time.Minute).Unix(), LastRefresh: now.Unix()},
+		{ID: "stale", Enabled: true, AccessToken: "token", LastUsed: now.Unix(), LastRefresh: now.Add(-time.Hour).Unix()},
+		{ID: "fresh", Enabled: true, AccessToken: "token", LastUsed: now.Unix(), LastRefresh: now.Unix()},
+		{ID: "failed", Enabled: true, AccessToken: "token", LastRefresh: 0},
+	}
+	for _, account := range accounts {
+		if err := config.AddAccount(account); err != nil {
+			t.Fatalf("config.AddAccount(%s): %v", account.ID, err)
+		}
+	}
+	h := &Handler{
+		autoRefreshFail: map[string]int64{"failed": now.Add(time.Hour).Unix()},
+		autoRefreshStat: autoRefreshStatus{Recent: map[string]autoRefreshAccountStatus{
+			"failed": {AccountID: "failed", Status: "failed", LastFailureAt: now.Unix()},
+		}},
+	}
+
+	status := h.getAutoRefreshStatusSnapshot()
+	if status.DueCount != 2 || status.TokenDueCount != 1 || status.StaleCount != 1 {
+		t.Fatalf("unexpected due counts: %+v", status)
+	}
+	if status.FailedCount != 1 || status.CooldownCount != 1 {
+		t.Fatalf("unexpected failure counts: %+v", status)
+	}
+}
+
+func TestApiRunAutoRefreshRejectsConcurrentRun(t *testing.T) {
+	h := &Handler{}
+	h.autoRefreshRunning.Store(true)
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/auto-refresh/run", strings.NewReader(`{"mode":"due"}`))
+
+	h.apiRunAutoRefresh(recorder, request)
+	if recorder.Code != http.StatusConflict {
+		t.Fatalf("expected conflict, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestApiRunAutoRefreshInvalidModeReleasesRunLock(t *testing.T) {
+	h := &Handler{}
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/auto-refresh/run", strings.NewReader(`{"mode":"all"}`))
+
+	h.apiRunAutoRefresh(recorder, request)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected bad request, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	if h.autoRefreshRunning.Load() {
+		t.Fatal("invalid request left auto refresh locked")
+	}
+}
+
 func TestRebuildCachedModelsDropsRemovedModels(t *testing.T) {
 	h := &Handler{modelsByAccount: map[string][]ModelInfo{
 		"a": {{ModelId: "model-a"}, {ModelId: "model-shared"}},
