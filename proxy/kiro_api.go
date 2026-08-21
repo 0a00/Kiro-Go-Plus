@@ -176,6 +176,150 @@ var probeKiroAPIKeyRegion = func(ctx context.Context, key, region, proxyURL stri
 	return RefreshAccountInfoContext(ctx, account)
 }
 
+type apiKeyRegionProbeCall struct {
+	done   chan struct{}
+	region string
+	info   *config.AccountInfo
+	ok     bool
+}
+
+var apiKeyRegionProbes = struct {
+	sync.Mutex
+	inFlight map[string]*apiKeyRegionProbeCall
+}{inFlight: make(map[string]*apiKeyRegionProbeCall)}
+
+func apiKeyRegionProbeKey(account *config.Account) string {
+	if account == nil {
+		return ""
+	}
+	if id := strings.TrimSpace(account.ID); id != "" {
+		return id
+	}
+	if fingerprint := strings.TrimSpace(account.CredentialFingerprint); fingerprint != "" {
+		return fingerprint
+	}
+	return strings.Join([]string{strings.TrimSpace(account.Email), strings.TrimSpace(account.MachineId)}, "|")
+}
+
+// reprobeKiroAPIKeyRegion finds a management-plane candidate without persisting
+// it. A successful model request is required before account routing is updated.
+func reprobeKiroAPIKeyRegion(ctx context.Context, account *config.Account) (string, *config.AccountInfo, bool) {
+	if account == nil || !isKiroAPIKeyAccount(account) {
+		return "", nil, false
+	}
+	key := strings.TrimSpace(account.KiroApiKey)
+	if key == "" {
+		key = strings.TrimSpace(account.AccessToken)
+	}
+	if key == "" {
+		return "", nil, false
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	current := strings.ToLower(strings.TrimSpace(account.Region))
+	for _, persisted := range config.GetAccounts() {
+		region := strings.ToLower(strings.TrimSpace(persisted.Region))
+		if persisted.ID == account.ID && region != current && validKiroRegion(region) {
+			account.Region = region
+			return region, nil, true
+		}
+	}
+
+	probeKey := apiKeyRegionProbeKey(account)
+	apiKeyRegionProbes.Lock()
+	if call := apiKeyRegionProbes.inFlight[probeKey]; call != nil {
+		apiKeyRegionProbes.Unlock()
+		select {
+		case <-ctx.Done():
+			return "", nil, false
+		case <-call.done:
+			if call.ok {
+				account.Region = call.region
+			}
+			return call.region, call.info, call.ok
+		}
+	}
+	call := &apiKeyRegionProbeCall{done: make(chan struct{})}
+	apiKeyRegionProbes.inFlight[probeKey] = call
+	apiKeyRegionProbes.Unlock()
+
+	call.region, call.info, call.ok = probeAlternateKiroAPIKeyRegions(ctx, account, key, current)
+	apiKeyRegionProbes.Lock()
+	delete(apiKeyRegionProbes.inFlight, probeKey)
+	close(call.done)
+	apiKeyRegionProbes.Unlock()
+	if call.ok {
+		account.Region = call.region
+	}
+	return call.region, call.info, call.ok
+}
+
+func probeAlternateKiroAPIKeyRegions(ctx context.Context, account *config.Account, key, current string) (string, *config.AccountInfo, bool) {
+	for _, candidate := range kiroAPIKeyCandidateRegions() {
+		candidate = strings.ToLower(strings.TrimSpace(candidate))
+		if candidate == current || !validKiroRegion(candidate) {
+			continue
+		}
+		probeCtx, cancel := context.WithTimeout(ctx, kiroAPIKeyProbeTimeout)
+		info, err := probeKiroAPIKeyRegion(probeCtx, key, candidate, ResolveAccountProxyURL(account))
+		cancel()
+		if err == nil {
+			logger.Infof("[KiroAPI] API-key account %s found candidate region %s; awaiting model-request confirmation", accountEmailForLog(account), candidate)
+			return candidate, info, true
+		}
+		if ctx.Err() != nil {
+			return "", nil, false
+		}
+		logger.Debugf("[KiroAPI] API-key region probe failed for %s in %s: %v", accountEmailForLog(account), candidate, err)
+	}
+	return "", nil, false
+}
+
+func isAPIKeyRegionAuthFailure(err error) bool {
+	upstreamErr, ok := asUpstreamError(err)
+	if !ok {
+		return false
+	}
+	switch upstreamErr.Kind {
+	case UpstreamErrorTokenExpired, UpstreamErrorAuthRevoked, UpstreamErrorForbidden:
+		return true
+	default:
+		return false
+	}
+}
+
+func retryAfterAPIKeyRegionRecovery(ctx context.Context, account *config.Account, payload *KiroPayload, callback *KiroStreamCallback, upstreamErr error, emitted bool) (bool, error) {
+	if emitted || account == nil || payload == nil || !isKiroAPIKeyAccount(account) ||
+		!isAPIKeyRegionAuthFailure(upstreamErr) || !payload.takeAPIKeyRegionAttempt(account) {
+		return false, nil
+	}
+	previousRegion := account.Region
+	region, info, ok := reprobeKiroAPIKeyRegion(ctx, account)
+	if !ok {
+		return false, nil
+	}
+
+	retryErr := CallKiroAPI(account, payload, callback)
+	if retryErr != nil {
+		account.Region = previousRegion
+		return true, retryErr
+	}
+	if err := config.UpdateAccountRegion(account.ID, region); err != nil {
+		logger.Warnf("[KiroAPI] Failed to persist confirmed API-key region %s for %s: %v", region, accountEmailForLog(account), err)
+	} else {
+		accountpool.GetPool().UpdateAccountRegion(account.ID, region)
+	}
+	if info != nil {
+		if err := config.UpdateAccountInfo(account.ID, *info); err != nil {
+			logger.Debugf("[KiroAPI] Failed to persist account info after region recovery for %s: %v", accountEmailForLog(account), err)
+		}
+	}
+	logger.Infof("[KiroAPI] API-key account %s confirmed data-plane region %s", accountEmailForLog(account), region)
+	return true, nil
+}
+
 // resolveKiroAPIKeyRegion validates the data-plane region for a ksk_ key. An
 // explicit region is checked alone; otherwise the configured candidates are
 // tried in order. retryable is true when any failure was transport/upstream
@@ -942,6 +1086,16 @@ func RefreshAccountInfo(account *config.Account) (*config.AccountInfo, error) {
 	return RefreshAccountInfoContext(context.Background(), account)
 }
 
+func copyAccountStatus(dst, src *config.Account) {
+	if dst == nil || src == nil {
+		return
+	}
+	dst.Enabled = src.Enabled
+	dst.BanStatus = src.BanStatus
+	dst.BanReason = src.BanReason
+	dst.BanTime = src.BanTime
+}
+
 func RefreshAccountInfoContext(ctx context.Context, account *config.Account) (*config.AccountInfo, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -964,32 +1118,35 @@ func RefreshAccountInfoContext(ctx context.Context, account *config.Account) (*c
 			// 账户被暂时封禁，自动禁用并标记封禁状态
 			logger.Warnf("[RefreshAccountInfo] Account %s is temporarily suspended: %v", account.Email, err)
 
-			// 更新账户封禁状态并自动禁用
-			updatedAccount := *account
-			updatedAccount.Enabled = false
-			updatedAccount.BanStatus = "BANNED"
-			updatedAccount.BanReason = "AWS temporarily suspended - unusual user activity detected"
-			updatedAccount.BanTime = time.Now().Unix()
-
-			// 保存更新后的账户状态
-			if updateErr := config.UpdateAccount(account.ID, updatedAccount); updateErr != nil {
+			enabled := false
+			banStatus := "BANNED"
+			banReason := "AWS temporarily suspended - unusual user activity detected"
+			banTime := time.Now().Unix()
+			updatedAccount, updateErr := config.PatchAccountStatus(account.ID, config.AccountStatusPatch{
+				Enabled: &enabled, BanStatus: &banStatus, BanReason: &banReason, BanTime: &banTime,
+			})
+			if updateErr != nil {
 				logger.Errorf("[RefreshAccountInfo] Failed to update account ban status: %v", updateErr)
+			} else {
+				copyAccountStatus(account, &updatedAccount)
 			}
-			*account = updatedAccount
 
 			return nil, fmt.Errorf("Account suspended: %w", err)
 		}
 		if upstreamErr, ok := asUpstreamError(err); ok && upstreamErr.Kind == UpstreamErrorAuthRevoked {
 			logger.Warnf("[RefreshAccountInfo] Revoked credentials for %s: %v", account.Email, err)
-			updatedAccount := *account
-			updatedAccount.Enabled = false
-			updatedAccount.BanStatus = "BANNED"
-			updatedAccount.BanReason = "Authentication credentials were revoked"
-			updatedAccount.BanTime = time.Now().Unix()
-			if updateErr := config.UpdateAccount(account.ID, updatedAccount); updateErr != nil {
+			enabled := false
+			banStatus := "BANNED"
+			banReason := "Authentication credentials were revoked"
+			banTime := time.Now().Unix()
+			updatedAccount, updateErr := config.PatchAccountStatus(account.ID, config.AccountStatusPatch{
+				Enabled: &enabled, BanStatus: &banStatus, BanReason: &banReason, BanTime: &banTime,
+			})
+			if updateErr != nil {
 				logger.Errorf("[RefreshAccountInfo] Failed to update account ban status: %v", updateErr)
+			} else {
+				copyAccountStatus(account, &updatedAccount)
 			}
-			*account = updatedAccount
 		}
 
 		return nil, fmt.Errorf("GetUsageLimits: %w", err)
@@ -999,21 +1156,13 @@ func RefreshAccountInfoContext(ctx context.Context, account *config.Account) (*c
 	if account.BanStatus != "" && account.BanStatus != "ACTIVE" {
 		logger.Infof("[RefreshAccountInfo] Account %s is now active, clearing ban status", account.Email)
 
-		updatedAccount := *account
-		updatedAccount.BanStatus = "ACTIVE"
-		updatedAccount.BanReason = ""
-		updatedAccount.BanTime = 0
-		if strings.Contains(strings.ToLower(account.BanReason), "temporarily suspended") ||
-			strings.Contains(strings.ToLower(account.BanReason), "credentials were revoked") ||
-			strings.Contains(strings.ToLower(account.BanReason), "authentication failed") {
-			updatedAccount.Enabled = true
-		}
-
-		// 保存更新后的账户状态
-		if updateErr := config.UpdateAccount(account.ID, updatedAccount); updateErr != nil {
+		updatedAccount, updateErr := config.ClearAccountBan(account.ID,
+			"temporarily suspended", "credentials were revoked", "authentication failed")
+		if updateErr != nil {
 			logger.Errorf("[RefreshAccountInfo] Failed to clear account ban status: %v", updateErr)
+		} else {
+			copyAccountStatus(account, &updatedAccount)
 		}
-		*account = updatedAccount
 	}
 
 	// 解析用户信息

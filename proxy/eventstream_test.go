@@ -78,16 +78,19 @@ func TestParseEventStreamPreservesCacheUsageBreakdown(t *testing.T) {
 }
 
 func TestParseEventStreamPreservesThinkingUsage(t *testing.T) {
-	stream := bytes.NewReader(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{
-		"content": "hello",
-		"usage": map[string]interface{}{
-			"input_tokens":  10,
-			"output_tokens": 20,
-			"output_tokens_details": map[string]interface{}{
-				"reasoning_tokens": 7,
+	stream := bytes.NewReader(bytes.Join([][]byte{
+		awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{
+			"content": "hello",
+			"usage": map[string]interface{}{
+				"input_tokens":  10,
+				"output_tokens": 20,
+				"output_tokens_details": map[string]interface{}{
+					"reasoning_tokens": 7,
+				},
 			},
-		},
-	}))
+		}),
+		awsEventStreamFrame(t, "metadataEvent", map[string]interface{}{"stopReason": "end_turn"}),
+	}, nil))
 
 	var got KiroTokenUsage
 	if err := parseEventStream(stream, &KiroStreamCallback{OnUsage: func(usage KiroTokenUsage) { got = usage }}); err != nil {
@@ -157,11 +160,27 @@ func TestParseEventStreamMarksTextWithoutCompletionSignalTruncated(t *testing.T)
 		OnTruncated: func(value string) { reason = value },
 		OnComplete:  func(_, _ int) { completed = true },
 	})
-	if err != nil {
-		t.Fatalf("unexpected parse error: %v", err)
+	assertEventStreamErrorKind(t, err, EventStreamIncompleteResponse)
+	if reason == "" || completed {
+		t.Fatalf("expected failed truncated stream, reason=%q completed=%v", reason, completed)
 	}
-	if reason == "" || !completed {
-		t.Fatalf("expected truncated completion, reason=%q completed=%v", reason, completed)
+}
+
+func TestParseEventStreamReadsStopReasonKeyVariants(t *testing.T) {
+	for _, key := range []string{"stopReason", "stop_reason"} {
+		t.Run(key, func(t *testing.T) {
+			stream := bytes.NewReader(bytes.Join([][]byte{
+				awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "done"}),
+				awsEventStreamFrame(t, "metadataEvent", map[string]interface{}{key: "max_tokens"}),
+			}, nil))
+			var reason string
+			if err := parseEventStream(stream, &KiroStreamCallback{OnStopReason: func(value string) { reason = value }}); err != nil {
+				t.Fatalf("parse stop reason: %v", err)
+			}
+			if reason != "max_tokens" {
+				t.Fatalf("stop reason=%q, want max_tokens", reason)
+			}
+		})
 	}
 }
 

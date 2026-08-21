@@ -513,7 +513,7 @@ const (
 )
 
 // Version current version
-const Version = "1.2.36"
+const Version = "1.2.37"
 
 var (
 	cfg           *Config
@@ -2259,6 +2259,144 @@ func UpdateAccount(id string, account Account) error {
 	return nil
 }
 
+// AccountStatusPatch contains only dispatch and ban-state fields. Pointer
+// fields distinguish an omitted value from an explicit false/empty value.
+type AccountStatusPatch struct {
+	Enabled   *bool
+	BanStatus *string
+	BanReason *string
+	BanTime   *int64
+}
+
+// PatchAccountStatus updates account status without replacing credentials or
+// usage fields that may have changed in another goroutine.
+func PatchAccountStatus(id string, patch AccountStatusPatch) (Account, error) {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	for i := range cfg.Accounts {
+		if cfg.Accounts[i].ID != id {
+			continue
+		}
+		previous := cfg.Accounts[i]
+		if patch.Enabled != nil {
+			cfg.Accounts[i].Enabled = *patch.Enabled
+		}
+		if patch.BanStatus != nil {
+			cfg.Accounts[i].BanStatus = *patch.BanStatus
+		}
+		if patch.BanReason != nil {
+			cfg.Accounts[i].BanReason = *patch.BanReason
+		}
+		if patch.BanTime != nil {
+			cfg.Accounts[i].BanTime = *patch.BanTime
+		}
+		if err := Save(); err != nil {
+			cfg.Accounts[i] = previous
+			return Account{}, err
+		}
+		return cfg.Accounts[i], nil
+	}
+	return Account{}, fmt.Errorf("account not found: %s", id)
+}
+
+// ClearAccountBan marks an account active and only auto-enables it when the
+// currently persisted reason matches one of the supplied automatic-ban reasons.
+func ClearAccountBan(id string, autoEnableReasonFragments ...string) (Account, error) {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	for i := range cfg.Accounts {
+		if cfg.Accounts[i].ID != id {
+			continue
+		}
+		previous := cfg.Accounts[i]
+		currentReason := strings.ToLower(cfg.Accounts[i].BanReason)
+		for _, fragment := range autoEnableReasonFragments {
+			if fragment = strings.ToLower(strings.TrimSpace(fragment)); fragment != "" && strings.Contains(currentReason, fragment) {
+				cfg.Accounts[i].Enabled = true
+				break
+			}
+		}
+		cfg.Accounts[i].BanStatus = "ACTIVE"
+		cfg.Accounts[i].BanReason = ""
+		cfg.Accounts[i].BanTime = 0
+		if err := Save(); err != nil {
+			cfg.Accounts[i] = previous
+			return Account{}, err
+		}
+		return cfg.Accounts[i], nil
+	}
+	return Account{}, fmt.Errorf("account not found: %s", id)
+}
+
+// AccountAdminPatch is the allow-list of account fields editable from the
+// admin API. Credentials and runtime counters are intentionally absent.
+type AccountAdminPatch struct {
+	Enabled        *bool
+	Nickname       *string
+	MachineId      *string
+	Weight         *int
+	Priority       *int
+	MaxConcurrency *int
+	ProxyURL       *string
+}
+
+// PatchAccountAdmin applies an admin update to the latest persisted account
+// snapshot, preventing a stale HTTP read from overwriting refreshed tokens.
+func PatchAccountAdmin(id string, patch AccountAdminPatch) (Account, error) {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	for i := range cfg.Accounts {
+		if cfg.Accounts[i].ID != id {
+			continue
+		}
+		previous := cfg.Accounts[i]
+		candidate := previous
+		if patch.Enabled != nil {
+			wasEnabled := candidate.Enabled
+			candidate.Enabled = *patch.Enabled
+			if candidate.Enabled && !wasEnabled && candidate.BanStatus != "" && !strings.EqualFold(candidate.BanStatus, "ACTIVE") {
+				candidate.BanStatus = "ACTIVE"
+				candidate.BanReason = ""
+				candidate.BanTime = 0
+			}
+		}
+		if patch.Nickname != nil {
+			candidate.Nickname = *patch.Nickname
+		}
+		if patch.MachineId != nil {
+			candidate.MachineId = *patch.MachineId
+		}
+		if patch.Weight != nil {
+			if *patch.Weight < 0 || *patch.Weight > 100 {
+				return Account{}, fmt.Errorf("weight must be between 0 and 100")
+			}
+			candidate.Weight = *patch.Weight
+		}
+		if patch.Priority != nil {
+			candidate.Priority = *patch.Priority
+		}
+		if patch.MaxConcurrency != nil {
+			if *patch.MaxConcurrency < 0 || *patch.MaxConcurrency > 1000 {
+				return Account{}, fmt.Errorf("maxConcurrency must be between 0 and 1000")
+			}
+			candidate.MaxConcurrency = *patch.MaxConcurrency
+		}
+		if patch.ProxyURL != nil {
+			candidate.ProxyURL = *patch.ProxyURL
+		}
+		if err := validateAccountProxy(candidate); err != nil {
+			return Account{}, err
+		}
+		cfg.Accounts[i] = candidate
+		if err := Save(); err != nil {
+			cfg.Accounts[i] = previous
+			return Account{}, err
+		}
+		return candidate, nil
+	}
+	return Account{}, fmt.Errorf("account not found: %s", id)
+}
+
 // SetAccountsEnabled updates only account status fields with one config write,
 // preserving credentials and usage data that may be changing concurrently.
 func SetAccountsEnabled(ids map[string]bool, enabled bool) error {
@@ -2504,6 +2642,44 @@ func UpdateAccountProfileArn(id, profileArn string) error {
 		}
 	}
 	return fmt.Errorf("account not found: %s", id)
+}
+
+// UpdateAccountRegion persists only the API data-plane region. Keeping this
+// field-level prevents a concurrent token refresh from being overwritten by a
+// stale account snapshot held by the request that performed region recovery.
+func UpdateAccountRegion(id, region string) error {
+	region = strings.ToLower(strings.TrimSpace(region))
+	if !validRegionHostLabel(region) {
+		return fmt.Errorf("invalid region %q", region)
+	}
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	for i := range cfg.Accounts {
+		if cfg.Accounts[i].ID != id {
+			continue
+		}
+		previous := cfg.Accounts[i].Region
+		cfg.Accounts[i].Region = region
+		if err := Save(); err != nil {
+			cfg.Accounts[i].Region = previous
+			return err
+		}
+		return nil
+	}
+	return fmt.Errorf("account not found: %s", id)
+}
+
+func validRegionHostLabel(region string) bool {
+	if len(region) < 5 || len(region) > 32 || !strings.Contains(region, "-") {
+		return false
+	}
+	for _, char := range region {
+		if (char < 'a' || char > 'z') && (char < '0' || char > '9') && char != '-' {
+			return false
+		}
+	}
+	last := region[len(region)-1]
+	return last >= '0' && last <= '9'
 }
 
 type AccountCredentialUpdate struct {

@@ -305,7 +305,7 @@ func (h *Handler) handleResponsesNonStream(
 		var credits float64
 		var realInputTokens int
 		var upstreamUsage KiroTokenUsage
-		var truncated bool
+		var upstreamStopReason string
 
 		callback := &KiroStreamCallback{
 			OnText: func(text string, isThinking bool) {
@@ -320,10 +320,10 @@ func (h *Handler) handleResponsesNonStream(
 				firstContent.MarkToolOutput()
 				toolUses = append(toolUses, tu)
 			},
-			OnComplete:  func(inTok, outTok int) { inputTokens = inTok; outputTokens = outTok },
-			OnUsage:     func(usage KiroTokenUsage) { upstreamUsage = usage },
-			OnTruncated: func(string) { truncated = true },
-			OnCredits:   func(c float64) { credits = c },
+			OnComplete:   func(inTok, outTok int) { inputTokens = inTok; outputTokens = outTok },
+			OnUsage:      func(usage KiroTokenUsage) { upstreamUsage = usage },
+			OnStopReason: func(reason string) { upstreamStopReason = reason },
+			OnCredits:    func(c float64) { credits = c },
 			OnContextUsage: func(pct float64) {
 				realInputTokens = int(pct * float64(getPayloadContextWindowSize(payload, model)) / 100.0)
 			},
@@ -391,7 +391,7 @@ func (h *Handler) handleResponsesNonStream(
 		h.recordRequestLogForPayload(payload, entry)
 
 		respObj := buildResponsesObject(respID, model, finalContent, reasoningContent, toolUses, inputTokens, outputTokens, thinkingTokens, cacheUsage, req, customTools)
-		if truncated {
+		if responseStopReasonIsIncomplete(upstreamStopReason) {
 			markResponseIncomplete(respObj)
 		}
 		respObj.StoredInput = storedInput
@@ -562,6 +562,10 @@ func markResponseIncomplete(response *ResponsesObject) {
 	response.IncompleteDetails = &IncompleteDetails{Reason: "max_output_tokens"}
 }
 
+func responseStopReasonIsIncomplete(reason string) bool {
+	return mapOpenAIFinishReason(reason, 0) == "length"
+}
+
 func (h *Handler) handleResponsesStream(
 	w http.ResponseWriter, payload *KiroPayload, model string, thinking bool,
 	estimatedInputTokens int, apiKeyID, respID, routeKey string,
@@ -640,15 +644,15 @@ func (h *Handler) handleResponsesStream(
 		}
 
 		var (
-			fullText        strings.Builder
-			reasoningText   strings.Builder
-			toolUses        []KiroToolUse
-			inputTokens     int
-			outputTokens    int
-			credits         float64
-			realInputTokens int
-			upstreamUsage   KiroTokenUsage
-			truncated       bool
+			fullText           strings.Builder
+			reasoningText      strings.Builder
+			toolUses           []KiroToolUse
+			inputTokens        int
+			outputTokens       int
+			credits            float64
+			realInputTokens    int
+			upstreamUsage      KiroTokenUsage
+			upstreamStopReason string
 		)
 
 		messageItemID := generateOutputItemID("msg")
@@ -871,10 +875,10 @@ func (h *Handler) handleResponsesStream(
 				outputIndex++
 				responseStarted = true
 			},
-			OnComplete:  func(inTok, outTok int) { inputTokens = inTok; outputTokens = outTok },
-			OnUsage:     func(usage KiroTokenUsage) { upstreamUsage = usage },
-			OnTruncated: func(string) { truncated = true },
-			OnCredits:   func(c float64) { credits = c },
+			OnComplete:   func(inTok, outTok int) { inputTokens = inTok; outputTokens = outTok },
+			OnUsage:      func(usage KiroTokenUsage) { upstreamUsage = usage },
+			OnStopReason: func(reason string) { upstreamStopReason = reason },
+			OnCredits:    func(c float64) { credits = c },
 			OnContextUsage: func(pct float64) {
 				realInputTokens = int(pct * float64(getPayloadContextWindowSize(payload, model)) / 100.0)
 			},
@@ -998,7 +1002,7 @@ func (h *Handler) handleResponsesStream(
 		}
 
 		respObj := buildResponsesObject(respID, model, finalContent, reasoning, toolUses, inputTokens, outputTokens, thinkingTokens, cacheUsage, req, customTools)
-		if truncated {
+		if responseStopReasonIsIncomplete(upstreamStopReason) {
 			markResponseIncomplete(respObj)
 		}
 		respObj.CreatedAt = createdAt
@@ -1015,7 +1019,7 @@ func (h *Handler) handleResponsesStream(
 		}
 
 		completionEvent := "response.completed"
-		if truncated {
+		if responseStopReasonIsIncomplete(upstreamStopReason) {
 			completionEvent = "response.incomplete"
 		}
 		send(completionEvent, map[string]interface{}{

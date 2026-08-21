@@ -1,5 +1,5 @@
 {
-  "version": "1.2.36",
-  "changelog": "Add auto-refresh observability, due-account refresh and failed-account retry controls, with overlap protection for scheduled and manual runs.\n新增自动刷新可观测统计、到期账号立即刷新和失败账号重试，并防止定时与手动任务重叠运行。",
+  "version": "1.2.37",
+  "changelog": "Harden stream completion and stop reasons, preserve ordered concurrent tool calls, recover API-key regions safely, and improve atomic account updates and helper credential imports.\n强化流完成与停止原因检测，保持并发工具调用顺序，安全恢复 API Key 地区，并改进账号原子更新及登录助手凭据导入。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }

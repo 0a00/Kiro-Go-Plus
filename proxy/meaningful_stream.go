@@ -23,6 +23,7 @@ const (
 	pendingError
 	pendingCredits
 	pendingContextUsage
+	pendingStopReason
 )
 
 type pendingStreamEvent struct {
@@ -146,6 +147,9 @@ func wrapMeaningfulStreamCallback(target *KiroStreamCallback, onActivity func(),
 		},
 		OnContextUsage: func(percentage float64) {
 			gate.handleEvent(pendingStreamEvent{kind: pendingContextUsage, percentage: percentage})
+		},
+		OnStopReason: func(reason string) {
+			gate.handleEvent(pendingStreamEvent{kind: pendingStopReason, text: reason})
 		},
 		OnProgress: func() {
 			if target.detailTrace != nil {
@@ -313,6 +317,10 @@ func (g *meaningfulStreamCallback) dispatch(event pendingStreamEvent) {
 	case pendingContextUsage:
 		if g.target.OnContextUsage != nil {
 			g.target.OnContextUsage(event.percentage)
+		}
+	case pendingStopReason:
+		if g.target.OnStopReason != nil {
+			g.target.OnStopReason(event.text)
 		}
 	}
 }

@@ -171,11 +171,12 @@ type ClaudeRequest struct {
 	Tools           []ClaudeTool          `json:"tools,omitempty"`
 	ToolChoice      interface{}           `json:"tool_choice,omitempty"`
 
-	RequireToolUse   bool   `json:"-"`
-	RequiredToolName string `json:"-"`
-	ToolUsePolicy    string `json:"-"`
-	NativeEffort     string `json:"-"`
-	NativeEffortPath string `json:"-"`
+	RequireToolUse    bool   `json:"-"`
+	RequiredToolName  string `json:"-"`
+	ToolUsePolicy     string `json:"-"`
+	AgentToolSteering bool   `json:"-"`
+	NativeEffort      string `json:"-"`
+	NativeEffortPath  string `json:"-"`
 }
 
 type ClaudeThinkingConfig struct {
@@ -262,7 +263,7 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 
 	// 提取系统提示
 	systemPrompt := buildClaudeSystemPrompt(req.System, claudeThinkingPrompt(req, thinking))
-	if len(req.Tools) > 0 && !strings.Contains(systemPrompt, agentToolPolicyMarker) {
+	if req.AgentToolSteering && len(req.Tools) > 0 && !strings.Contains(systemPrompt, agentToolPolicyMarker) {
 		if systemPrompt != "" {
 			systemPrompt += "\n\n"
 		}
@@ -373,7 +374,7 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 	finalContent = appendClaudeRequiredToolAction(finalContent, req)
 
 	// 转换工具
-	kiroTools := convertClaudeToolsWithRegistry(req.Tools, toolNames)
+	kiroTools := convertClaudeToolsWithRegistry(req.Tools, toolNames, req.AgentToolSteering)
 
 	// 构建 payload
 	payload := &KiroPayload{}
@@ -960,18 +961,21 @@ func extractClaudeAssistantContent(content interface{}) (string, []KiroToolUse) 
 
 func convertClaudeTools(tools []ClaudeTool) ([]KiroToolWrapper, map[string]string) {
 	registry := newToolNameRegistry(sanitizeToolName)
-	result := convertClaudeToolsWithRegistry(tools, registry)
+	result := convertClaudeToolsWithRegistry(tools, registry, false)
 	return result, registry.restoreMap()
 }
 
-func convertClaudeToolsWithRegistry(tools []ClaudeTool, registry *toolNameRegistry) []KiroToolWrapper {
+func convertClaudeToolsWithRegistry(tools []ClaudeTool, registry *toolNameRegistry, steer bool) []KiroToolWrapper {
 	if len(tools) == 0 {
 		return nil
 	}
 
 	result := make([]KiroToolWrapper, 0, len(tools))
 	for _, tool := range tools {
-		desc := enhanceClaudeToolDescription(tool.Name, tool.Description)
+		desc := tool.Description
+		if steer {
+			desc = enhanceClaudeToolDescription(tool.Name, desc)
+		}
 		desc = truncateToolDescription(desc, maxToolDescLen)
 		sanitized := registry.upstreamName(tool.Name)
 		if sanitized == "" {
@@ -1213,7 +1217,48 @@ func shortenToolName(name string) string {
 
 // ==================== Kiro -> Claude 转换 ====================
 
-func KiroToClaudeResponse(content, thinkingContent string, includeEmptyThinkingBlock bool, toolUses []KiroToolUse, inputTokens, outputTokens int, model string) *ClaudeResponse {
+func mapClaudeStopReason(reason string, toolCount int) string {
+	if toolCount > 0 {
+		return "tool_use"
+	}
+	switch strings.ToLower(strings.TrimSpace(reason)) {
+	case "max_tokens", "max_output_tokens", "length":
+		return "max_tokens"
+	case "model_context_window_exceeded", "context_window_exceeded":
+		return "model_context_window_exceeded"
+	case "refusal", "content_filter", "content_filtered", "guardrail_intervened":
+		return "refusal"
+	case "stop_sequence":
+		return "stop_sequence"
+	case "pause_turn":
+		return "pause_turn"
+	default:
+		return "end_turn"
+	}
+}
+
+func mapOpenAIFinishReason(reason string, toolCount int) string {
+	if toolCount > 0 {
+		return "tool_calls"
+	}
+	switch strings.ToLower(strings.TrimSpace(reason)) {
+	case "max_tokens", "max_output_tokens", "length", "model_context_window_exceeded", "context_window_exceeded":
+		return "length"
+	case "refusal", "content_filter", "content_filtered", "guardrail_intervened":
+		return "content_filter"
+	default:
+		return "stop"
+	}
+}
+
+func firstStopReason(reasons []string) string {
+	if len(reasons) == 0 {
+		return ""
+	}
+	return reasons[0]
+}
+
+func KiroToClaudeResponse(content, thinkingContent string, includeEmptyThinkingBlock bool, toolUses []KiroToolUse, inputTokens, outputTokens int, model string, upstreamStopReason ...string) *ClaudeResponse {
 	blocks := make([]ClaudeContentBlock, 0)
 
 	if thinkingContent != "" || includeEmptyThinkingBlock {
@@ -1239,10 +1284,7 @@ func KiroToClaudeResponse(content, thinkingContent string, includeEmptyThinkingB
 		})
 	}
 
-	stopReason := "end_turn"
-	if len(toolUses) > 0 {
-		stopReason = "tool_use"
-	}
+	stopReason := mapClaudeStopReason(firstStopReason(upstreamStopReason), len(toolUses))
 
 	return &ClaudeResponse{
 		ID:         "msg_" + uuid.New().String(),
@@ -2646,12 +2688,12 @@ func normalizeOpenAIToolName(name string) string {
 
 // ==================== Kiro -> OpenAI 转换 ====================
 
-func KiroToOpenAIResponse(content string, toolUses []KiroToolUse, inputTokens, outputTokens int, model string) *OpenAIResponse {
+func KiroToOpenAIResponse(content string, toolUses []KiroToolUse, inputTokens, outputTokens int, model string, upstreamStopReason ...string) *OpenAIResponse {
 	msg := OpenAIMessage{
 		Role: "assistant",
 	}
 
-	finishReason := "stop"
+	finishReason := mapOpenAIFinishReason(firstStopReason(upstreamStopReason), len(toolUses))
 
 	if len(toolUses) > 0 {
 		msg.Content = nil
@@ -2665,7 +2707,6 @@ func KiroToOpenAIResponse(content string, toolUses []KiroToolUse, inputTokens, o
 			msg.ToolCalls[i].Function.Name = tu.Name
 			msg.ToolCalls[i].Function.Arguments = string(args)
 		}
-		finishReason = "tool_calls"
 	} else {
 		msg.Content = content
 	}
@@ -2712,8 +2753,8 @@ func extractThinkingFromContent(content string) (string, string) {
 }
 
 // KiroToOpenAIResponseWithReasoning 带 reasoning_content 的 OpenAI 响应
-func KiroToOpenAIResponseWithReasoning(content, reasoningContent string, toolUses []KiroToolUse, inputTokens, outputTokens int, model, thinkingFormat string) map[string]interface{} {
-	finishReason := "stop"
+func KiroToOpenAIResponseWithReasoning(content, reasoningContent string, toolUses []KiroToolUse, inputTokens, outputTokens int, model, thinkingFormat string, upstreamStopReason ...string) map[string]interface{} {
+	finishReason := mapOpenAIFinishReason(firstStopReason(upstreamStopReason), len(toolUses))
 
 	message := map[string]interface{}{
 		"role": "assistant",
@@ -2734,7 +2775,6 @@ func KiroToOpenAIResponseWithReasoning(content, reasoningContent string, toolUse
 			}
 		}
 		message["tool_calls"] = toolCalls
-		finishReason = "tool_calls"
 	} else {
 		// 根据配置格式化 thinking 输出
 		if reasoningContent != "" {

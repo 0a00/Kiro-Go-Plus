@@ -290,20 +290,23 @@ func (h *Handler) disableAccount(account *config.Account, banStatus, banReason s
 		return
 	}
 
-	updatedAccount := *account
-	if !updatedAccount.Enabled && updatedAccount.BanStatus == banStatus && updatedAccount.BanReason == banReason {
+	if !account.Enabled && account.BanStatus == banStatus && account.BanReason == banReason {
 		return
 	}
 
-	updatedAccount.Enabled = false
-	updatedAccount.BanStatus = banStatus
-	updatedAccount.BanReason = banReason
-	updatedAccount.BanTime = time.Now().Unix()
-
-	if err := config.UpdateAccount(account.ID, updatedAccount); err != nil {
+	enabled := false
+	banTime := time.Now().Unix()
+	updatedAccount, err := config.PatchAccountStatus(account.ID, config.AccountStatusPatch{
+		Enabled: &enabled, BanStatus: &banStatus, BanReason: &banReason, BanTime: &banTime,
+	})
+	if err != nil {
 		logger.Warnf("[AccountFailover] Failed to disable %s: %v", account.Email, err)
 		return
 	}
+	account.Enabled = updatedAccount.Enabled
+	account.BanStatus = updatedAccount.BanStatus
+	account.BanReason = updatedAccount.BanReason
+	account.BanTime = updatedAccount.BanTime
 
 	logger.Warnf("[AccountFailover] Disabled %s: %s", account.Email, banReason)
 	h.pool.Reload()
@@ -368,7 +371,8 @@ func (h *Handler) handleAccountFailure(account *config.Account, err error) {
 			}
 			return
 		case UpstreamErrorEndpointUnavailable, UpstreamErrorFirstTokenTimeout,
-			UpstreamErrorActionableTimeout, UpstreamErrorToolAssemblyTimeout, UpstreamErrorToolOutputTruncated, UpstreamErrorEmptyResponse:
+			UpstreamErrorActionableTimeout, UpstreamErrorToolAssemblyTimeout, UpstreamErrorToolOutputTruncated, UpstreamErrorEmptyResponse,
+			UpstreamErrorStreamTruncated:
 			return
 		}
 	}
@@ -436,7 +440,7 @@ func (h *Handler) acquireAccountForModel(model, routeKey string, excluded map[st
 func (h *Handler) callKiroAPIWithHealth(account *config.Account, payload *KiroPayload, callback *KiroStreamCallback) error {
 	startedAt := time.Now()
 	err := CallKiroAPI(account, payload, callback)
-	if h != nil && h.pool != nil && account != nil && !isLocalConfigurationError(err) {
+	if h != nil && h.pool != nil && account != nil && !isLocalConfigurationError(err) && !isStreamIntegrityError(err) {
 		h.pool.RecordAccountOutcome(account.ID, time.Since(startedAt), err == nil)
 	}
 	return err

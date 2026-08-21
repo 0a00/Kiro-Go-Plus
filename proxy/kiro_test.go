@@ -32,6 +32,7 @@ func TestParseEventStreamPreservesRepeatedTextDeltas(t *testing.T) {
 			for _, chunk := range tc.chunks {
 				stream.Write(awsEventStreamFrame(t, tc.eventType, map[string]interface{}{tc.field: chunk}))
 			}
+			stream.Write(awsEventStreamFrame(t, "metadataEvent", map[string]interface{}{"stopReason": "end_turn"}))
 
 			var got strings.Builder
 			err := parseEventStream(bytes.NewReader(stream.Bytes()), &KiroStreamCallback{
@@ -291,9 +292,10 @@ func TestParseEventStreamNilCallbackIsNoOp(t *testing.T) {
 }
 
 func TestParseEventStreamNilCallbackFieldsAreNoOp(t *testing.T) {
-	stream := bytes.NewReader(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{
-		"content": "hello",
-	}))
+	stream := bytes.NewReader(bytes.Join([][]byte{
+		awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "hello"}),
+		awsEventStreamFrame(t, "metadataEvent", map[string]interface{}{"stopReason": "end_turn"}),
+	}, nil))
 
 	if err := parseEventStream(stream, &KiroStreamCallback{}); err != nil {
 		t.Fatalf("expected empty callback to be a no-op, got %v", err)
@@ -302,11 +304,12 @@ func TestParseEventStreamNilCallbackFieldsAreNoOp(t *testing.T) {
 
 func TestHandleToolUseEventGeneratesMissingToolUseID(t *testing.T) {
 	var toolUses []KiroToolUse
-	current, err := handleToolUseEvent(map[string]interface{}{
+	pending := &pendingToolUseSet{}
+	err := handleToolUseEvent(map[string]interface{}{
 		"name":  "mcpIdaProMcpStatus",
 		"input": `{"server":"ida-pro-mcp"}`,
 		"stop":  true,
-	}, nil, &KiroStreamCallback{
+	}, pending, &KiroStreamCallback{
 		OnToolUse: func(toolUse KiroToolUse) {
 			toolUses = append(toolUses, toolUse)
 		},
@@ -315,7 +318,7 @@ func TestHandleToolUseEventGeneratesMissingToolUseID(t *testing.T) {
 		t.Fatalf("unexpected tool-use error: %v", err)
 	}
 
-	if current != nil {
+	if !pending.empty() {
 		t.Fatalf("expected stopped tool use to clear current state")
 	}
 	if len(toolUses) != 1 {
@@ -336,25 +339,26 @@ func TestHandleToolUseEventReplacesGeneratedIDWhenRealIDArrives(t *testing.T) {
 			toolUses = append(toolUses, toolUse)
 		},
 	}
+	pending := &pendingToolUseSet{}
 
-	current, err := handleToolUseEvent(map[string]interface{}{
+	err := handleToolUseEvent(map[string]interface{}{
 		"name":  "mcpIdaProMcpStatus",
 		"input": `{"server":`,
-	}, nil, callback)
+	}, pending, callback)
 	if err != nil {
 		t.Fatalf("unexpected first tool-use error: %v", err)
 	}
-	current, err = handleToolUseEvent(map[string]interface{}{
+	err = handleToolUseEvent(map[string]interface{}{
 		"toolUseId": "toolu_real",
 		"name":      "mcpIdaProMcpStatus",
 		"input":     `"ida-pro-mcp"}`,
 		"stop":      true,
-	}, current, callback)
+	}, pending, callback)
 	if err != nil {
 		t.Fatalf("unexpected completed tool-use error: %v", err)
 	}
 
-	if current != nil {
+	if !pending.empty() {
 		t.Fatalf("expected stopped tool use to clear current state")
 	}
 	if len(toolUses) != 1 {
@@ -373,26 +377,27 @@ func TestHandleToolUseEventIgnoresEmptyObjectBeforeArgumentFragments(t *testing.
 	callback := &KiroStreamCallback{OnToolUse: func(toolUse KiroToolUse) {
 		toolUses = append(toolUses, toolUse)
 	}}
+	pending := &pendingToolUseSet{}
 
-	current, err := handleToolUseEvent(map[string]interface{}{
+	err := handleToolUseEvent(map[string]interface{}{
 		"toolUseId": "toolu_fragmented",
 		"name":      "read_file",
 		"input":     map[string]interface{}{},
-	}, nil, callback)
+	}, pending, callback)
 	if err != nil {
 		t.Fatalf("unexpected initial tool-use error: %v", err)
 	}
-	current, err = handleToolUseEvent(map[string]interface{}{
+	err = handleToolUseEvent(map[string]interface{}{
 		"toolUseId": "toolu_fragmented",
 		"name":      "read_file",
 		"input":     `{"path":"README.md"}`,
 		"stop":      true,
-	}, current, callback)
+	}, pending, callback)
 	if err != nil {
 		t.Fatalf("unexpected completed tool-use error: %v", err)
 	}
-	if current != nil || len(toolUses) != 1 {
-		t.Fatalf("expected one completed tool use, current=%+v uses=%d", current, len(toolUses))
+	if !pending.empty() || len(toolUses) != 1 {
+		t.Fatalf("expected one completed tool use, pending=%v uses=%d", pending.order, len(toolUses))
 	}
 	if got := toolUses[0].Input["path"]; got != "README.md" {
 		t.Fatalf("expected valid joined arguments, got %#v", toolUses[0].Input)

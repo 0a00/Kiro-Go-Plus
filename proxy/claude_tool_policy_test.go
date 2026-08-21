@@ -48,6 +48,28 @@ func TestPrepareClaudeToolPolicyDoesNotForceExplanatoryQuestion(t *testing.T) {
 	}
 }
 
+func TestPrepareClaudeToolPolicyDisabledLeavesAutoRequestUnmodified(t *testing.T) {
+	req := &ClaudeRequest{
+		Messages: []ClaudeMessage{{Role: "user", Content: "Please read the file."}},
+		System:   "Client-owned system prompt.",
+		Tools:    []ClaudeTool{{Name: "Write", Description: "Original description"}},
+	}
+	if err := prepareClaudeToolPolicy(req, false); err != nil {
+		t.Fatalf("prepare policy: %v", err)
+	}
+	if req.RequireToolUse || req.AgentToolSteering {
+		t.Fatalf("disabled steering changed request policy: %+v", req)
+	}
+	if strings.Contains(extractSystemPrompt(req.System), agentToolPolicyMarker) {
+		t.Fatal("disabled steering injected a system policy")
+	}
+	payload := ClaudeToKiro(req, false)
+	ctx := payload.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext
+	if ctx == nil || len(ctx.Tools) != 1 || ctx.Tools[0].ToolSpecification.Description != "Original description" {
+		t.Fatalf("disabled steering changed tool descriptions: %+v", ctx)
+	}
+}
+
 func TestPrepareClaudeToolPolicyHonorsRequiredChoice(t *testing.T) {
 	req := &ClaudeRequest{
 		Messages:   []ClaudeMessage{{Role: "user", Content: "Check the workspace"}},
@@ -62,6 +84,9 @@ func TestPrepareClaudeToolPolicyHonorsRequiredChoice(t *testing.T) {
 	}
 	if req.ToolUsePolicy != toolUsePolicyExplicit {
 		t.Fatalf("expected explicit tool policy, got %q", req.ToolUsePolicy)
+	}
+	if !req.AgentToolSteering || !strings.Contains(extractSystemPrompt(req.System), agentToolPolicyMarker) {
+		t.Fatal("explicit tool choice must retain its enforcement when automatic steering is disabled")
 	}
 	if !requiresStrictClaudeToolUse(req) {
 		t.Fatal("explicit tool choice must keep strict tool enforcement")

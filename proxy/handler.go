@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -2209,7 +2210,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 		var credits float64
 		var realInputTokens int
 		var upstreamUsage KiroTokenUsage
-		var truncated bool
+		var upstreamStopReason string
 		var toolUses []KiroToolUse
 		var rawContentBuilder strings.Builder
 		actionableCommitted := false
@@ -2583,9 +2584,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 					messageStartUsage, startInputTokens = resolvePromptCacheUsage(cacheUsage, usage, startInputTokens, cacheProfile)
 				}
 			},
-			OnTruncated: func(string) {
-				truncated = true
-			},
+			OnStopReason: func(reason string) { upstreamStopReason = reason },
 			OnCredits: func(c float64) {
 				credits = c
 			},
@@ -2672,12 +2671,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 			thinkingTokens = estimateApproxTokens(thinkingOutput)
 		}
 		outputTokens = estimateClaudeOutputTokens(outputContent, thinkingOutput, toolUses)
-		stopReason := "end_turn"
-		if truncated {
-			stopReason = "max_tokens"
-		} else if len(toolUses) > 0 {
-			stopReason = "tool_use"
-		}
+		stopReason := mapClaudeStopReason(upstreamStopReason, len(toolUses))
 
 		h.recordSuccessForApiKey(payload.requestContext, apiKeyID, inputTokens, outputTokens, credits)
 		h.pool.RecordSuccess(account.ID)
@@ -2965,7 +2959,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 		var credits float64
 		var realInputTokens int
 		var upstreamUsage KiroTokenUsage
-		var truncated bool
+		var upstreamStopReason string
 
 		callback := &KiroStreamCallback{
 			OnText: func(text string, isThinking bool) {
@@ -2987,9 +2981,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 			OnUsage: func(usage KiroTokenUsage) {
 				upstreamUsage = usage
 			},
-			OnTruncated: func(string) {
-				truncated = true
-			},
+			OnStopReason: func(reason string) { upstreamStopReason = reason },
 			OnCredits: func(c float64) {
 				credits = c
 			},
@@ -3036,12 +3028,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 			thinkingTokens = estimateApproxTokens(rawThinkingContent)
 		}
 		outputTokens = estimateClaudeOutputTokens(finalContent, rawThinkingContent, toolUses)
-		stopReason := "end_turn"
-		if truncated {
-			stopReason = "max_tokens"
-		} else if len(toolUses) > 0 {
-			stopReason = "tool_use"
-		}
+		stopReason := mapClaudeStopReason(upstreamStopReason, len(toolUses))
 
 		h.recordSuccessForApiKey(payload.requestContext, apiKeyID, inputTokens, outputTokens, credits)
 		h.pool.RecordSuccess(account.ID)
@@ -3089,10 +3076,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 			}
 		}
 
-		resp := KiroToClaudeResponse(finalContent, responseThinkingContent, includeEmptyThinkingBlock, toolUses, inputTokens, outputTokens, model)
-		if truncated {
-			resp.StopReason = "max_tokens"
-		}
+		resp := KiroToClaudeResponse(finalContent, responseThinkingContent, includeEmptyThinkingBlock, toolUses, inputTokens, outputTokens, model, upstreamStopReason)
 		resp.Usage.InputTokens = billedClaudeInputTokens(inputTokens, cacheUsage)
 		resp.Usage.ThinkingTokens = thinkingTokens
 		resp.Usage.CacheCreationInputTokens = cacheUsage.CacheCreationInputTokens
@@ -3305,7 +3289,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 		var credits float64
 		var realInputTokens int
 		var upstreamUsage KiroTokenUsage
-		var truncated bool
+		var upstreamStopReason string
 		var rawContentBuilder strings.Builder
 		var rawReasoningBuilder strings.Builder
 		var textBuffer string
@@ -3581,9 +3565,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 			OnUsage: func(usage KiroTokenUsage) {
 				upstreamUsage = usage
 			},
-			OnTruncated: func(string) {
-				truncated = true
-			},
+			OnStopReason: func(reason string) { upstreamStopReason = reason },
 			OnCredits: func(c float64) {
 				credits = c
 			},
@@ -3691,12 +3673,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 			Credits:                  credits,
 		}
 
-		finishReason := "stop"
-		if truncated {
-			finishReason = "length"
-		} else if len(toolCalls) > 0 {
-			finishReason = "tool_calls"
-		}
+		finishReason := mapOpenAIFinishReason(upstreamStopReason, len(toolCalls))
 
 		chunk := map[string]interface{}{
 			"id":      chatID,
@@ -3806,7 +3783,7 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 		var credits float64
 		var realInputTokens int
 		var upstreamUsage KiroTokenUsage
-		var truncated bool
+		var upstreamStopReason string
 
 		callback := &KiroStreamCallback{
 			OnText: func(text string, isThinking bool) {
@@ -3821,10 +3798,10 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 				firstContent.MarkToolOutput()
 				toolUses = append(toolUses, tu)
 			},
-			OnComplete:  func(inTok, outTok int) { inputTokens = inTok; outputTokens = outTok },
-			OnUsage:     func(usage KiroTokenUsage) { upstreamUsage = usage },
-			OnTruncated: func(string) { truncated = true },
-			OnCredits:   func(c float64) { credits = c },
+			OnComplete:   func(inTok, outTok int) { inputTokens = inTok; outputTokens = outTok },
+			OnUsage:      func(usage KiroTokenUsage) { upstreamUsage = usage },
+			OnStopReason: func(reason string) { upstreamStopReason = reason },
+			OnCredits:    func(c float64) { credits = c },
 			OnContextUsage: func(pct float64) {
 				realInputTokens = int(pct * float64(getPayloadContextWindowSize(payload, model)) / 100.0)
 			},
@@ -3892,11 +3869,8 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 		})
 
 		thinkingFormat := config.GetThinkingConfig().OpenAIFormat
-		resp := KiroToOpenAIResponseWithReasoning(finalContent, reasoningContent, toolUses, inputTokens, outputTokens, model, thinkingFormat)
+		resp := KiroToOpenAIResponseWithReasoning(finalContent, reasoningContent, toolUses, inputTokens, outputTokens, model, thinkingFormat, upstreamStopReason)
 		resp["usage"] = buildOpenAIUsageMap(inputTokens, outputTokens, thinkingTokens, cacheUsage)
-		if truncated {
-			setOpenAIResponseFinishReason(resp, "length")
-		}
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		json.NewEncoder(w).Encode(resp)
 		return
@@ -4449,21 +4423,18 @@ func (h *Handler) apiUpdateAccount(w http.ResponseWriter, r *http.Request, id st
 		return
 	}
 
-	// 只更新传入的字段
+	// Build an allow-listed field patch. Config applies it to the latest account
+	// under its lock so this stale HTTP snapshot cannot replace refreshed tokens.
 	oldEnabled := existing.Enabled
+	patch := config.AccountAdminPatch{}
 	if v, ok := updates["enabled"].(bool); ok {
-		existing.Enabled = v
-		if v && !oldEnabled && existing.BanStatus != "" && !strings.EqualFold(existing.BanStatus, "ACTIVE") {
-			existing.BanStatus = "ACTIVE"
-			existing.BanReason = ""
-			existing.BanTime = 0
-		}
+		patch.Enabled = &v
 	}
 	if v, ok := updates["nickname"].(string); ok {
-		existing.Nickname = v
+		patch.Nickname = &v
 	}
 	if v, ok := updates["machineId"].(string); ok {
-		existing.MachineId = v
+		patch.MachineId = &v
 	}
 	if v, ok := updates["weight"].(float64); ok {
 		weight := int(v)
@@ -4472,10 +4443,11 @@ func (h *Handler) apiUpdateAccount(w http.ResponseWriter, r *http.Request, id st
 			json.NewEncoder(w).Encode(map[string]string{"error": "weight must be between 0 and 100"})
 			return
 		}
-		existing.Weight = weight
+		patch.Weight = &weight
 	}
 	if v, ok := updates["priority"].(float64); ok {
-		existing.Priority = int(v)
+		priority := int(v)
+		patch.Priority = &priority
 	}
 	if v, ok := updates["maxConcurrency"].(float64); ok {
 		maxConcurrency := int(v)
@@ -4489,7 +4461,7 @@ func (h *Handler) apiUpdateAccount(w http.ResponseWriter, r *http.Request, id st
 			json.NewEncoder(w).Encode(map[string]string{"error": "maxConcurrency must be <= 1000"})
 			return
 		}
-		existing.MaxConcurrency = maxConcurrency
+		patch.MaxConcurrency = &maxConcurrency
 	}
 	if v, ok := updates["proxyURL"].(string); ok {
 		v = preserveProxyPassword(existing.ProxyURL, v)
@@ -4498,10 +4470,11 @@ func (h *Handler) apiUpdateAccount(w http.ResponseWriter, r *http.Request, id st
 			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 			return
 		}
-		existing.ProxyURL = v
+		patch.ProxyURL = &v
 	}
 
-	if err := config.UpdateAccount(id, *existing); err != nil {
+	updatedAccount, err := config.PatchAccountAdmin(id, patch)
+	if err != nil {
 		w.WriteHeader(500)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
@@ -4509,10 +4482,10 @@ func (h *Handler) apiUpdateAccount(w http.ResponseWriter, r *http.Request, id st
 
 	h.pool.Reload()
 	// 账号从禁用→启用时，自动拉取并缓存模型列表
-	if !oldEnabled && existing.Enabled {
+	if !oldEnabled && updatedAccount.Enabled {
 		h.pool.ClearAccountCooldowns(map[string]bool{id: true})
-		if existing.AccessToken != "" {
-			h.refreshModelCachesAsync([]config.Account{*existing})
+		if updatedAccount.AccessToken != "" {
+			h.refreshModelCachesAsync([]config.Account{updatedAccount})
 		}
 	}
 	json.NewEncoder(w).Encode(map[string]bool{"success": true})
@@ -4999,47 +4972,72 @@ func (h *Handler) apiImportSsoToken(w http.ResponseWriter, r *http.Request) {
 }
 
 type importCredentialsRequest struct {
-	ID            string       `json:"id"`
-	Email         string       `json:"email"`
-	UserID        string       `json:"userId"`
-	AccessToken   string       `json:"accessToken"`
-	RefreshToken  string       `json:"refreshToken"`
-	KiroApiKey    string       `json:"kiroApiKey"`
-	ClientID      string       `json:"clientId"`
-	ClientSecret  string       `json:"clientSecret"`
-	AuthMethod    string       `json:"authMethod"`
-	Provider      string       `json:"provider"`
-	IDP           string       `json:"idp"`
-	Region        string       `json:"region"`
-	AuthRegion    string       `json:"authRegion"`
-	AuthRegionAlt string       `json:"auth_region"`
-	StartUrl      string       `json:"startUrl"`
-	StartUrlAlt   string       `json:"start_url"`
-	ExpiresAt     int64        `json:"expiresAt"`
-	ProfileArn    string       `json:"profileArn"`
-	TokenEndpoint string       `json:"tokenEndpoint"`
-	IssuerURL     string       `json:"issuerUrl"`
-	Scopes        importScopes `json:"scopes"`
-	MachineId     string       `json:"machineId"`
-	Status        string       `json:"status"`
+	ID                string       `json:"id"`
+	Email             string       `json:"email"`
+	Username          string       `json:"username"`
+	PreferredUsername string       `json:"preferred_username"`
+	UPN               string       `json:"upn"`
+	UserID            string       `json:"userId"`
+	UserIDAlt         string       `json:"user_id"`
+	AccessToken       string       `json:"accessToken"`
+	AccessTokenAlt    string       `json:"access_token"`
+	RefreshToken      string       `json:"refreshToken"`
+	RefreshTokenAlt   string       `json:"refresh_token"`
+	KiroApiKey        string       `json:"kiroApiKey"`
+	KiroApiKeyAlt     string       `json:"kiro_api_key"`
+	ClientID          string       `json:"clientId"`
+	ClientIDAlt       string       `json:"client_id"`
+	ClientSecret      string       `json:"clientSecret"`
+	ClientSecretAlt   string       `json:"client_secret"`
+	AuthMethod        string       `json:"authMethod"`
+	AuthMethodAlt     string       `json:"auth_method"`
+	Provider          string       `json:"provider"`
+	IDP               string       `json:"idp"`
+	Region            string       `json:"region"`
+	AuthRegion        string       `json:"authRegion"`
+	AuthRegionAlt     string       `json:"auth_region"`
+	StartUrl          string       `json:"startUrl"`
+	StartUrlAlt       string       `json:"start_url"`
+	ExpiresAt         int64        `json:"expiresAt"`
+	ProfileArn        string       `json:"profileArn"`
+	ProfileArnAlt     string       `json:"profile_arn"`
+	TokenEndpoint     string       `json:"tokenEndpoint"`
+	TokenEndpointAlt  string       `json:"token_endpoint"`
+	IssuerURL         string       `json:"issuerUrl"`
+	IssuerURLAlt      string       `json:"issuer_url"`
+	Scopes            importScopes `json:"scopes"`
+	MachineId         string       `json:"machineId"`
+	MachineIdAlt      string       `json:"machine_id"`
+	Status            string       `json:"status"`
+	Enabled           *bool        `json:"enabled"`
+	Disabled          *bool        `json:"disabled"`
 
 	Credentials *struct {
-		AccessToken   string       `json:"accessToken"`
-		RefreshToken  string       `json:"refreshToken"`
-		KiroApiKey    string       `json:"kiroApiKey"`
-		ClientID      string       `json:"clientId"`
-		ClientSecret  string       `json:"clientSecret"`
-		AuthMethod    string       `json:"authMethod"`
-		Region        string       `json:"region"`
-		AuthRegion    string       `json:"authRegion"`
-		AuthRegionAlt string       `json:"auth_region"`
-		StartUrl      string       `json:"startUrl"`
-		StartUrlAlt   string       `json:"start_url"`
-		ExpiresAt     int64        `json:"expiresAt"`
-		ProfileArn    string       `json:"profileArn"`
-		TokenEndpoint string       `json:"tokenEndpoint"`
-		IssuerURL     string       `json:"issuerUrl"`
-		Scopes        importScopes `json:"scopes"`
+		AccessToken      string       `json:"accessToken"`
+		AccessTokenAlt   string       `json:"access_token"`
+		RefreshToken     string       `json:"refreshToken"`
+		RefreshTokenAlt  string       `json:"refresh_token"`
+		KiroApiKey       string       `json:"kiroApiKey"`
+		KiroApiKeyAlt    string       `json:"kiro_api_key"`
+		ClientID         string       `json:"clientId"`
+		ClientIDAlt      string       `json:"client_id"`
+		ClientSecret     string       `json:"clientSecret"`
+		ClientSecretAlt  string       `json:"client_secret"`
+		AuthMethod       string       `json:"authMethod"`
+		AuthMethodAlt    string       `json:"auth_method"`
+		Region           string       `json:"region"`
+		AuthRegion       string       `json:"authRegion"`
+		AuthRegionAlt    string       `json:"auth_region"`
+		StartUrl         string       `json:"startUrl"`
+		StartUrlAlt      string       `json:"start_url"`
+		ExpiresAt        int64        `json:"expiresAt"`
+		ProfileArn       string       `json:"profileArn"`
+		ProfileArnAlt    string       `json:"profile_arn"`
+		TokenEndpoint    string       `json:"tokenEndpoint"`
+		TokenEndpointAlt string       `json:"token_endpoint"`
+		IssuerURL        string       `json:"issuerUrl"`
+		IssuerURLAlt     string       `json:"issuer_url"`
+		Scopes           importScopes `json:"scopes"`
 	} `json:"credentials"`
 	Subscription *struct {
 		Type  string `json:"type"`
@@ -5185,31 +5183,50 @@ func decodeImportCredentialsRequests(raw []byte) ([]importCredentialsRequest, bo
 	return []importCredentialsRequest{req}, false, nil
 }
 
-func normalizeNestedCredentialImport(req importCredentialsRequest) importCredentialsRequest {
-	if req.Provider == "" {
-		req.Provider = req.IDP
+func firstImportedNonBlank(values ...string) string {
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			return value
+		}
 	}
+	return ""
+}
+
+func normalizeNestedCredentialImport(req importCredentialsRequest) importCredentialsRequest {
+	req.Email = firstImportedNonBlank(req.Email, req.Username, req.PreferredUsername, req.UPN)
+	req.UserID = firstImportedNonBlank(req.UserID, req.UserIDAlt)
+	req.AccessToken = firstImportedNonBlank(req.AccessToken, req.AccessTokenAlt)
+	req.RefreshToken = firstImportedNonBlank(req.RefreshToken, req.RefreshTokenAlt)
+	req.KiroApiKey = firstImportedNonBlank(req.KiroApiKey, req.KiroApiKeyAlt)
+	req.ClientID = firstImportedNonBlank(req.ClientID, req.ClientIDAlt)
+	req.ClientSecret = firstImportedNonBlank(req.ClientSecret, req.ClientSecretAlt)
+	req.AuthMethod = firstImportedNonBlank(req.AuthMethod, req.AuthMethodAlt)
+	req.Provider = firstImportedNonBlank(req.Provider, req.IDP)
+	req.ProfileArn = firstImportedNonBlank(req.ProfileArn, req.ProfileArnAlt)
+	req.TokenEndpoint = firstImportedNonBlank(req.TokenEndpoint, req.TokenEndpointAlt)
+	req.IssuerURL = firstImportedNonBlank(req.IssuerURL, req.IssuerURLAlt)
+	req.MachineId = firstImportedNonBlank(req.MachineId, req.MachineIdAlt)
 	if req.Credentials == nil {
 		return req
 	}
 	creds := req.Credentials
 	if req.AccessToken == "" {
-		req.AccessToken = creds.AccessToken
+		req.AccessToken = firstImportedNonBlank(creds.AccessToken, creds.AccessTokenAlt)
 	}
 	if req.RefreshToken == "" {
-		req.RefreshToken = creds.RefreshToken
+		req.RefreshToken = firstImportedNonBlank(creds.RefreshToken, creds.RefreshTokenAlt)
 	}
 	if req.KiroApiKey == "" {
-		req.KiroApiKey = creds.KiroApiKey
+		req.KiroApiKey = firstImportedNonBlank(creds.KiroApiKey, creds.KiroApiKeyAlt)
 	}
 	if req.ClientID == "" {
-		req.ClientID = creds.ClientID
+		req.ClientID = firstImportedNonBlank(creds.ClientID, creds.ClientIDAlt)
 	}
 	if req.ClientSecret == "" {
-		req.ClientSecret = creds.ClientSecret
+		req.ClientSecret = firstImportedNonBlank(creds.ClientSecret, creds.ClientSecretAlt)
 	}
 	if req.AuthMethod == "" {
-		req.AuthMethod = creds.AuthMethod
+		req.AuthMethod = firstImportedNonBlank(creds.AuthMethod, creds.AuthMethodAlt)
 	}
 	if req.Region == "" {
 		req.Region = creds.Region
@@ -5230,13 +5247,13 @@ func normalizeNestedCredentialImport(req importCredentialsRequest) importCredent
 		req.ExpiresAt = creds.ExpiresAt
 	}
 	if req.ProfileArn == "" {
-		req.ProfileArn = creds.ProfileArn
+		req.ProfileArn = firstImportedNonBlank(creds.ProfileArn, creds.ProfileArnAlt)
 	}
 	if req.TokenEndpoint == "" {
-		req.TokenEndpoint = creds.TokenEndpoint
+		req.TokenEndpoint = firstImportedNonBlank(creds.TokenEndpoint, creds.TokenEndpointAlt)
 	}
 	if req.IssuerURL == "" {
-		req.IssuerURL = creds.IssuerURL
+		req.IssuerURL = firstImportedNonBlank(creds.IssuerURL, creds.IssuerURLAlt)
 	}
 	if req.Scopes == "" {
 		req.Scopes = creds.Scopes
@@ -5288,6 +5305,14 @@ func applyImportedAccountMetadata(account *config.Account, req importCredentials
 		account.UsagePercent = req.Usage.PercentUsed
 		account.LastRefresh = req.Usage.LastUpdated
 	}
+	if req.Enabled != nil {
+		account.Enabled = *req.Enabled
+	} else if req.Disabled != nil {
+		account.Enabled = !*req.Disabled
+		if *req.Disabled {
+			account.BanStatus = "DISABLED"
+		}
+	}
 	switch strings.ToLower(strings.TrimSpace(req.Status)) {
 	case "disabled", "banned", "suspended":
 		account.Enabled = false
@@ -5298,7 +5323,42 @@ func applyImportedAccountMetadata(account *config.Account, req importCredentials
 	}
 }
 
+func credentialImportIdentity(req importCredentialsRequest) string {
+	req = normalizeNestedCredentialImport(req)
+	material := strings.TrimSpace(req.RefreshToken)
+	prefix := "refresh"
+	method := normalizeImportAuthMethod(
+		req.AuthMethod, req.Provider, req.ClientID, req.ClientSecret,
+		req.KiroApiKey, req.TokenEndpoint, req.IssuerURL,
+	)
+	if method == "api_key" {
+		material = firstImportedNonBlank(req.KiroApiKey, req.AccessToken)
+		prefix = "api-key"
+	}
+	if material == "" {
+		return ""
+	}
+	digest := sha256.Sum256([]byte(material))
+	return prefix + ":" + string(digest[:])
+}
+
+func validateCredentialImportBatch(reqs []importCredentialsRequest) error {
+	seen := make(map[string]int, len(reqs))
+	for i, req := range reqs {
+		identity := credentialImportIdentity(req)
+		if identity == "" {
+			continue
+		}
+		if previous, ok := seen[identity]; ok {
+			return fmt.Errorf("accounts %d and %d contain the same credential", previous+1, i+1)
+		}
+		seen[identity] = i
+	}
+	return nil
+}
+
 func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
 	raw, err := io.ReadAll(r.Body)
 	if err != nil {
 		w.WriteHeader(requestBodyErrorStatus(err))
@@ -5316,6 +5376,13 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]string{"error": fmt.Sprintf("batch must contain between 1 and %d accounts", maxCredentialImportBatch)})
 		return
+	}
+	if batch {
+		if err := validateCredentialImportBatch(reqs); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
 	}
 
 	if batch {

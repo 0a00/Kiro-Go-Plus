@@ -141,6 +141,92 @@ func TestApiImportCredentialsUsesUpstreamExpiresAt(t *testing.T) {
 	}
 }
 
+func TestApiImportCredentialsAcceptsLoginHelperSnakeCase(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	defer installCleanAuthClient(t)()
+
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"accessToken":"helper-access","refreshToken":"helper-rotated","expiresIn":3600}`)
+	}))
+	defer fake.Close()
+	oldOIDC := authOidcURL()
+	auth.SetOIDCTokenURLForTest(func(region string) string {
+		if region != "eu-north-1" {
+			t.Errorf("refresh region = %q, want eu-north-1", region)
+		}
+		return fake.URL
+	})
+	defer auth.SetOIDCTokenURLForTest(oldOIDC)
+
+	body := `{
+		"access_token":"helper-old-access",
+		"refresh_token":"helper-refresh",
+		"client_id":"helper-client",
+		"client_secret":"helper-secret",
+		"auth_method":"idc",
+		"region":"eu-north-1",
+		"start_url":"https://example.awsapps.com/start",
+		"profile_arn":"arn:aws:codewhisperer:eu-north-1:123:profile/helper",
+		"username":"helper@example.com",
+		"disabled":false,
+		"type":"kiro"
+	}`
+	rec := httptest.NewRecorder()
+	(&Handler{pool: accountpool.GetPool()}).apiImportCredentials(
+		rec, httptest.NewRequest(http.MethodPost, "/auth/credentials", strings.NewReader(body)),
+	)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("snake_case import status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	accounts := config.GetAccounts()
+	if len(accounts) != 1 {
+		t.Fatalf("account count = %d, want 1", len(accounts))
+	}
+	account := accounts[0]
+	if account.Email != "helper@example.com" || account.AuthMethod != "idc" ||
+		account.ClientID != "helper-client" || account.ClientSecret != "helper-secret" ||
+		account.StartUrl != "https://example.awsapps.com/start" || account.Region != "eu-north-1" || !account.Enabled {
+		t.Fatalf("helper fields were not normalized: %+v", account)
+	}
+}
+
+func TestApiImportCredentialsRejectsDuplicateBatchBeforeRefresh(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	body := `[
+		{"refresh_token":"same-token","client_id":"one","auth_method":"external_idp","token_endpoint":"https://login.microsoftonline.com/t/oauth2/v2.0/token"},
+		{"refreshToken":"same-token","clientId":"two","authMethod":"external_idp","tokenEndpoint":"https://login.microsoftonline.com/t/oauth2/v2.0/token"}
+	]`
+	rec := httptest.NewRecorder()
+	(&Handler{pool: accountpool.GetPool()}).apiImportCredentials(
+		rec, httptest.NewRequest(http.MethodPost, "/auth/credentials", strings.NewReader(body)),
+	)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "same credential") {
+		t.Fatalf("duplicate batch status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if accounts := config.GetAccounts(); len(accounts) != 0 {
+		t.Fatalf("duplicate batch persisted accounts: %+v", accounts)
+	}
+}
+
+func TestApiImportCredentialsRejectsOversizedBody(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	rec := httptest.NewRecorder()
+	(&Handler{pool: accountpool.GetPool()}).apiImportCredentials(
+		rec,
+		httptest.NewRequest(http.MethodPost, "/auth/credentials", strings.NewReader(strings.Repeat(" ", int(maxRequestBodyBytes)+1))),
+	)
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized import status = %d, want 413", rec.Code)
+	}
+}
+
 func TestApiImportCredentialsAcceptsNestedPowerExport(t *testing.T) {
 	cfgFile := t.TempDir() + "/config.json"
 	if err := config.Init(cfgFile); err != nil {

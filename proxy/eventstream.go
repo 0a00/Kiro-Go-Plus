@@ -27,6 +27,7 @@ const (
 	EventStreamInvalidHeaders     EventStreamErrorKind = "invalid_headers"
 	EventStreamInvalidPayload     EventStreamErrorKind = "invalid_payload"
 	EventStreamIncompleteToolUse  EventStreamErrorKind = "incomplete_tool_use"
+	EventStreamIncompleteResponse EventStreamErrorKind = "incomplete_response"
 )
 
 // EventStreamError is returned for malformed or incomplete upstream frames.

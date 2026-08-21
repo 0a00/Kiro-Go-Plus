@@ -51,3 +51,26 @@ func TestToolAssemblyMonitorStopsAfterCompleteTool(t *testing.T) {
 		t.Fatalf("completed tool assembly duration was not retained: elapsed=%s ok=%v", elapsed, ok)
 	}
 }
+
+func TestToolAssemblyMonitorTracksInterleavedToolsIndependently(t *testing.T) {
+	timedOut := make(chan toolAssemblySnapshot, 1)
+	callback, monitor := wrapToolAssemblyMonitor(&KiroStreamCallback{}, 40*time.Millisecond, func(snapshot toolAssemblySnapshot) {
+		timedOut <- snapshot
+	})
+	defer monitor.Stop()
+
+	callback.OnToolUseStart("toolu_a", "first")
+	callback.OnToolUseDelta("toolu_a", `{"value":`)
+	callback.OnToolUseStart("toolu_b", "second")
+	callback.OnToolUseDelta("toolu_b", `{"value":2}`)
+	callback.OnToolUseStop("toolu_b")
+
+	select {
+	case snapshot := <-timedOut:
+		if snapshot.ToolUseID != "toolu_a" || snapshot.Name != "first" || snapshot.ArgumentBytes == 0 {
+			t.Fatalf("wrong interleaved tool timed out: %+v", snapshot)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("unfinished first tool was lost when second tool completed")
+	}
+}

@@ -47,6 +47,7 @@ func TestGuardedCallKeepsLearnedAutoEndpointAffinity(t *testing.T) {
 		runtimeRequests.Add(1)
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "runtime"}))
+		_, _ = w.Write(awsEventStreamFrame(t, "metadataEvent", map[string]interface{}{"stopReason": "end_turn"}))
 	}))
 	defer runtimeServer.Close()
 
@@ -55,6 +56,7 @@ func TestGuardedCallKeepsLearnedAutoEndpointAffinity(t *testing.T) {
 		codeWhispererRequests.Add(1)
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "preferred"}))
+		_, _ = w.Write(awsEventStreamFrame(t, "metadataEvent", map[string]interface{}{"stopReason": "end_turn"}))
 	}))
 	defer codeWhispererServer.Close()
 
@@ -104,6 +106,7 @@ func TestRuntimeEndpointUsesRegionContentTypeTargetAndProfile(t *testing.T) {
 		modelID = payload.ConversationState.CurrentMessage.UserInputMessage.ModelID
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "ok"}))
+		_, _ = w.Write(awsEventStreamFrame(t, "metadataEvent", map[string]interface{}{"stopReason": "end_turn"}))
 	}))
 	defer server.Close()
 
@@ -803,6 +806,7 @@ func TestCallKiroAPIFallsBackAfterRuntimeQuota(t *testing.T) {
 		}
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "ok"}))
+		_, _ = w.Write(awsEventStreamFrame(t, "metadataEvent", map[string]interface{}{"stopReason": "end_turn"}))
 	}))
 	defer server.Close()
 
@@ -845,6 +849,7 @@ func TestCallKiroAPIFallsBackAfterEndpointRateLimit(t *testing.T) {
 		}
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "ok"}))
+		_, _ = w.Write(awsEventStreamFrame(t, "metadataEvent", map[string]interface{}{"stopReason": "end_turn"}))
 	}))
 	defer server.Close()
 

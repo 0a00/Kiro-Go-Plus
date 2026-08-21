@@ -817,6 +817,92 @@ func TestBatchAccountStatusAndInfoUpdatesPreserveCredentials(t *testing.T) {
 	}
 }
 
+func TestUpdateAccountRegionValidatesAndPreservesCredentials(t *testing.T) {
+	if err := Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	account := Account{
+		ID: "region-account", AuthMethod: "api_key", KiroApiKey: "ksk_test",
+		AccessToken: "ksk_test", Region: "us-east-1", Enabled: true,
+	}
+	if err := AddAccount(account); err != nil {
+		t.Fatalf("add account: %v", err)
+	}
+	if err := UpdateAccountRegion(account.ID, "evil.example/region"); err == nil {
+		t.Fatal("malformed region was accepted")
+	}
+	if err := UpdateAccountRegion(account.ID, "EU-CENTRAL-1"); err != nil {
+		t.Fatalf("update region: %v", err)
+	}
+	accounts := GetAccounts()
+	if len(accounts) != 1 || accounts[0].Region != "eu-central-1" ||
+		accounts[0].KiroApiKey != account.KiroApiKey || accounts[0].AccessToken != account.AccessToken {
+		t.Fatalf("region update changed unrelated fields: %+v", accounts)
+	}
+}
+
+func TestAccountFieldPatchesPreserveRefreshedCredentials(t *testing.T) {
+	if err := Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	if err := AddAccount(Account{
+		ID: "patched-account", AccessToken: "stale-access", RefreshToken: "stale-refresh",
+		ExpiresAt: 100, Enabled: true,
+	}); err != nil {
+		t.Fatalf("add account: %v", err)
+	}
+	// Simulate a handler holding the original account snapshot while token
+	// refresh persists newer credentials.
+	stale := GetAccounts()[0]
+	if err := UpdateAccountCredentials(stale.ID, "fresh-access", "fresh-refresh", 200, "fresh-profile"); err != nil {
+		t.Fatalf("refresh credentials: %v", err)
+	}
+
+	enabled := false
+	status := "BANNED"
+	reason := "automatic test ban"
+	banTime := int64(123)
+	statusAccount, err := PatchAccountStatus(stale.ID, AccountStatusPatch{
+		Enabled: &enabled, BanStatus: &status, BanReason: &reason, BanTime: &banTime,
+	})
+	if err != nil {
+		t.Fatalf("patch status: %v", err)
+	}
+	nickname := "updated"
+	weight := 4
+	adminAccount, err := PatchAccountAdmin(stale.ID, AccountAdminPatch{Nickname: &nickname, Weight: &weight})
+	if err != nil {
+		t.Fatalf("patch admin fields: %v", err)
+	}
+	for _, account := range []Account{statusAccount, adminAccount, GetAccounts()[0]} {
+		if account.AccessToken != "fresh-access" || account.RefreshToken != "fresh-refresh" ||
+			account.ExpiresAt != 200 || account.ProfileArn != "fresh-profile" {
+			t.Fatalf("field patch replaced refreshed credentials: %+v", account)
+		}
+	}
+	if adminAccount.Enabled || adminAccount.BanStatus != "BANNED" || adminAccount.Nickname != nickname || adminAccount.Weight != weight {
+		t.Fatalf("field patches did not apply: %+v", adminAccount)
+	}
+}
+
+func TestClearAccountBanUsesPersistedReasonForAutoEnable(t *testing.T) {
+	if err := Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	if err := AddAccount(Account{
+		ID: "manual-disabled", Enabled: false, BanStatus: "DISABLED", BanReason: "disabled by operator",
+	}); err != nil {
+		t.Fatalf("add account: %v", err)
+	}
+	account, err := ClearAccountBan("manual-disabled", "credentials were revoked")
+	if err != nil {
+		t.Fatalf("clear ban: %v", err)
+	}
+	if account.Enabled || account.BanStatus != "ACTIVE" || account.BanReason != "" || account.BanTime != 0 {
+		t.Fatalf("manual disable was unexpectedly auto-enabled: %+v", account)
+	}
+}
+
 func TestAccountInfoBatchPreservesSubscriptionOnEmptyResponse(t *testing.T) {
 	if err := Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatalf("init config: %v", err)

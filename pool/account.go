@@ -164,6 +164,21 @@ func (p *AccountPool) Reload() {
 	}
 }
 
+// UpdateAccountRegion refreshes the pool's routing copy after the field has
+// been persisted by config.UpdateAccountRegion.
+func (p *AccountPool) UpdateAccountRegion(id, region string) {
+	if p == nil || id == "" || region == "" {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	index, ok := p.accountIndex[id]
+	if !ok || index < 0 || index >= len(p.accounts) {
+		return
+	}
+	p.accounts[index].Region = region
+}
+
 // GetNext 获取下一个可用账号（加权轮询）
 func (p *AccountPool) GetNext() *config.Account {
 	return p.GetNextExcluding(nil)

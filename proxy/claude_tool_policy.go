@@ -26,6 +26,7 @@ func prepareClaudeToolPolicy(req *ClaudeRequest, enforceWorkspaceActions bool) e
 	req.RequireToolUse = false
 	req.RequiredToolName = ""
 	req.ToolUsePolicy = ""
+	req.AgentToolSteering = enforceWorkspaceActions
 
 	mode, name, err := parseClaudeToolChoice(req.ToolChoice)
 	if err != nil {
@@ -34,6 +35,7 @@ func prepareClaudeToolPolicy(req *ClaudeRequest, enforceWorkspaceActions bool) e
 	switch mode {
 	case "none":
 		req.Tools = nil
+		req.AgentToolSteering = false
 		return nil
 	case "any":
 		if len(req.Tools) == 0 {
@@ -41,6 +43,7 @@ func prepareClaudeToolPolicy(req *ClaudeRequest, enforceWorkspaceActions bool) e
 		}
 		req.RequireToolUse = true
 		req.ToolUsePolicy = toolUsePolicyExplicit
+		req.AgentToolSteering = true
 	case "tool":
 		if !claudeToolExists(req.Tools, name) {
 			return fmt.Errorf("tool_choice references unknown tool %q", name)
@@ -48,13 +51,14 @@ func prepareClaudeToolPolicy(req *ClaudeRequest, enforceWorkspaceActions bool) e
 		req.RequireToolUse = true
 		req.RequiredToolName = name
 		req.ToolUsePolicy = toolUsePolicyExplicit
+		req.AgentToolSteering = true
 	}
 
 	if enforceWorkspaceActions && !req.RequireToolUse && shouldRequireWorkspaceTool(req) {
 		req.RequireToolUse = true
 		req.ToolUsePolicy = toolUsePolicyInferred
 	}
-	if len(req.Tools) == 0 {
+	if len(req.Tools) == 0 || !req.AgentToolSteering {
 		return nil
 	}
 	req.System = appendClaudeSystemText(req.System, buildClaudeAgentToolPolicy(req))

@@ -307,6 +307,7 @@ type KiroPayload struct {
 	toolUsePolicy           string
 	tokenRefreshMu          sync.Mutex
 	tokenRefreshAttempts    map[string]int
+	apiKeyRegionAttempts    map[string]int
 	streamMetricsMu         sync.Mutex
 	streamMetricsEnabled    bool
 	streamMetricsStartedAt  time.Time
@@ -514,6 +515,29 @@ func (p *KiroPayload) takeTokenRefreshAttempt(account *config.Account) bool {
 	return true
 }
 
+func (p *KiroPayload) takeAPIKeyRegionAttempt(account *config.Account) bool {
+	if p == nil || account == nil {
+		return false
+	}
+	key := strings.TrimSpace(account.ID)
+	if key == "" {
+		key = strings.TrimSpace(account.CredentialFingerprint)
+	}
+	if key == "" {
+		key = strings.Join([]string{strings.TrimSpace(account.AuthMethod), strings.TrimSpace(account.Email), strings.TrimSpace(account.MachineId)}, "|")
+	}
+	p.tokenRefreshMu.Lock()
+	defer p.tokenRefreshMu.Unlock()
+	if p.apiKeyRegionAttempts == nil {
+		p.apiKeyRegionAttempts = make(map[string]int)
+	}
+	if p.apiKeyRegionAttempts[key] >= 1 {
+		return false
+	}
+	p.apiKeyRegionAttempts[key]++
+	return true
+}
+
 type KiroUserInputMessage struct {
 	Content                 string                   `json:"content"`
 	ModelID                 string                   `json:"modelId,omitempty"`
@@ -596,6 +620,7 @@ type KiroStreamCallback struct {
 	OnError           func(err error)
 	OnCredits         func(credits float64)
 	OnContextUsage    func(percentage float64)
+	OnStopReason      func(reason string)
 	detailTrace       *requestDetailTrace
 	detailToolNameMap map[string]string
 }
@@ -1054,6 +1079,9 @@ endpointLoop:
 				} else {
 					sharedUpstreamHealth.endpointSuccess(endpointCircuitKey, time.Since(attemptStartedAt))
 				}
+				if handled, retryErr := retryAfterAPIKeyRegionRecovery(requestContext, account, payload, callback, lastErr, false); handled {
+					return retryErr
+				}
 				if upstreamErr, ok := asUpstreamError(lastErr); ok && upstreamErr.RefreshToken &&
 					payload != nil && payload.takeTokenRefreshAttempt(account) && !isKiroAPIKeyAccount(account) {
 					if refreshErr := sharedTokenRefreshCoordinator.RefreshContext(requestContext, account, true); refreshErr == nil {
@@ -1112,12 +1140,17 @@ endpointLoop:
 					err = classifyTransportError(ep.Name, context.DeadlineExceeded)
 				} else {
 					var streamErr *EventStreamError
-					if errors.As(err, &streamErr) && streamErr.Kind == EventStreamIncompleteToolUse {
-						truncatedErr := newToolOutputTruncatedError(ep.Name, streamErr)
-						allowRetry := payload != nil && payload.recordToolTruncation(streamErr.ArgumentBytes, streamErr.FragmentCount, !meaningfulGate.hasActionableOutput())
-						truncatedErr.RetryAcrossEndpoints = allowRetry
-						truncatedErr.RetryAcrossAccounts = allowRetry
-						err = truncatedErr
+					if errors.As(err, &streamErr) {
+						switch streamErr.Kind {
+						case EventStreamIncompleteToolUse:
+							truncatedErr := newToolOutputTruncatedError(ep.Name, streamErr)
+							allowRetry := payload != nil && payload.recordToolTruncation(streamErr.ArgumentBytes, streamErr.FragmentCount, !meaningfulGate.hasActionableOutput())
+							truncatedErr.RetryAcrossEndpoints = allowRetry
+							truncatedErr.RetryAcrossAccounts = allowRetry
+							err = truncatedErr
+						case EventStreamIncompleteResponse:
+							err = newStreamTruncatedError(ep.Name, streamErr)
+						}
 					}
 				}
 				if _, ok := asUpstreamError(err); !ok {
@@ -1144,6 +1177,9 @@ endpointLoop:
 				} else {
 					lastCircuitError = err
 					sharedUpstreamHealth.endpointFailure(endpointCircuitKey, err, time.Since(attemptStartedAt))
+				}
+				if handled, retryErr := retryAfterAPIKeyRegionRecovery(requestContext, account, payload, callback, lastErr, meaningfulGate.hasEmittedOutput()); handled {
+					return retryErr
 				}
 				if payload != nil && payload.attemptBudget.expired() && requestContext.Err() == nil {
 					return newRetryBudgetError(payload.attemptBudget)
@@ -1207,7 +1243,7 @@ func isRetryablePreOutputStreamError(err error, gate *meaningfulStreamCallback) 
 		return false
 	}
 	upstreamErr, ok := asUpstreamError(err)
-	return ok && upstreamErr.Kind == UpstreamErrorTransient && upstreamErr.RetryAcrossEndpoints
+	return ok && (upstreamErr.Kind == UpstreamErrorTransient || upstreamErr.Kind == UpstreamErrorStreamTruncated) && upstreamErr.RetryAcrossEndpoints
 }
 
 func waitForPreOutputStreamRetry(ctx context.Context, delay time.Duration) error {
@@ -1264,10 +1300,20 @@ func parseEventStream(body io.Reader, callback *KiroStreamCallback) error {
 	// Read directly without bufio to avoid buffering latency in streaming responses.
 	var tokenUsage KiroTokenUsage
 	var totalCredits float64
-	var currentToolUse *toolUseState
+	pendingToolUses := &pendingToolUseSet{}
 	var sawOutput bool
 	var sawCompletionSignal bool
 	var recoveredToolUse bool
+	var sawToolUse bool
+	originalOnToolUse := callback.OnToolUse
+	trackedCallback := *callback
+	trackedCallback.OnToolUse = func(toolUse KiroToolUse) {
+		sawToolUse = true
+		if originalOnToolUse != nil {
+			originalOnToolUse(toolUse)
+		}
+	}
+	callback = &trackedCallback
 
 	for {
 		frame, err := readEventStreamFrame(body)
@@ -1275,14 +1321,14 @@ func parseEventStream(body io.Reader, callback *KiroStreamCallback) error {
 			break
 		}
 		if err != nil {
-			if recoverCompleteToolUseWithoutStop(currentToolUse, callback, err) {
-				currentToolUse = nil
+			recovered := pendingToolUses.recoverCompletePrefix(callback, err)
+			if recovered > 0 && pendingToolUses.empty() {
 				recoveredToolUse = true
 				break
 			}
 			var streamErr *EventStreamError
-			if currentToolUse != nil && errors.As(err, &streamErr) && streamErr.Kind == EventStreamTruncated {
-				return incompleteToolUseStreamError(currentToolUse, err)
+			if state := pendingToolUses.first(); state != nil && errors.As(err, &streamErr) && streamErr.Kind == EventStreamTruncated {
+				return incompleteToolUseStreamError(state, err)
 			}
 			return err
 		}
@@ -1331,7 +1377,7 @@ func parseEventStream(body io.Reader, callback *KiroStreamCallback) error {
 				Cause:   err,
 			}
 		}
-		toolEvent := isToolUseEventPayload(eventType, event, currentToolUse)
+		toolEvent := isToolUseEventPayload(eventType, event, pendingToolUses.latest())
 		if eventType == "" && !toolEvent {
 			return &EventStreamError{Kind: EventStreamInvalidHeaders, Message: "missing :event-type header"}
 		}
@@ -1349,8 +1395,7 @@ func parseEventStream(body io.Reader, callback *KiroStreamCallback) error {
 				event["stop"] = true
 			}
 			sawOutput = true
-			currentToolUse, err = handleToolUseEvent(event, currentToolUse, callback)
-			if err != nil {
+			if err = handleToolUseEvent(event, pendingToolUses, callback); err != nil {
 				return err
 			}
 			continue
@@ -1373,8 +1418,7 @@ func parseEventStream(body io.Reader, callback *KiroStreamCallback) error {
 			}
 		case "meteringEvent":
 			sawCompletionSignal = true
-			if recoverCompleteToolUseWithoutStop(currentToolUse, callback, fmt.Errorf("%s completion signal", eventType)) {
-				currentToolUse = nil
+			if pendingToolUses.recoverCompletePrefix(callback, fmt.Errorf("%s completion signal", eventType)) > 0 {
 				recoveredToolUse = true
 			}
 			if usage, ok := event["usage"].(float64); ok {
@@ -1382,8 +1426,7 @@ func parseEventStream(body io.Reader, callback *KiroStreamCallback) error {
 			}
 		case "contextUsageEvent":
 			sawCompletionSignal = true
-			if recoverCompleteToolUseWithoutStop(currentToolUse, callback, fmt.Errorf("%s completion signal", eventType)) {
-				currentToolUse = nil
+			if pendingToolUses.recoverCompletePrefix(callback, fmt.Errorf("%s completion signal", eventType)) > 0 {
 				recoveredToolUse = true
 			}
 			if pct, ok := event["contextUsagePercentage"].(float64); ok {
@@ -1391,19 +1434,34 @@ func parseEventStream(body io.Reader, callback *KiroStreamCallback) error {
 					callback.OnContextUsage(pct)
 				}
 			}
+		case "metadataEvent":
+			if reason := firstStringField(event, "stopReason", "stop_reason"); reason != "" {
+				sawCompletionSignal = true
+				if pendingToolUses.recoverCompletePrefix(callback, fmt.Errorf("%s completion signal", eventType)) > 0 {
+					recoveredToolUse = true
+				}
+				if callback.OnStopReason != nil {
+					callback.OnStopReason(reason)
+				}
+			}
 		}
 	}
 
-	if currentToolUse != nil {
-		if !recoverCompleteToolUseWithoutStop(currentToolUse, callback, io.EOF) {
-			return incompleteToolUseStreamError(currentToolUse, io.EOF)
+	if state := pendingToolUses.first(); state != nil {
+		if pendingToolUses.recoverCompletePrefix(callback, io.EOF) > 0 {
+			recoveredToolUse = true
 		}
-		currentToolUse = nil
-		recoveredToolUse = true
+		if state = pendingToolUses.first(); state != nil {
+			return incompleteToolUseStreamError(state, io.EOF)
+		}
 	}
 
-	if sawOutput && !sawCompletionSignal && !recoveredToolUse && callback.OnTruncated != nil {
-		callback.OnTruncated("stream ended without metering or context completion event")
+	if sawOutput && !sawCompletionSignal && !recoveredToolUse && !sawToolUse {
+		const reason = "stream ended without a stop reason or completion event"
+		if callback.OnTruncated != nil {
+			callback.OnTruncated(reason)
+		}
+		return &EventStreamError{Kind: EventStreamIncompleteResponse, Message: reason}
 	}
 
 	if callback.OnCredits != nil && totalCredits > 0 {
@@ -1662,6 +1720,120 @@ type toolUseState struct {
 	FragmentCount int
 	GeneratedID   bool
 	StreamStarted bool
+	Stopped       bool
+}
+
+// pendingToolUseSet keeps concurrent tool calls separate while preserving the
+// order in which the upstream introduced them. Completed calls are emitted
+// from the head of the order, so interleaved stop frames cannot reorder tools.
+type pendingToolUseSet struct {
+	byID   map[string]*toolUseState
+	order  []string
+	lastID string
+}
+
+func (p *pendingToolUseSet) empty() bool {
+	return p == nil || len(p.order) == 0
+}
+
+func (p *pendingToolUseSet) get(id string) *toolUseState {
+	if p == nil || p.byID == nil {
+		return nil
+	}
+	return p.byID[id]
+}
+
+func (p *pendingToolUseSet) first() *toolUseState {
+	if p == nil || len(p.order) == 0 {
+		return nil
+	}
+	return p.get(p.order[0])
+}
+
+func (p *pendingToolUseSet) latest() *toolUseState {
+	if p == nil {
+		return nil
+	}
+	return p.get(p.lastID)
+}
+
+func (p *pendingToolUseSet) add(state *toolUseState) {
+	if p == nil || state == nil {
+		return
+	}
+	if p.byID == nil {
+		p.byID = make(map[string]*toolUseState)
+	}
+	p.byID[state.ToolUseID] = state
+	p.order = append(p.order, state.ToolUseID)
+	p.lastID = state.ToolUseID
+}
+
+func (p *pendingToolUseSet) rekey(state *toolUseState, newID string) {
+	if p == nil || state == nil || newID == "" || state.ToolUseID == newID {
+		return
+	}
+	oldID := state.ToolUseID
+	delete(p.byID, oldID)
+	for index, id := range p.order {
+		if id == oldID {
+			p.order[index] = newID
+			break
+		}
+	}
+	state.ToolUseID = newID
+	state.GeneratedID = false
+	p.byID[newID] = state
+	if p.lastID == oldID {
+		p.lastID = newID
+	}
+}
+
+func (p *pendingToolUseSet) removeFirst() {
+	if p == nil || len(p.order) == 0 {
+		return
+	}
+	id := p.order[0]
+	delete(p.byID, id)
+	p.order = p.order[1:]
+	if p.lastID == id {
+		p.lastID = ""
+		if len(p.order) > 0 {
+			p.lastID = p.order[len(p.order)-1]
+		}
+	}
+}
+
+func (p *pendingToolUseSet) flushStoppedPrefix(callback *KiroStreamCallback) error {
+	for state := p.first(); state != nil && state.Stopped; state = p.first() {
+		if err := finishToolUse(state, callback); err != nil {
+			return err
+		}
+		p.removeFirst()
+	}
+	return nil
+}
+
+func (p *pendingToolUseSet) recoverCompletePrefix(callback *KiroStreamCallback, cause error) int {
+	recovered := 0
+	for state := p.first(); state != nil; state = p.first() {
+		if !state.Stopped && !toolUseArgumentsComplete(state) {
+			break
+		}
+		if err := finishToolUse(state, callback); err != nil {
+			break
+		}
+		p.removeFirst()
+		recovered++
+		if !state.Stopped {
+			reason := "clean EOF"
+			if cause != nil && cause != io.EOF {
+				reason = cause.Error()
+			}
+			logger.Warnf("[KiroAPI] Recovered complete tool use %q without stop marker (%d argument bytes, %s)", state.Name, state.InputBuffer.Len(), reason)
+		}
+	}
+	return recovered
 }
 
 var toolUseEventTypeNormalizer = strings.NewReplacer("_", "", "-", "", ".", "")
@@ -1688,51 +1860,53 @@ func toolUseEventSignalsStop(eventType string) bool {
 		strings.Contains(normalizedType, "toolusecomplete")
 }
 
-func handleToolUseEvent(event map[string]interface{}, current *toolUseState, callback *KiroStreamCallback) (*toolUseState, error) {
+func handleToolUseEvent(event map[string]interface{}, pending *pendingToolUseSet, callback *KiroStreamCallback) error {
+	if pending == nil {
+		return &EventStreamError{Kind: EventStreamInvalidPayload, Message: "tool-use state is unavailable"}
+	}
 	toolUseID := firstStringField(event, "toolUseId", "toolUseID", "tool_use_id", "id")
 	name := firstStringField(event, "name", "toolName", "tool_name")
 	isStop := firstBoolField(event, "stop", "isStop", "done")
 	created := false
+	var current *toolUseState
 
-	if toolUseID != "" && name != "" {
+	switch {
+	case toolUseID != "":
+		current = pending.get(toolUseID)
 		if current == nil {
-			current = &toolUseState{ToolUseID: toolUseID, Name: name}
-			created = true
-		} else if current.ToolUseID != toolUseID {
-			if current.GeneratedID && current.Name == name {
-				current.ToolUseID = toolUseID
-				current.GeneratedID = false
-			} else {
-				return nil, &EventStreamError{
-					Kind:    EventStreamIncompleteToolUse,
-					Message: fmt.Sprintf("tool %q was replaced before its stop marker", current.Name),
-				}
+			latest := pending.latest()
+			if latest != nil && latest.GeneratedID && (name == "" || latest.Name == name) {
+				pending.rekey(latest, toolUseID)
+				current = latest
 			}
 		}
-	} else if name != "" && current == nil {
+		if current == nil && name != "" {
+			current = &toolUseState{ToolUseID: toolUseID, Name: name}
+			pending.add(current)
+			created = true
+		}
+	case pending.latest() != nil:
+		current = pending.latest()
+		if name != "" && current.Name != name {
+			current.Stopped = true
+			if err := pending.flushStoppedPrefix(callback); err != nil {
+				return err
+			}
+			current = &toolUseState{ToolUseID: "toolu_" + uuid.New().String(), Name: name, GeneratedID: true}
+			pending.add(current)
+			created = true
+		}
+	case name != "":
 		current = &toolUseState{ToolUseID: "toolu_" + uuid.New().String(), Name: name, GeneratedID: true}
+		pending.add(current)
 		created = true
-	} else if name != "" && current != nil && current.Name != name {
-		return nil, &EventStreamError{
-			Kind:    EventStreamIncompleteToolUse,
-			Message: fmt.Sprintf("tool %q was replaced by %q before its stop marker", current.Name, name),
-		}
 	}
-	if current != nil && toolUseID != "" && current.GeneratedID {
-		current.ToolUseID = toolUseID
-		current.GeneratedID = false
-	}
-	if current != nil && toolUseID != "" && !current.GeneratedID && current.ToolUseID != "" && current.ToolUseID != toolUseID {
-		return nil, &EventStreamError{
-			Kind:    EventStreamIncompleteToolUse,
-			Message: fmt.Sprintf("tool %q received input for unexpected id %q", current.Name, toolUseID),
-		}
-	}
+
 	if current == nil && isStop {
-		return nil, nil
+		return nil
 	}
 	if current == nil {
-		return nil, &EventStreamError{
+		return &EventStreamError{
 			Kind:    EventStreamInvalidPayload,
 			Message: "toolUseEvent is missing a tool name",
 		}
@@ -1772,14 +1946,26 @@ func handleToolUseEvent(event map[string]interface{}, current *toolUseState, cal
 		}
 	}
 
-	if isStop && current != nil {
-		if err := finishToolUse(current, callback); err != nil {
-			return nil, err
+	if isStop {
+		current.Stopped = true
+		if err := pending.flushStoppedPrefix(callback); err != nil {
+			return err
 		}
-		return nil, nil
 	}
 
-	return current, nil
+	return nil
+}
+
+func toolUseArgumentsComplete(state *toolUseState) bool {
+	if state == nil || strings.TrimSpace(state.Name) == "" {
+		return false
+	}
+	rawArguments := strings.TrimSpace(state.InputBuffer.String())
+	if rawArguments == "" {
+		return false
+	}
+	var input map[string]interface{}
+	return json.Unmarshal([]byte(rawArguments), &input) == nil && input != nil
 }
 
 func incompleteToolUseStreamError(state *toolUseState, cause error) *EventStreamError {

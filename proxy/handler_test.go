@@ -1506,6 +1506,7 @@ func TestClaudeNonStreamRetriesNextAccountAfterPreResponseFailure(t *testing.T) 
 		_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{
 			"content": "retried successfully",
 		}))
+		_, _ = w.Write(awsEventStreamFrame(t, "metadataEvent", map[string]interface{}{"stopReason": "end_turn"}))
 	}))
 	defer server.Close()
 
@@ -1599,6 +1600,7 @@ func TestClaudeNonStreamDisablesSuspendedAccountsAndKeepsTrying(t *testing.T) {
 		_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{
 			"content": "usable account",
 		}))
+		_, _ = w.Write(awsEventStreamFrame(t, "metadataEvent", map[string]interface{}{"stopReason": "end_turn"}))
 	}))
 	defer server.Close()
 	defer swapKiroEndpointsForTest(t, server)()

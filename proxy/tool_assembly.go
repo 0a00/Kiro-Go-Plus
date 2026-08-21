@@ -17,19 +17,23 @@ type toolAssemblyMonitor struct {
 	mu           sync.Mutex
 	timeout      time.Duration
 	onTimeout    func(toolAssemblySnapshot)
-	timer        *time.Timer
-	generation   uint64
-	active       bool
-	startedAt    time.Time
-	toolUseID    string
-	name         string
-	bytes        int
-	fragments    int
+	active       map[string]*toolAssemblyActive
+	nextGen      uint64
 	timedOut     *toolAssemblySnapshot
 	maxElapsed   time.Duration
 	hasElapsed   bool
 	maxBytes     int
 	maxFragments int
+}
+
+type toolAssemblyActive struct {
+	toolUseID  string
+	name       string
+	startedAt  time.Time
+	bytes      int
+	fragments  int
+	generation uint64
+	timer      *time.Timer
 }
 
 func wrapToolAssemblyMonitor(target *KiroStreamCallback, timeout time.Duration, onTimeout func(toolAssemblySnapshot)) (*KiroStreamCallback, *toolAssemblyMonitor) {
@@ -75,35 +79,80 @@ func (m *toolAssemblyMonitor) start(toolUseID, name string) {
 	if m == nil {
 		return
 	}
-	now := time.Now()
 	m.mu.Lock()
-	if m.active && m.toolUseID == "" {
-		m.toolUseID = toolUseID
-		m.name = name
-		m.bytes = 0
-		m.fragments = 0
-		m.mu.Unlock()
+	defer m.mu.Unlock()
+	if m.timedOut != nil {
 		return
 	}
-	if m.active {
-		m.recordElapsedLocked(now)
+	if m.active == nil {
+		m.active = make(map[string]*toolAssemblyActive)
 	}
-	m.stopTimerLocked()
-	m.generation++
-	generation := m.generation
-	m.active = true
-	m.startedAt = now
-	m.toolUseID = toolUseID
-	m.name = name
-	m.bytes = 0
-	m.fragments = 0
-	m.timedOut = nil
-	if m.timeout > 0 {
-		m.timer = time.AfterFunc(m.timeout, func() {
-			m.fire(generation)
-		})
+	if existing := m.active[toolUseID]; existing != nil {
+		if name != "" {
+			existing.name = name
+		}
+		return
 	}
-	m.mu.Unlock()
+	if toolUseID != "" {
+		if placeholder := m.active[""]; placeholder != nil {
+			delete(m.active, "")
+			if placeholder.timer != nil {
+				placeholder.timer.Stop()
+			}
+			placeholder.toolUseID = toolUseID
+			placeholder.name = name
+			m.active[toolUseID] = placeholder
+			m.armLocked(placeholder)
+			return
+		}
+	}
+	m.addActiveLocked(toolUseID, name, time.Now())
+}
+
+func (m *toolAssemblyMonitor) addActiveLocked(toolUseID, name string, startedAt time.Time) *toolAssemblyActive {
+	if m.active == nil {
+		m.active = make(map[string]*toolAssemblyActive)
+	}
+	state := &toolAssemblyActive{toolUseID: toolUseID, name: name, startedAt: startedAt}
+	m.active[toolUseID] = state
+	m.armLocked(state)
+	return state
+}
+
+func (m *toolAssemblyMonitor) armLocked(state *toolAssemblyActive) {
+	if state == nil || m.timeout <= 0 {
+		return
+	}
+	m.nextGen++
+	state.generation = m.nextGen
+	remaining := m.timeout - time.Since(state.startedAt)
+	if remaining < 0 {
+		remaining = 0
+	}
+	toolUseID := state.toolUseID
+	generation := state.generation
+	state.timer = time.AfterFunc(remaining, func() {
+		m.fire(toolUseID, generation)
+	})
+}
+
+func (m *toolAssemblyMonitor) stateForInputLocked(toolUseID string) *toolAssemblyActive {
+	if state := m.active[toolUseID]; state != nil {
+		return state
+	}
+	if toolUseID != "" {
+		if placeholder := m.active[""]; placeholder != nil {
+			delete(m.active, "")
+			if placeholder.timer != nil {
+				placeholder.timer.Stop()
+			}
+			placeholder.toolUseID = toolUseID
+			m.active[toolUseID] = placeholder
+			m.armLocked(placeholder)
+			return placeholder
+		}
+	}
+	return nil
 }
 
 func (m *toolAssemblyMonitor) add(toolUseID, input string) {
@@ -111,47 +160,39 @@ func (m *toolAssemblyMonitor) add(toolUseID, input string) {
 		return
 	}
 	m.mu.Lock()
-	if m.active {
-		if toolUseID != "" && m.toolUseID != toolUseID {
-			m.toolUseID = toolUseID
-		}
-		m.bytes += len(input)
-		m.fragments++
-		if m.bytes > m.maxBytes {
-			m.maxBytes = m.bytes
-		}
-		if m.fragments > m.maxFragments {
-			m.maxFragments = m.fragments
-		}
+	defer m.mu.Unlock()
+	if m.timedOut != nil {
+		return
 	}
-	m.mu.Unlock()
+	state := m.stateForInputLocked(toolUseID)
+	if state == nil {
+		state = m.addActiveLocked(toolUseID, "", time.Now())
+	}
+	state.bytes += len(input)
+	state.fragments++
+	if state.bytes > m.maxBytes {
+		m.maxBytes = state.bytes
+	}
+	if state.fragments > m.maxFragments {
+		m.maxFragments = state.fragments
+	}
 }
 
 func (m *toolAssemblyMonitor) activity() {
 	if m == nil {
 		return
 	}
-	now := time.Now()
 	m.mu.Lock()
-	if m.active {
-		m.mu.Unlock()
+	defer m.mu.Unlock()
+	if m.timedOut != nil {
 		return
 	}
-	m.generation++
-	generation := m.generation
-	m.active = true
-	m.startedAt = now
-	m.toolUseID = ""
-	m.name = ""
-	m.bytes = 0
-	m.fragments = 0
-	m.timedOut = nil
-	if m.timeout > 0 {
-		m.timer = time.AfterFunc(m.timeout, func() {
-			m.fire(generation)
-		})
+	if m.active == nil {
+		m.active = make(map[string]*toolAssemblyActive)
 	}
-	m.mu.Unlock()
+	if len(m.active) == 0 {
+		m.addActiveLocked("", "", time.Now())
+	}
 }
 
 func (m *toolAssemblyMonitor) stop(toolUseID string) {
@@ -159,13 +200,19 @@ func (m *toolAssemblyMonitor) stop(toolUseID string) {
 		return
 	}
 	m.mu.Lock()
-	if m.active && (m.toolUseID == "" || toolUseID == "" || m.toolUseID == toolUseID) {
-		m.recordElapsedLocked(time.Now())
-		m.active = false
-		m.generation++
-		m.stopTimerLocked()
+	defer m.mu.Unlock()
+	state := m.active[toolUseID]
+	if state == nil && toolUseID != "" {
+		state = m.active[""]
 	}
-	m.mu.Unlock()
+	if state == nil {
+		return
+	}
+	m.recordDurationLocked(time.Since(state.startedAt))
+	if state.timer != nil {
+		state.timer.Stop()
+	}
+	delete(m.active, state.toolUseID)
 }
 
 func (m *toolAssemblyMonitor) Stop() {
@@ -173,13 +220,15 @@ func (m *toolAssemblyMonitor) Stop() {
 		return
 	}
 	m.mu.Lock()
-	if m.active {
-		m.recordElapsedLocked(time.Now())
+	defer m.mu.Unlock()
+	now := time.Now()
+	for id, state := range m.active {
+		m.recordDurationLocked(now.Sub(state.startedAt))
+		if state.timer != nil {
+			state.timer.Stop()
+		}
+		delete(m.active, id)
 	}
-	m.active = false
-	m.generation++
-	m.stopTimerLocked()
-	m.mu.Unlock()
 }
 
 func (m *toolAssemblyMonitor) MaxElapsed() (time.Duration, bool) {
@@ -212,35 +261,33 @@ func (m *toolAssemblyMonitor) MaxArguments() (bytes, fragments int) {
 	return m.maxBytes, m.maxFragments
 }
 
-func (m *toolAssemblyMonitor) fire(generation uint64) {
+func (m *toolAssemblyMonitor) fire(toolUseID string, generation uint64) {
 	m.mu.Lock()
-	if !m.active || m.generation != generation {
+	state := m.active[toolUseID]
+	if state == nil || state.generation != generation || m.timedOut != nil {
 		m.mu.Unlock()
 		return
 	}
 	snapshot := toolAssemblySnapshot{
-		ToolUseID:     m.toolUseID,
-		Name:          m.name,
-		ArgumentBytes: m.bytes,
-		FragmentCount: m.fragments,
-		Elapsed:       time.Since(m.startedAt),
+		ToolUseID:     state.toolUseID,
+		Name:          state.name,
+		ArgumentBytes: state.bytes,
+		FragmentCount: state.fragments,
+		Elapsed:       time.Since(state.startedAt),
 	}
 	m.recordDurationLocked(snapshot.Elapsed)
-	m.active = false
 	m.timedOut = &snapshot
-	m.timer = nil
+	for id, active := range m.active {
+		if active.timer != nil {
+			active.timer.Stop()
+		}
+		delete(m.active, id)
+	}
 	onTimeout := m.onTimeout
 	m.mu.Unlock()
 	if onTimeout != nil {
 		onTimeout(snapshot)
 	}
-}
-
-func (m *toolAssemblyMonitor) recordElapsedLocked(now time.Time) {
-	if m.startedAt.IsZero() {
-		return
-	}
-	m.recordDurationLocked(now.Sub(m.startedAt))
 }
 
 func (m *toolAssemblyMonitor) recordDurationLocked(elapsed time.Duration) {
@@ -264,12 +311,5 @@ func stopAndRecordToolAssembly(payload *KiroPayload, monitor *toolAssemblyMonito
 	if payload != nil {
 		argumentBytes, fragmentCount := monitor.MaxArguments()
 		payload.recordToolStreamMetrics(argumentBytes, fragmentCount)
-	}
-}
-
-func (m *toolAssemblyMonitor) stopTimerLocked() {
-	if m.timer != nil {
-		m.timer.Stop()
-		m.timer = nil
 	}
 }

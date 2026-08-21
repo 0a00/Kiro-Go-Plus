@@ -35,6 +35,7 @@ const (
 	UpstreamErrorToolOutputTruncated UpstreamErrorKind = "tool_output_truncated"
 	UpstreamErrorCanceled            UpstreamErrorKind = "canceled"
 	UpstreamErrorEmptyResponse       UpstreamErrorKind = "empty_response"
+	UpstreamErrorStreamTruncated     UpstreamErrorKind = "stream_truncated"
 	UpstreamErrorRetryBudget         UpstreamErrorKind = "retry_budget_exhausted"
 	UpstreamErrorLocalConfiguration  UpstreamErrorKind = "local_configuration"
 )
@@ -196,7 +197,7 @@ func mapDownstreamError(err error) downstreamError {
 		} else {
 			mapped.Status = 499 // Widely used convention for a canceled client request.
 		}
-	case UpstreamErrorEndpointUnavailable, UpstreamErrorEmptyResponse:
+	case UpstreamErrorEndpointUnavailable, UpstreamErrorEmptyResponse, UpstreamErrorStreamTruncated:
 		mapped.Status = http.StatusBadGateway
 	case UpstreamErrorTransient, UpstreamErrorUnknown:
 		if upstreamErr.StatusCode == http.StatusServiceUnavailable {
@@ -371,6 +372,22 @@ func newEmptyResponseError(endpoint string, retryEndpoints bool) *UpstreamError 
 		// account from serving the request.
 		RetryAcrossAccounts: true,
 	}
+}
+
+func newStreamTruncatedError(endpoint string, cause error) *UpstreamError {
+	return &UpstreamError{
+		Kind:                 UpstreamErrorStreamTruncated,
+		Endpoint:             endpoint,
+		Message:              "upstream stream ended without a terminal signal",
+		Cause:                cause,
+		RetryAcrossEndpoints: true,
+		RetryAcrossAccounts:  true,
+	}
+}
+
+func isStreamIntegrityError(err error) bool {
+	upstreamErr, ok := asUpstreamError(err)
+	return ok && upstreamErr.Kind == UpstreamErrorStreamTruncated
 }
 
 func newToolAssemblyTimeoutError(endpoint, toolName string, argumentBytes int, timeout time.Duration) *UpstreamError {

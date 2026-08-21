@@ -27,6 +27,7 @@ type webSearchRoundOutcome struct {
 	cacheUsage      promptCacheUsage
 	cacheDiagnostic promptCacheDiagnostic
 	truncated       bool
+	stopReason      string
 	account         *config.Account
 	payload         *KiroPayload
 }
@@ -359,6 +360,7 @@ func resolveWebSearchLoopStopReason(round *webSearchRoundOutcome) string {
 				return "tool_use"
 			}
 		}
+		return mapClaudeStopReason(round.stopReason, len(round.toolUses))
 	}
 	return "end_turn"
 }
@@ -444,7 +446,7 @@ func (h *Handler) callClaudeWebSearchRound(
 		var inputTokens, outputTokens, realInputTokens int
 		var credits float64
 		var upstreamUsage KiroTokenUsage
-		var truncated bool
+		var upstreamStopReason string
 		callback := &KiroStreamCallback{
 			OnText: func(value string, isThinking bool) {
 				if isThinking {
@@ -463,9 +465,7 @@ func (h *Handler) callClaudeWebSearchRound(
 			OnUsage: func(usage KiroTokenUsage) {
 				upstreamUsage = usage
 			},
-			OnTruncated: func(string) {
-				truncated = true
-			},
+			OnStopReason: func(reason string) { upstreamStopReason = reason },
 			OnCredits: func(value float64) {
 				credits = value
 			},
@@ -520,7 +520,7 @@ func (h *Handler) callClaudeWebSearchRound(
 			text: finalText, thinking: finalThinking, toolUses: toolUses,
 			inputTokens: inputTokens, outputTokens: outputTokens, thinkingTokens: thinkingTokens,
 			credits: credits, cacheUsage: cacheUsage, cacheDiagnostic: cacheDiagnostic,
-			truncated: truncated, account: account, payload: payload,
+			stopReason: upstreamStopReason, account: account, payload: payload,
 		}, nil
 	}
 
