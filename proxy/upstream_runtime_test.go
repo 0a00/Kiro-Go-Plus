@@ -804,8 +804,97 @@ func TestRuntimeUnknown403FallsBackWithoutMarkingRevoked(t *testing.T) {
 		t.Fatalf("unexpected runtime 403 classification: %+v", err)
 	}
 	legacy := classifyUpstreamHTTPError(http.StatusForbidden, "Kiro IDE", []byte(`{"message":"Forbidden"}`))
-	if legacy.Kind != UpstreamErrorForbidden || legacy.RetryAcrossEndpoints {
+	if legacy.Kind != UpstreamErrorForbidden || !legacy.RetryAcrossEndpoints || !legacy.RetryAcrossAccounts {
 		t.Fatalf("unexpected legacy 403 classification: %+v", legacy)
+	}
+	suspended := classifyUpstreamHTTPError(http.StatusForbidden, "Kiro IDE", []byte(`{"message":"Your User ID temporarily is suspended due to unusual user activity"}`))
+	if suspended.Kind != UpstreamErrorSuspended || suspended.RetryAcrossEndpoints {
+		t.Fatalf("suspension must not fall through to another endpoint: %+v", suspended)
+	}
+}
+
+func TestCallKiroAPIFallsBackFromLegacyGeneric403ToRuntime(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	_ = config.UpdatePreferredEndpoint("auto")
+	_ = config.UpdateEndpointFallback(true)
+	sharedAccountEndpointRoutes.reset()
+	t.Cleanup(sharedAccountEndpointRoutes.reset)
+
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if requests.Add(1) == 1 {
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"message":"Forbidden"}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "runtime-ok"}))
+		_, _ = w.Write(awsEventStreamFrame(t, "metadataEvent", map[string]interface{}{"stopReason": "end_turn"}))
+	}))
+	defer server.Close()
+
+	oldEndpoints := kiroEndpoints
+	kiroEndpoints = []kiroEndpoint{
+		{Key: "runtime", URL: server.URL, Name: "Kiro Runtime"},
+		{Key: "kiro", URL: server.URL, Name: "Kiro IDE"},
+	}
+	t.Cleanup(func() { kiroEndpoints = oldEndpoints })
+
+	payload := &KiroPayload{}
+	payload.ConversationState.CurrentMessage.UserInputMessage.ModelID = "claude-sonnet-5"
+	var output strings.Builder
+	err := CallKiroAPI(
+		&config.Account{ID: "legacy-403-account", AccessToken: "token"},
+		payload,
+		&KiroStreamCallback{OnText: func(text string, _ bool) { output.WriteString(text) }},
+	)
+	if err != nil {
+		t.Fatalf("expected runtime fallback, got %v", err)
+	}
+	if requests.Load() != 2 || output.String() != "runtime-ok" {
+		t.Fatalf("unexpected 403 fallback result: requests=%d output=%q", requests.Load(), output.String())
+	}
+	endpoints, routeErr := sharedAccountEndpointRoutes.availableEndpoints("legacy-403-account", "claude-sonnet-5", "auto", kiroEndpoints)
+	if routeErr != nil || len(endpoints) != 1 || endpoints[0].Key != "runtime" {
+		t.Fatalf("expected learned runtime route with legacy cooling, endpoints=%+v err=%v", endpoints, routeErr)
+	}
+}
+
+func TestCallKiroAPISuspensionDoesNotFallThroughEndpoints(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	_ = config.UpdatePreferredEndpoint("auto")
+	_ = config.UpdateEndpointFallback(true)
+	sharedAccountEndpointRoutes.reset()
+	t.Cleanup(sharedAccountEndpointRoutes.reset)
+
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"message":"Your User ID temporarily is suspended due to unusual user activity"}`))
+	}))
+	defer server.Close()
+
+	oldEndpoints := kiroEndpoints
+	kiroEndpoints = []kiroEndpoint{
+		{Key: "runtime", URL: server.URL, Name: "Kiro Runtime"},
+		{Key: "kiro", URL: server.URL, Name: "Kiro IDE"},
+	}
+	t.Cleanup(func() { kiroEndpoints = oldEndpoints })
+
+	payload := &KiroPayload{}
+	payload.ConversationState.CurrentMessage.UserInputMessage.ModelID = "claude-sonnet-5"
+	err := CallKiroAPI(&config.Account{ID: "suspended-account", AccessToken: "token"}, payload, &KiroStreamCallback{})
+	upstreamErr, ok := asUpstreamError(err)
+	if !ok || upstreamErr.Kind != UpstreamErrorSuspended {
+		t.Fatalf("expected suspension error, got %#v", err)
+	}
+	if got := requests.Load(); got != 1 {
+		t.Fatalf("suspension fell through to another endpoint: requests=%d", got)
 	}
 }
 
@@ -899,7 +988,11 @@ func TestCallKiroAPIFallsBackAfterEndpointRateLimit(t *testing.T) {
 	payload.ConversationState.CurrentMessage.UserInputMessage.ModelID = "claude-sonnet-5"
 	var output strings.Builder
 	err := CallKiroAPI(
-		&config.Account{ID: "rate-limit-account", AccessToken: "token"},
+		&config.Account{
+			ID:          "rate-limit-account",
+			AccessToken: "token",
+			ProfileArn:  "arn:aws:codewhisperer:us-east-1:123456789012:profile/test",
+		},
 		payload,
 		&KiroStreamCallback{OnText: func(text string, _ bool) { output.WriteString(text) }},
 	)

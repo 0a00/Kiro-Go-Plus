@@ -352,24 +352,36 @@ func TestListAvailableModelsFollowsPaginationAndCachesTokenLimits(t *testing.T) 
 	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatalf("init config: %v", err)
 	}
+	sharedAccountEndpointRoutes.reset()
+	t.Cleanup(sharedAccountEndpointRoutes.reset)
 	var calls int32
 	kiroRestHttpStore.Store(&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		call := atomic.AddInt32(&calls, 1)
-		if req.URL.Path != "/ListAvailableModels" || req.URL.Query().Get("maxResults") != "50" {
+		if req.URL.Host != "management.us-east-1.kiro.dev" || req.Header.Get("X-Amz-Target") != "KiroControlPlaneBearerService.ListAvailableModels" {
 			t.Fatalf("unexpected models request: %s", req.URL.String())
+		}
+		var requestBody map[string]interface{}
+		if err := json.NewDecoder(req.Body).Decode(&requestBody); err != nil {
+			t.Fatalf("decode models request: %v", err)
+		}
+		if requestBody["origin"] != "AI_EDITOR" || requestBody["profileArn"] != "arn:aws:codewhisperer:us-east-1:123456789012:profile/test" {
+			t.Fatalf("unexpected models request body: %+v", requestBody)
 		}
 		body := `{"models":[{"modelId":"model-page-one","contextWindow":1000000,"capabilities":["vision","reasoning"],"promptCaching":{"minimumTokensPerCacheCheckpoint":512,"supportsPromptCaching":true},"tokenLimits":{"maxInputTokens":111,"maxOutputTokens":11},"additionalModelRequestFieldsSchema":{"type":"object","properties":{"output_config":{"type":"object","properties":{"effort":{"type":"string","enum":["low","medium","high","xhigh","max"]}}}}}}],"nextToken":"page-two"}`
 		if call == 2 {
-			if got := req.URL.Query().Get("nextToken"); got != "page-two" {
+			if got := requestBody["nextToken"]; got != "page-two" {
 				t.Fatalf("expected pagination token, got %q", got)
 			}
 			body = `{"availableModels":[{"modelId":"model-page-two","tokenLimits":{"maxInputTokens":222,"maxOutputTokens":22}}]}`
+		} else if _, ok := requestBody["nextToken"]; ok {
+			t.Fatalf("unexpected first-page pagination token: %+v", requestBody)
 		}
 		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
 	})})
 	t.Cleanup(func() { InitKiroHttpClient("") })
 
 	models, err := ListAvailableModels(&config.Account{
+		ID:          "models-management",
 		AccessToken: "token",
 		ProfileArn:  "arn:aws:codewhisperer:us-east-1:123456789012:profile/test",
 	})
@@ -390,6 +402,76 @@ func TestListAvailableModelsFollowsPaginationAndCachesTokenLimits(t *testing.T) 
 	}
 	if got := discoveredPromptCacheMinimum("model-page-one"); got != 512 {
 		t.Fatalf("discovered cache minimum = %d, want 512", got)
+	}
+}
+
+func TestListAvailableModelsFallsBackFromManagementToLegacyAndLearnsRoute(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	sharedAccountEndpointRoutes.reset()
+	t.Cleanup(sharedAccountEndpointRoutes.reset)
+	var managementCalls, legacyCalls int32
+	kiroRestHttpStore.Store(&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch {
+		case req.URL.Host == "management.us-east-1.kiro.dev":
+			atomic.AddInt32(&managementCalls, 1)
+			return &http.Response{
+				StatusCode: http.StatusNotFound,
+				Body:       io.NopCloser(strings.NewReader(`{"message":"not supported"}`)),
+				Header:     make(http.Header),
+			}, nil
+		case req.URL.Path == "/ListAvailableModels":
+			atomic.AddInt32(&legacyCalls, 1)
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`{"models":[{"modelId":"legacy-model"}]}`)),
+				Header:     make(http.Header),
+			}, nil
+		default:
+			t.Fatalf("unexpected models request: %s", req.URL.String())
+			return nil, nil
+		}
+	})})
+	t.Cleanup(func() { InitKiroHttpClient("") })
+
+	account := &config.Account{
+		ID:          "models-fallback",
+		AccessToken: "token",
+		ProfileArn:  "arn:aws:codewhisperer:us-east-1:123456789012:profile/test",
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		models, err := ListAvailableModels(account)
+		if err != nil || len(models) != 1 || models[0].ModelId != "legacy-model" {
+			t.Fatalf("legacy model fallback attempt %d: models=%+v err=%v", attempt+1, models, err)
+		}
+	}
+	if got := atomic.LoadInt32(&managementCalls); got != 1 {
+		t.Fatalf("management endpoint should cool after one failure, calls=%d", got)
+	}
+	if got := atomic.LoadInt32(&legacyCalls); got != 2 {
+		t.Fatalf("legacy endpoint calls=%d, want 2", got)
+	}
+}
+
+func TestKiroControlPlaneRegionCandidatesUseProfileThenAccountRegion(t *testing.T) {
+	account := &config.Account{
+		AuthMethod: "idc",
+		Provider:   "enterprise",
+		Region:     "eu-north-1",
+		ProfileArn: "arn:aws:codewhisperer:ap-southeast-2:123456789012:profile/test",
+	}
+	got := kiroControlPlaneRegionCandidates(account)
+	want := []string{"ap-southeast-2", "eu-north-1", "us-east-1", "eu-central-1"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("control-plane regions = %v, want %v", got, want)
+	}
+
+	account.ProfileArn = ""
+	got = kiroControlPlaneRegionCandidates(account)
+	want = []string{"eu-north-1", "us-east-1", "eu-central-1"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("profile-less control-plane regions = %v, want %v", got, want)
 	}
 }
 

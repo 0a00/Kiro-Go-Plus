@@ -20,6 +20,7 @@ import (
 
 const (
 	kiroRestAPIBase               = "https://codewhisperer.us-east-1.amazonaws.com"
+	kiroManagementAPIBase         = "https://management.us-east-1.kiro.dev"
 	profileArnUnsupportedCooldown = 24 * time.Hour
 	kiroAPIKeyProbeTimeout        = 20 * time.Second
 )
@@ -126,6 +127,7 @@ func regionalizeURLForRegion(rawURL, region string) string {
 		"q.us-east-1.amazonaws.com", regionalHost,
 		"codewhisperer.us-east-1.amazonaws.com", regionalHost,
 		"runtime.us-east-1.kiro.dev", "runtime."+region+".kiro.dev",
+		"management.us-east-1.kiro.dev", "management."+region+".kiro.dev",
 	).Replace(rawURL)
 }
 
@@ -427,6 +429,32 @@ func kiroManagementRegionCandidates(account *config.Account) []string {
 	return regions
 }
 
+func kiroControlPlaneRegionCandidates(account *config.Account) []string {
+	seen := make(map[string]bool)
+	regions := make([]string, 0, len(defaultKiroProfileRegions)+2)
+	add := func(region string) {
+		region = strings.TrimSpace(region)
+		if !validKiroRegion(region) || seen[region] {
+			return
+		}
+		seen[region] = true
+		regions = append(regions, region)
+	}
+	if account != nil {
+		add(regionFromProfileArn(account.ProfileArn))
+		add(account.Region)
+	}
+	if len(regions) == 0 {
+		add("us-east-1")
+	}
+	if isEnterpriseIDCAccount(account) {
+		for _, region := range defaultKiroProfileRegions {
+			add(region)
+		}
+	}
+	return regions
+}
+
 func shouldTryNextManagementRegion(ctx context.Context, err error) bool {
 	if err == nil || (ctx != nil && ctx.Err() != nil) {
 		return false
@@ -578,6 +606,13 @@ func ListAvailableModels(account *config.Account) ([]ModelInfo, error) {
 	return ListAvailableModelsContext(context.Background(), account)
 }
 
+const modelListEndpointRouteModel = "__models__"
+
+var modelListRouteEndpoints = []kiroEndpoint{
+	{Key: "management-models", Name: "Kiro Management Models"},
+	{Key: "legacy-models", Name: "Legacy Kiro Models"},
+}
+
 func ListAvailableModelsContext(ctx context.Context, account *config.Account) ([]ModelInfo, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -585,6 +620,152 @@ func ListAvailableModelsContext(ctx context.Context, account *config.Account) ([
 	if err := ensureRestProfileArnContext(ctx, account); err != nil {
 		return nil, fmt.Errorf("resolve profileArn: %w", err)
 	}
+	endpoints := append([]kiroEndpoint(nil), modelListRouteEndpoints...)
+	preferred := preferredEndpointForAccount(account)
+	if preferred == "kiro" || preferred == "codewhisperer" || preferred == "amazonq" ||
+		(preferred == "auto" && !accountPrefersRuntime(account)) {
+		endpoints = moveEndpointFirst(endpoints, "legacy-models")
+	}
+	if preferred != "" && preferred != "auto" && !config.GetEndpointFallback() {
+		if preferred == "runtime" {
+			endpoints = endpoints[:1]
+		} else {
+			endpoints = []kiroEndpoint{modelListRouteEndpoints[1]}
+		}
+	}
+	accountID := ""
+	if account != nil {
+		accountID = account.ID
+	}
+	var err error
+	endpoints, err = sharedAccountEndpointRoutes.availableEndpoints(accountID, modelListEndpointRouteModel, "auto", endpoints)
+	if err != nil {
+		return nil, err
+	}
+
+	var lastErr error
+	for _, endpoint := range endpoints {
+		var models []ModelInfo
+		switch endpoint.Key {
+		case "management-models":
+			models, lastErr = listAvailableModelsManagementContext(ctx, account)
+		default:
+			models, lastErr = listAvailableModelsLegacyContext(ctx, account)
+		}
+		if lastErr == nil {
+			sharedAccountEndpointRoutes.recordSuccess(accountID, modelListEndpointRouteModel, endpoint)
+			return models, nil
+		}
+		sharedAccountEndpointRoutes.recordFailure(accountID, modelListEndpointRouteModel, endpoint, lastErr)
+		if !shouldRetryControlPlaneEndpoint(lastErr) {
+			return nil, lastErr
+		}
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, fmt.Errorf("no model-list endpoint is available")
+}
+
+func shouldRetryControlPlaneEndpoint(err error) bool {
+	if err == nil {
+		return false
+	}
+	if upstreamErr, ok := asUpstreamError(err); ok {
+		switch upstreamErr.Kind {
+		case UpstreamErrorCanceled, UpstreamErrorSuspended, UpstreamErrorAuthRevoked, UpstreamErrorTokenExpired:
+			return false
+		default:
+			return true
+		}
+	}
+	return true
+}
+
+func listAvailableModelsManagementContext(ctx context.Context, account *config.Account) ([]ModelInfo, error) {
+	client, err := GetRestClientForAccount(account)
+	if err != nil {
+		return nil, classifyTransportError("Kiro Management Models", fmt.Errorf("configure outbound proxy: %w", err))
+	}
+	var lastErr error
+	for _, region := range kiroControlPlaneRegionCandidates(account) {
+		models, err := listAvailableModelsManagementRegionContext(ctx, client, account, region)
+		if err == nil {
+			return models, nil
+		}
+		lastErr = err
+		if !shouldTryNextManagementRegion(ctx, err) {
+			return nil, err
+		}
+		logger.Debugf("[ListAvailableModels] Management region %s failed; trying fallback: %v", region, err)
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, fmt.Errorf("no Kiro Management region is available")
+}
+
+func listAvailableModelsManagementRegionContext(ctx context.Context, client *http.Client, account *config.Account, region string) ([]ModelInfo, error) {
+	rawURL := regionalizeURLForRegion(kiroManagementAPIBase, region)
+	models := make([]ModelInfo, 0, 16)
+	nextToken := ""
+	seenTokens := make(map[string]struct{})
+	for page := 0; page < maxModelListPages; page++ {
+		requestBody := map[string]interface{}{"origin": "AI_EDITOR"}
+		if account != nil {
+			if profileArn := strings.TrimSpace(account.ProfileArn); profileArn != "" {
+				requestBody["profileArn"] = profileArn
+			}
+		}
+		if nextToken != "" {
+			requestBody["nextToken"] = nextToken
+		}
+		payload, err := json.Marshal(requestBody)
+		if err != nil {
+			return nil, err
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, rawURL, strings.NewReader(string(payload)))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("Content-Type", "application/x-amz-json-1.0")
+		req.Header.Set("X-Amz-Target", "KiroControlPlaneBearerService.ListAvailableModels")
+		applyKiroControlPlaneHeaders(req, account)
+		resp, err := client.Do(req)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, classifyRequestCancellation("Kiro Management Models", ctx.Err())
+			}
+			return nil, classifyTransportError("Kiro Management Models", err)
+		}
+		body, readErr := httpbody.ReadAll(resp.Body, httpbody.DefaultLimit)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return nil, classifyUpstreamHTTPError(resp.StatusCode, "Kiro Management Models", body)
+		}
+		if readErr != nil {
+			return nil, readErr
+		}
+		pageModels, next, err := decodeAvailableModelsPage(body)
+		if err != nil {
+			return nil, err
+		}
+		models = append(models, pageModels...)
+		nextToken = strings.TrimSpace(next)
+		if nextToken == "" {
+			rememberDiscoveredModelMetadata(models)
+			return models, nil
+		}
+		if _, duplicate := seenTokens[nextToken]; duplicate {
+			return nil, fmt.Errorf("Kiro Management Models returned repeated nextToken")
+		}
+		seenTokens[nextToken] = struct{}{}
+	}
+	return nil, fmt.Errorf("Kiro Management Models exceeded %d pages", maxModelListPages)
+}
+
+func listAvailableModelsLegacyContext(ctx context.Context, account *config.Account) ([]ModelInfo, error) {
 
 	models := make([]ModelInfo, 0, 16)
 	nextToken := ""
@@ -627,21 +808,12 @@ func ListAvailableModelsContext(ctx context.Context, account *config.Account) ([
 			return nil, readErr
 		}
 
-		var result struct {
-			Models          []ModelInfo `json:"models"`
-			AvailableModels []ModelInfo `json:"availableModels"`
-			NextToken       string      `json:"nextToken"`
-		}
-		if err := json.Unmarshal(body, &result); err != nil {
+		pageModels, next, err := decodeAvailableModelsPage(body)
+		if err != nil {
 			return nil, err
 		}
-		pageModels := result.Models
-		if len(result.AvailableModels) > 0 {
-			pageModels = append(pageModels, result.AvailableModels...)
-		}
-		normalizeModelInfos(pageModels)
 		models = append(models, pageModels...)
-		nextToken = strings.TrimSpace(result.NextToken)
+		nextToken = strings.TrimSpace(next)
 		if nextToken == "" {
 			rememberDiscoveredModelMetadata(models)
 			return models, nil
@@ -652,6 +824,23 @@ func ListAvailableModelsContext(ctx context.Context, account *config.Account) ([
 		seenTokens[nextToken] = struct{}{}
 	}
 	return nil, fmt.Errorf("ListAvailableModels exceeded %d pages", maxModelListPages)
+}
+
+func decodeAvailableModelsPage(body []byte) ([]ModelInfo, string, error) {
+	var result struct {
+		Models          []ModelInfo `json:"models"`
+		AvailableModels []ModelInfo `json:"availableModels"`
+		NextToken       string      `json:"nextToken"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil {
+		return nil, "", err
+	}
+	models := result.Models
+	if len(result.AvailableModels) > 0 {
+		models = append(models, result.AvailableModels...)
+	}
+	normalizeModelInfos(models)
+	return models, result.NextToken, nil
 }
 
 // ResolveProfileArn returns the account profile ARN, fetching and caching it

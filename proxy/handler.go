@@ -346,6 +346,11 @@ func NewHandler() *Handler {
 	if err := applyProxyConfig(config.GetProxyURL()); err != nil {
 		panic(fmt.Sprintf("invalid outbound proxy configuration: %v", err))
 	}
+	if restored, err := sharedAccountEndpointRoutes.load(accountEndpointRouteStatePath()); err != nil {
+		logger.Warnf("[EndpointRouting] Failed to restore adaptive route state: %v", err)
+	} else if restored > 0 {
+		logger.Infof("[EndpointRouting] Restored %d adaptive route entries", restored)
+	}
 
 	totalReq, successReq, failedReq, totalTokens, totalCredits := config.GetStats()
 	promptCacheCfg := config.GetPromptCacheConfig()
@@ -1540,10 +1545,6 @@ func mergeConfiguredModels(models []map[string]interface{}, configured []config.
 
 // refreshModelsCache 从 Kiro API 拉取模型列表并缓存
 func (h *Handler) refreshModelsCache() {
-	if strings.EqualFold(config.GetPreferredEndpoint(), "runtime") && !config.GetEndpointFallback() {
-		logger.Debugf("[ModelsCache] Runtime endpoint does not support ListAvailableModels; keeping static/configured cache")
-		return
-	}
 	accounts := config.GetEnabledAccounts()
 	if len(accounts) == 0 {
 		return
@@ -1569,9 +1570,6 @@ func (h *Handler) refreshModelsCacheAsyncOnce() {
 }
 
 func (h *Handler) refreshScheduledModelCaches(autoRefresh config.AutoRefreshConfig) {
-	if strings.EqualFold(config.GetPreferredEndpoint(), "runtime") && !config.GetEndpointFallback() {
-		return
-	}
 	if !h.modelsRefreshing.CompareAndSwap(false, true) {
 		return
 	}
@@ -1689,9 +1687,6 @@ func (h *Handler) fetchAndCacheAccountModels(account *config.Account) error {
 }
 
 func (h *Handler) fetchAndCacheAccountModelsContext(ctx context.Context, account *config.Account) error {
-	if strings.EqualFold(config.GetPreferredEndpoint(), "runtime") && !config.GetEndpointFallback() {
-		return nil
-	}
 	if err := h.ensureValidTokenContext(ctx, account); err != nil {
 		return fmt.Errorf("token refresh failed: %w", err)
 	}
@@ -1795,9 +1790,7 @@ func (h *Handler) apiRefreshAllAccountsModels(w http.ResponseWriter, r *http.Req
 	failed := 0
 	accounts := config.GetEnabledAccounts()
 	h.pruneModelsByAccount(accounts)
-	if !(strings.EqualFold(config.GetPreferredEndpoint(), "runtime") && !config.GetEndpointFallback()) {
-		_, failed = h.refreshModelCaches(accounts)
-	}
+	_, failed = h.refreshModelCaches(accounts)
 	h.modelsCacheMu.RLock()
 	cachedLen := len(h.cachedModels)
 	h.modelsCacheMu.RUnlock()
@@ -2916,6 +2909,9 @@ func (h *Handler) Close() {
 		}
 		if h.alerts != nil {
 			h.alerts.Close()
+		}
+		if err := sharedAccountEndpointRoutes.flush(); err != nil {
+			logger.Warnf("[EndpointRouting] Failed to flush adaptive route state: %v", err)
 		}
 		h.FlushStats()
 	})
@@ -4272,6 +4268,7 @@ func (h *Handler) apiGetAccounts(w http.ResponseWriter, r *http.Request) {
 	accounts := config.GetAccounts()
 	poolAccounts := h.pool.GetAllAccounts()
 	healthMap := h.pool.AccountHealthSnapshots()
+	endpointRoutes := sharedAccountEndpointRoutes.snapshotsByAccount()
 
 	// 合并运行时统计
 	statsMap := make(map[string]config.Account)
@@ -4292,60 +4289,64 @@ func (h *Handler) apiGetAccounts(w http.ResponseWriter, r *http.Request) {
 		}
 
 		result[i] = map[string]interface{}{
-			"id":                a.ID,
-			"email":             a.Email,
-			"userId":            a.UserId,
-			"nickname":          a.Nickname,
-			"authMethod":        a.AuthMethod,
-			"provider":          a.Provider,
-			"region":            a.Region,
-			"profileArn":        a.ProfileArn,
-			"enabled":           a.Enabled,
-			"banStatus":         a.BanStatus,
-			"banReason":         a.BanReason,
-			"banTime":           a.BanTime,
-			"expiresAt":         a.ExpiresAt,
-			"hasToken":          a.AccessToken != "",
-			"machineId":         a.MachineId,
-			"weight":            a.Weight,
-			"priority":          a.Priority,
-			"maxConcurrency":    a.MaxConcurrency,
-			"assignedIPv6":      assignedIPv6,
-			"overageStatus":     a.OverageStatus,
-			"overageCapability": a.OverageCapability,
-			"overageCap":        a.OverageCap,
-			"overageRate":       a.OverageRate,
-			"currentOverages":   a.CurrentOverages,
-			"overageCheckedAt":  a.OverageCheckedAt,
-			"proxyURL":          proxyURL,
-			"proxyPasswordSet":  proxyPasswordSet,
-			"subscriptionType":  a.SubscriptionType,
-			"subscriptionTitle": a.SubscriptionTitle,
-			"daysRemaining":     a.DaysRemaining,
-			"usageCurrent":      a.UsageCurrent,
-			"usageLimit":        a.UsageLimit,
-			"usagePercent":      a.UsagePercent,
-			"nextResetDate":     a.NextResetDate,
-			"lastRefresh":       a.LastRefresh,
-			"latencyMsEwma":     health.LatencyMsEWMA,
-			"errorRateEwma":     health.ErrorRateEWMA,
-			"healthSamples":     health.Samples,
-			"dispatchCount":     health.Dispatches,
-			"affinityHitCount":  health.AffinityHits,
-			"affinityHitRate":   health.AffinityHitRate,
-			"lastOutcomeAt":     health.LastOutcomeAt,
-			"trialUsageCurrent": a.TrialUsageCurrent,
-			"trialUsageLimit":   a.TrialUsageLimit,
-			"trialUsagePercent": a.TrialUsagePercent,
-			"trialStatus":       a.TrialStatus,
-			"trialExpiresAt":    a.TrialExpiresAt,
-			"requestCount":      stats.RequestCount,
-			"errorCount":        stats.ErrorCount,
-			"successCount":      stats.RequestCount,
-			"failureCount":      stats.ErrorCount,
-			"totalTokens":       stats.TotalTokens,
-			"totalCredits":      stats.TotalCredits,
-			"lastUsed":          stats.LastUsed,
+			"id":                 a.ID,
+			"email":              a.Email,
+			"userId":             a.UserId,
+			"nickname":           a.Nickname,
+			"authMethod":         a.AuthMethod,
+			"provider":           a.Provider,
+			"region":             a.Region,
+			"profileArn":         a.ProfileArn,
+			"enabled":            a.Enabled,
+			"banStatus":          a.BanStatus,
+			"banReason":          a.BanReason,
+			"banTime":            a.BanTime,
+			"expiresAt":          a.ExpiresAt,
+			"hasToken":           a.AccessToken != "",
+			"machineId":          a.MachineId,
+			"weight":             a.Weight,
+			"priority":           a.Priority,
+			"maxConcurrency":     a.MaxConcurrency,
+			"assignedIPv6":       assignedIPv6,
+			"overageStatus":      a.OverageStatus,
+			"overageCapability":  a.OverageCapability,
+			"overageCap":         a.OverageCap,
+			"overageRate":        a.OverageRate,
+			"currentOverages":    a.CurrentOverages,
+			"overageCheckedAt":   a.OverageCheckedAt,
+			"proxyURL":           proxyURL,
+			"proxyPasswordSet":   proxyPasswordSet,
+			"endpointPreference": a.EndpointPreference,
+			"effectiveEndpoint":  preferredEndpointForAccount(&a),
+			"endpointAutoHint":   accountAutoEndpointHint(&a),
+			"endpointRouting":    endpointRoutes[a.ID],
+			"subscriptionType":   a.SubscriptionType,
+			"subscriptionTitle":  a.SubscriptionTitle,
+			"daysRemaining":      a.DaysRemaining,
+			"usageCurrent":       a.UsageCurrent,
+			"usageLimit":         a.UsageLimit,
+			"usagePercent":       a.UsagePercent,
+			"nextResetDate":      a.NextResetDate,
+			"lastRefresh":        a.LastRefresh,
+			"latencyMsEwma":      health.LatencyMsEWMA,
+			"errorRateEwma":      health.ErrorRateEWMA,
+			"healthSamples":      health.Samples,
+			"dispatchCount":      health.Dispatches,
+			"affinityHitCount":   health.AffinityHits,
+			"affinityHitRate":    health.AffinityHitRate,
+			"lastOutcomeAt":      health.LastOutcomeAt,
+			"trialUsageCurrent":  a.TrialUsageCurrent,
+			"trialUsageLimit":    a.TrialUsageLimit,
+			"trialUsagePercent":  a.TrialUsagePercent,
+			"trialStatus":        a.TrialStatus,
+			"trialExpiresAt":     a.TrialExpiresAt,
+			"requestCount":       stats.RequestCount,
+			"errorCount":         stats.ErrorCount,
+			"successCount":       stats.RequestCount,
+			"failureCount":       stats.ErrorCount,
+			"totalTokens":        stats.TotalTokens,
+			"totalCredits":       stats.TotalCredits,
+			"lastUsed":           stats.LastUsed,
 		}
 	}
 	json.NewEncoder(w).Encode(result)
@@ -4442,6 +4443,7 @@ func (h *Handler) apiDeleteAccount(w http.ResponseWriter, r *http.Request, id st
 		return
 	}
 	h.pool.Reload()
+	sharedAccountEndpointRoutes.forgetAccount(id)
 	h.pruneModelsByAccount(config.GetEnabledAccounts())
 	json.NewEncoder(w).Encode(map[string]bool{"success": true})
 }
@@ -4472,6 +4474,7 @@ func (h *Handler) apiUpdateAccount(w http.ResponseWriter, r *http.Request, id st
 	// Build an allow-listed field patch. Config applies it to the latest account
 	// under its lock so this stale HTTP snapshot cannot replace refreshed tokens.
 	oldEnabled := existing.Enabled
+	oldEndpointPreference := existing.EndpointPreference
 	patch := config.AccountAdminPatch{}
 	if v, ok := updates["enabled"].(bool); ok {
 		patch.Enabled = &v
@@ -4518,6 +4521,16 @@ func (h *Handler) apiUpdateAccount(w http.ResponseWriter, r *http.Request, id st
 		}
 		patch.ProxyURL = &v
 	}
+	if v, ok := updates["endpointPreference"].(string); ok {
+		v = strings.ToLower(strings.TrimSpace(v))
+		valid := map[string]bool{"": true, "auto": true, "runtime": true, "kiro": true, "codewhisperer": true, "amazonq": true}
+		if !valid[v] {
+			w.WriteHeader(400)
+			json.NewEncoder(w).Encode(map[string]string{"error": "endpointPreference must be empty, auto, runtime, kiro, codewhisperer, or amazonq"})
+			return
+		}
+		patch.EndpointPreference = &v
+	}
 
 	updatedAccount, err := config.PatchAccountAdmin(id, patch)
 	if err != nil {
@@ -4527,6 +4540,9 @@ func (h *Handler) apiUpdateAccount(w http.ResponseWriter, r *http.Request, id st
 	}
 
 	h.pool.Reload()
+	if oldEndpointPreference != updatedAccount.EndpointPreference {
+		sharedAccountEndpointRoutes.forgetAccount(id)
+	}
 	// 账号从禁用→启用时，自动拉取并缓存模型列表
 	if !oldEnabled && updatedAccount.Enabled {
 		h.pool.ClearAccountCooldowns(map[string]bool{id: true})
@@ -7027,14 +7043,26 @@ func (h *Handler) apiTestAccount(w http.ResponseWriter, r *http.Request, id stri
 
 	var content string
 	var generationErr error
-	for _, endpoint := range getRequestEndpointsForAccount(config.GetPreferredEndpoint(), kiroPayload, account) {
-		check := h.testKiroGenerationEndpoint(account, kiroPayload, endpoint)
+	learnedEndpoint := false
+	preferredEndpoint := preferredEndpointForAccount(account)
+	routeModel := endpointRouteModel(kiroPayload)
+	for _, endpoint := range getRequestEndpointsForAccount(preferredEndpoint, kiroPayload, account) {
+		check, endpointErr := h.testKiroGenerationEndpoint(account, kiroPayload, endpoint)
 		checks = append(checks, check)
 		if check.Success && content == "" {
 			content = check.Reply
 		}
-		if !check.Success {
-			generationErr = fmt.Errorf("%s", check.Error)
+		if check.Success {
+			if !learnedEndpoint {
+				sharedAccountEndpointRoutes.recordSuccess(account.ID, routeModel, endpoint)
+				learnedEndpoint = true
+			} else {
+				sharedAccountEndpointRoutes.clearFailure(account.ID, routeModel, endpoint)
+			}
+			h.pool.ClearModelUnavailable(account.ID, actualModel)
+		} else {
+			generationErr = endpointErr
+			sharedAccountEndpointRoutes.recordFailure(account.ID, routeModel, endpoint, endpointErr)
 		}
 	}
 
@@ -7087,12 +7115,13 @@ func failedAccountTestCheck(name, err string) accountTestCheck {
 	return accountTestCheck{Name: name, Success: false, Error: truncateDiagnosticText(err, 800)}
 }
 
-func (h *Handler) testKiroGenerationEndpoint(account *config.Account, payload *KiroPayload, endpoint kiroEndpoint) accountTestCheck {
+func (h *Handler) testKiroGenerationEndpoint(account *config.Account, payload *KiroPayload, endpoint kiroEndpoint) (accountTestCheck, error) {
 	check := accountTestCheck{Name: "generation", Endpoint: endpoint.Name}
 	payloadCopy := cloneKiroPayloadForTest(payload)
 	if payloadCopy == nil {
-		check.Error = "invalid Kiro payload"
-		return check
+		err := fmt.Errorf("invalid Kiro payload")
+		check.Error = err.Error()
+		return check, err
 	}
 	setPayloadProfileArnForAccount(payloadCopy, account)
 	if endpoint.RequiresProfileArn && strings.TrimSpace(payloadCopy.ProfileArn) == "" {
@@ -7105,19 +7134,23 @@ func (h *Handler) testKiroGenerationEndpoint(account *config.Account, payload *K
 	reqBody, err := json.Marshal(payloadCopy)
 	if err != nil {
 		check.Error = err.Error()
-		return check
+		return check, err
 	}
 	endpointURL := endpoint.ResolveURL(account, payloadCopy.ProfileArn)
 	req, err := http.NewRequest("POST", endpointURL, bytes.NewReader(reqBody))
 	if err != nil {
 		check.Error = err.Error()
-		return check
+		return check, err
 	}
 	host := ""
 	if parsedURL, parseErr := url.Parse(endpointURL); parseErr == nil {
 		host = parsedURL.Host
 	}
-	req.Header.Set("Content-Type", "application/json")
+	contentType := endpoint.ContentType
+	if contentType == "" {
+		contentType = "application/json"
+	}
+	req.Header.Set("Content-Type", contentType)
 	req.Header.Set("Accept", "*/*")
 	if endpoint.AmzTarget != "" {
 		req.Header.Set("X-Amz-Target", endpoint.AmzTarget)
@@ -7130,24 +7163,23 @@ func (h *Handler) testKiroGenerationEndpoint(account *config.Account, payload *K
 
 	client, err := GetClientForAccount(account)
 	if err != nil {
-		check.Error = "configure outbound proxy: " + err.Error()
-		return check
+		err = classifyTransportError(endpoint.Name, fmt.Errorf("configure outbound proxy: %w", err))
+		check.Error = err.Error()
+		return check, err
 	}
 	resp, err := client.Do(req)
 	if err != nil {
+		err = classifyTransportError(endpoint.Name, err)
 		check.Error = err.Error()
-		return check
+		return check, err
 	}
 	defer resp.Body.Close()
 	check.StatusCode = resp.StatusCode
 	if resp.StatusCode != 200 {
 		body := httpbody.ReadAllTruncated(resp.Body, httpbody.DefaultLimit)
-		if resp.StatusCode == 429 {
-			check.Error = "quota exhausted"
-		} else {
-			check.Error = truncateDiagnosticText(string(body), 800)
-		}
-		return check
+		err = classifyUpstreamHTTPError(resp.StatusCode, endpoint.Name, body)
+		check.Error = truncateDiagnosticText(err.Error(), 800)
+		return check, err
 	}
 
 	var content string
@@ -7160,12 +7192,13 @@ func (h *Handler) testKiroGenerationEndpoint(account *config.Account, payload *K
 		OnContextUsage: func(pct float64) {},
 	}
 	if err := parseEventStream(resp.Body, callback); err != nil {
-		check.Error = err.Error()
-		return check
+		classified := classifyTransportError(endpoint.Name, err)
+		check.Error = classified.Error()
+		return check, classified
 	}
 	check.Success = true
 	check.Reply = content
-	return check
+	return check, nil
 }
 
 func cloneKiroPayloadForTest(payload *KiroPayload) *KiroPayload {
@@ -7304,63 +7337,68 @@ func (h *Handler) apiGetAccountFull(w http.ResponseWriter, r *http.Request, id s
 	}
 
 	proxyURL, proxyPasswordSet := sanitizedProxyURL(account.ProxyURL)
+	endpointRoutes := sharedAccountEndpointRoutes.snapshotsByAccount()
 	result := map[string]interface{}{
-		"id":                account.ID,
-		"email":             account.Email,
-		"userId":            account.UserId,
-		"nickname":          account.Nickname,
-		"accessToken":       maskedCredentialValue(account.AccessToken),
-		"refreshToken":      maskedCredentialValue(account.RefreshToken),
-		"kiroApiKey":        maskedCredentialValue(account.KiroApiKey),
-		"clientId":          maskedCredentialValue(account.ClientID),
-		"clientSecret":      maskedCredentialValue(account.ClientSecret),
-		"hasAccessToken":    account.AccessToken != "",
-		"hasRefreshToken":   account.RefreshToken != "",
-		"hasKiroApiKey":     account.KiroApiKey != "",
-		"hasClientSecret":   account.ClientSecret != "",
-		"authMethod":        account.AuthMethod,
-		"provider":          account.Provider,
-		"region":            account.Region,
-		"profileArn":        account.ProfileArn,
-		"tokenEndpoint":     account.TokenEndpoint,
-		"issuerUrl":         account.IssuerURL,
-		"scopes":            account.Scopes,
-		"expiresAt":         account.ExpiresAt,
-		"machineId":         account.MachineId,
-		"weight":            account.Weight,
-		"priority":          account.Priority,
-		"overageStatus":     account.OverageStatus,
-		"overageCapability": account.OverageCapability,
-		"overageCap":        account.OverageCap,
-		"overageRate":       account.OverageRate,
-		"currentOverages":   account.CurrentOverages,
-		"overageCheckedAt":  account.OverageCheckedAt,
-		"proxyURL":          proxyURL,
-		"proxyPasswordSet":  proxyPasswordSet,
-		"enabled":           account.Enabled,
-		"banStatus":         account.BanStatus,
-		"banReason":         account.BanReason,
-		"banTime":           account.BanTime,
-		"subscriptionType":  account.SubscriptionType,
-		"subscriptionTitle": account.SubscriptionTitle,
-		"daysRemaining":     account.DaysRemaining,
-		"usageCurrent":      account.UsageCurrent,
-		"usageLimit":        account.UsageLimit,
-		"usagePercent":      account.UsagePercent,
-		"nextResetDate":     account.NextResetDate,
-		"lastRefresh":       account.LastRefresh,
-		"trialUsageCurrent": account.TrialUsageCurrent,
-		"trialUsageLimit":   account.TrialUsageLimit,
-		"trialUsagePercent": account.TrialUsagePercent,
-		"trialStatus":       account.TrialStatus,
-		"trialExpiresAt":    account.TrialExpiresAt,
-		"requestCount":      stats.RequestCount,
-		"errorCount":        stats.ErrorCount,
-		"successCount":      stats.RequestCount,
-		"failureCount":      stats.ErrorCount,
-		"totalTokens":       stats.TotalTokens,
-		"totalCredits":      stats.TotalCredits,
-		"lastUsed":          stats.LastUsed,
+		"id":                 account.ID,
+		"email":              account.Email,
+		"userId":             account.UserId,
+		"nickname":           account.Nickname,
+		"accessToken":        maskedCredentialValue(account.AccessToken),
+		"refreshToken":       maskedCredentialValue(account.RefreshToken),
+		"kiroApiKey":         maskedCredentialValue(account.KiroApiKey),
+		"clientId":           maskedCredentialValue(account.ClientID),
+		"clientSecret":       maskedCredentialValue(account.ClientSecret),
+		"hasAccessToken":     account.AccessToken != "",
+		"hasRefreshToken":    account.RefreshToken != "",
+		"hasKiroApiKey":      account.KiroApiKey != "",
+		"hasClientSecret":    account.ClientSecret != "",
+		"authMethod":         account.AuthMethod,
+		"provider":           account.Provider,
+		"region":             account.Region,
+		"profileArn":         account.ProfileArn,
+		"tokenEndpoint":      account.TokenEndpoint,
+		"issuerUrl":          account.IssuerURL,
+		"scopes":             account.Scopes,
+		"expiresAt":          account.ExpiresAt,
+		"machineId":          account.MachineId,
+		"weight":             account.Weight,
+		"priority":           account.Priority,
+		"overageStatus":      account.OverageStatus,
+		"overageCapability":  account.OverageCapability,
+		"overageCap":         account.OverageCap,
+		"overageRate":        account.OverageRate,
+		"currentOverages":    account.CurrentOverages,
+		"overageCheckedAt":   account.OverageCheckedAt,
+		"proxyURL":           proxyURL,
+		"proxyPasswordSet":   proxyPasswordSet,
+		"endpointPreference": account.EndpointPreference,
+		"effectiveEndpoint":  preferredEndpointForAccount(account),
+		"endpointAutoHint":   accountAutoEndpointHint(account),
+		"endpointRouting":    endpointRoutes[account.ID],
+		"enabled":            account.Enabled,
+		"banStatus":          account.BanStatus,
+		"banReason":          account.BanReason,
+		"banTime":            account.BanTime,
+		"subscriptionType":   account.SubscriptionType,
+		"subscriptionTitle":  account.SubscriptionTitle,
+		"daysRemaining":      account.DaysRemaining,
+		"usageCurrent":       account.UsageCurrent,
+		"usageLimit":         account.UsageLimit,
+		"usagePercent":       account.UsagePercent,
+		"nextResetDate":      account.NextResetDate,
+		"lastRefresh":        account.LastRefresh,
+		"trialUsageCurrent":  account.TrialUsageCurrent,
+		"trialUsageLimit":    account.TrialUsageLimit,
+		"trialUsagePercent":  account.TrialUsagePercent,
+		"trialStatus":        account.TrialStatus,
+		"trialExpiresAt":     account.TrialExpiresAt,
+		"requestCount":       stats.RequestCount,
+		"errorCount":         stats.ErrorCount,
+		"successCount":       stats.RequestCount,
+		"failureCount":       stats.ErrorCount,
+		"totalTokens":        stats.TotalTokens,
+		"totalCredits":       stats.TotalCredits,
+		"lastUsed":           stats.LastUsed,
 	}
 
 	json.NewEncoder(w).Encode(result)

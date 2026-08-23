@@ -18,6 +18,13 @@ import (
 
 const webSearchToolName = "web_search"
 
+const webSearchEndpointRouteModel = "__websearch__"
+
+var webSearchRouteEndpoints = []kiroEndpoint{
+	{Key: "runtime-mcp", URL: "https://runtime.us-east-1.kiro.dev/mcp", Name: "Kiro Runtime MCP", RequiresProfileArn: true},
+	{Key: "q-mcp", URL: "https://q.us-east-1.amazonaws.com/mcp", Name: "Kiro Q MCP"},
+}
+
 type mcpRequest struct {
 	ID      string      `json:"id"`
 	JSONRPC string      `json:"jsonrpc"`
@@ -377,13 +384,54 @@ func callMCPWebSearchContext(ctx context.Context, account *config.Account, query
 	if err != nil {
 		return nil, err
 	}
-	var lastErr error
-	for _, region := range webSearchRegionCandidates(account) {
-		results, err := callMCPWebSearchURL(ctx, account, "https://q."+region+".amazonaws.com/mcp", body, query)
-		if err == nil {
-			return results, nil
+	endpoints := append([]kiroEndpoint(nil), webSearchRouteEndpoints...)
+	preferred := preferredEndpointForAccount(account)
+	if preferred == "kiro" || preferred == "codewhisperer" || preferred == "amazonq" ||
+		(preferred == "auto" && !accountPrefersRuntime(account)) {
+		endpoints = moveEndpointFirst(endpoints, "q-mcp")
+	}
+	if strings.TrimSpace(account.ProfileArn) == "" {
+		compatible := make([]kiroEndpoint, 0, len(endpoints))
+		for _, endpoint := range endpoints {
+			if !endpoint.RequiresProfileArn {
+				compatible = append(compatible, endpoint)
+			}
 		}
-		lastErr = err
+		endpoints = compatible
+	}
+	if preferred != "" && preferred != "auto" && !config.GetEndpointFallback() {
+		if preferred == "runtime" {
+			if strings.TrimSpace(account.ProfileArn) != "" {
+				endpoints = []kiroEndpoint{webSearchRouteEndpoints[0]}
+			} else {
+				endpoints = nil
+			}
+		} else {
+			endpoints = []kiroEndpoint{webSearchRouteEndpoints[1]}
+		}
+	}
+	endpoints, err = sharedAccountEndpointRoutes.availableEndpoints(account.ID, webSearchEndpointRouteModel, "auto", endpoints)
+	if err != nil {
+		return nil, err
+	}
+	var lastErr error
+	for _, endpoint := range endpoints {
+		for _, region := range webSearchRegionCandidates(account) {
+			rawURL := regionalizeURLForRegion(endpoint.URL, region)
+			results, callErr := callMCPWebSearchURL(ctx, account, rawURL, body, query)
+			if callErr == nil {
+				sharedAccountEndpointRoutes.recordSuccess(account.ID, webSearchEndpointRouteModel, endpoint)
+				return results, nil
+			}
+			lastErr = callErr
+			if !shouldRetryControlPlaneEndpoint(callErr) {
+				return nil, callErr
+			}
+		}
+		sharedAccountEndpointRoutes.recordFailure(account.ID, webSearchEndpointRouteModel, endpoint, lastErr)
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("no compatible MCP endpoint is available")
 	}
 	return nil, lastErr
 }

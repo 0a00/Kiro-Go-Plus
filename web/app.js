@@ -1546,6 +1546,22 @@
     const a = accountsData.find(x => x.id === id);
     if (!a) return;
     const idAttr = escapeAttr(id);
+    const endpointRouting = a.endpointRouting || {};
+    const endpointLabel = value => ({
+      runtime: t('settings.endpointRuntime'),
+      kiro: t('settings.endpointKiro'),
+      codewhisperer: t('settings.endpointCodeWhisperer'),
+      amazonq: t('settings.endpointAmazonQ')
+    })[value] || value;
+    const learnedEndpoints = Array.from(new Set((endpointRouting.affinities || [])
+      .filter(item => item.model && !item.model.startsWith('__'))
+      .map(item => endpointLabel(item.endpoint)).filter(Boolean)));
+    const effectiveEndpoint = a.effectiveEndpoint || 'auto';
+    const endpointStatus = effectiveEndpoint !== 'auto'
+      ? t('detail.endpointFixed', endpointLabel(effectiveEndpoint))
+      : (learnedEndpoints.length
+        ? t('detail.endpointLearned', learnedEndpoints.join(', '))
+        : t('detail.endpointAutoHint', endpointLabel(a.endpointAutoHint || 'kiro')));
     $('detailBody').innerHTML =
       '<div class="detail-section"><h4>' + escapeHtml(t('detail.basicInfo')) + '</h4><div class="detail-grid">' +
       detailItem(t('detail.email'), getDisplayEmail(a.email, null)) +
@@ -1554,6 +1570,19 @@
       detailItem(t('detail.region'), a.region || 'us-east-1') +
 	  detailItem(t('detail.assignedIPv6'), a.assignedIPv6 || '-') +
       '</div></div>' +
+
+      '<div class="detail-section"><h4>' + escapeHtml(t('detail.endpointRouting')) + '</h4>' +
+      '<div class="machine-id-row">' +
+      '<select id="endpointPreferenceInput">' +
+      '<option value=""' + (!a.endpointPreference ? ' selected' : '') + '>' + escapeHtml(t('detail.endpointInherit')) + '</option>' +
+      '<option value="auto"' + (a.endpointPreference === 'auto' ? ' selected' : '') + '>' + escapeHtml(t('detail.endpointAdaptive')) + '</option>' +
+      '<option value="runtime"' + (a.endpointPreference === 'runtime' ? ' selected' : '') + '>' + escapeHtml(t('settings.endpointRuntime')) + '</option>' +
+      '<option value="kiro"' + (a.endpointPreference === 'kiro' ? ' selected' : '') + '>' + escapeHtml(t('settings.endpointKiro')) + '</option>' +
+      '<option value="codewhisperer"' + (a.endpointPreference === 'codewhisperer' ? ' selected' : '') + '>' + escapeHtml(t('settings.endpointCodeWhisperer')) + '</option>' +
+      '<option value="amazonq"' + (a.endpointPreference === 'amazonq' ? ' selected' : '') + '>' + escapeHtml(t('settings.endpointAmazonQ')) + '</option>' +
+      '</select>' +
+      '<button class="btn btn-sm btn-primary" data-detail-action="saveEndpointPreference" data-id="' + idAttr + '" type="button">' + escapeHtml(t('detail.save')) + '</button>' +
+      '</div><p class="help-block">' + escapeHtml(endpointStatus) + '</p></div>' +
 
       '<div class="detail-section"><h4>' + escapeHtml(t('detail.machineId')) + '</h4><div class="machine-id-row">' +
       '<input type="text" id="machineIdInput" value="' + escapeAttr(a.machineId || '') + '" placeholder="UUID" />' +
@@ -1679,6 +1708,10 @@
       toast(t('detail.machineIdError'), 'warning'); return;
     }
     await putAccount(id, { machineId: m }, t('detail.saved'));
+  }
+  async function saveEndpointPreference(id) {
+    const endpointPreference = $('endpointPreferenceInput').value;
+    await putAccount(id, { endpointPreference }, t('detail.endpointSaved'));
   }
   async function saveWeight(id) {
     const weight = parseInt($('weightInput').value, 10) || 0;
@@ -4781,6 +4814,7 @@
       const id = b.dataset.id;
       const a = b.dataset.detailAction;
       if (a === 'saveMachineId') saveMachineId(id);
+      else if (a === 'saveEndpointPreference') saveEndpointPreference(id);
       else if (a === 'saveWeight') saveWeight(id);
       else if (a === 'toggleOverage') toggleOverageSwitch(id, b);
       else if (a === 'refreshOverage') refreshAccountOverage(id);

@@ -492,6 +492,31 @@ func TestBalancedModeKeepsLowerPriorityTierFirst(t *testing.T) {
 	}
 }
 
+func TestBalancedModeRotatesAccountsWithUnknownModelCapability(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	if err := config.UpdateRoutingConfig(config.RoutingConfig{LoadBalancingMode: "balanced"}); err != nil {
+		t.Fatalf("UpdateRoutingConfig: %v", err)
+	}
+	p := newTestPool(
+		config.Account{ID: "advertised", Enabled: true},
+		config.Account{ID: "unknown", Enabled: true},
+	)
+	p.SetModelList("advertised", []string{"future-model"})
+	p.SetModelList("unknown", []string{"other-model"})
+
+	first := p.GetNextForModel("future-model")
+	second := p.GetNextForModel("future-model")
+	third := p.GetNextForModel("future-model")
+	if first == nil || second == nil || third == nil {
+		t.Fatalf("expected three routed accounts, got %#v %#v %#v", first, second, third)
+	}
+	if first.ID != "advertised" || second.ID != "unknown" || third.ID != "advertised" {
+		t.Fatalf("unknown model-capability account was starved: %q, %q, %q", first.ID, second.ID, third.ID)
+	}
+}
+
 func TestModelListsAreAdvisoryAndAdvertisedModelsArePreferred(t *testing.T) {
 	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatalf("init config: %v", err)

@@ -269,10 +269,10 @@ func classifyUpstreamHTTPError(statusCode int, endpoint string, body []byte) *Up
 		err.RefreshToken = true
 	case statusCode == 403:
 		err.Kind = UpstreamErrorForbidden
-		// During runtime migration an account may still be accepted by the legacy
-		// data plane. Only runtime-originated unknown 403s fall back across endpoints;
-		// explicit suspension/revocation markers were classified above.
-		err.RetryAcrossEndpoints = strings.Contains(strings.ToLower(endpoint), "runtime")
+		// Generic authorization failures are often isolated to one Kiro data plane.
+		// Explicit suspension and revoked-token markers were classified above, so
+		// safely probe the remaining endpoints for this account before switching it.
+		err.RetryAcrossEndpoints = true
 	case statusCode == 402 || strings.Contains(combined, "monthly_request_count") ||
 		strings.Contains(combined, "quota exhausted") || strings.Contains(combined, "overage"):
 		err.Kind = UpstreamErrorQuota

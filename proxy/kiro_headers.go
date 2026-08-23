@@ -5,6 +5,8 @@ import (
 	"kiro-go/config"
 	"net/http"
 	"strings"
+
+	"github.com/google/uuid"
 )
 
 const (
@@ -70,5 +72,28 @@ func applyKiroBaseHeaders(req *http.Request, account *config.Account, values kir
 	req.Header.Set("x-amzn-codewhisperer-optout", "true")
 	if values.Host != "" {
 		req.Host = values.Host
+	}
+}
+
+func applyKiroControlPlaneHeaders(req *http.Request, account *config.Account) {
+	clientCfg := config.GetKiroClientConfig()
+	host := ""
+	if req != nil && req.URL != nil {
+		host = req.URL.Host
+	}
+	if account != nil && account.AccessToken != "" {
+		req.Header.Set("Authorization", "Bearer "+account.AccessToken)
+	}
+	req.Header.Set("User-Agent", fmt.Sprintf(
+		"aws-sdk-js/1.0.0 ua/2.1 os/%s lang/js md/nodejs#%s api/kirocontrolplanebearer#1.0.0 m/N,E",
+		clientCfg.SystemVersion,
+		clientCfg.NodeVersion,
+	))
+	req.Header.Set("x-amz-user-agent", "aws-sdk-js/1.0.0")
+	req.Header.Set("Amz-Sdk-Invocation-Id", uuid.New().String())
+	req.Header.Set("Amz-Sdk-Request", "attempt=1; max=3")
+	req.Header.Set("Connection", "close")
+	if host != "" {
+		req.Host = host
 	}
 }

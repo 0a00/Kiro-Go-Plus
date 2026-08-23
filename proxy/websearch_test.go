@@ -7,6 +7,7 @@ import (
 	"kiro-go/config"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -212,6 +213,89 @@ func TestMCPWebSearchAcceptsExplicitEmptyResults(t *testing.T) {
 	}
 	if results == nil || results.Results == nil || len(results.Results) != 0 || results.Query != "query" {
 		t.Fatalf("unexpected empty result payload: %#v", results)
+	}
+}
+
+func TestMCPWebSearchFallsBackFromRuntimeToQAndLearnsRoute(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	_ = config.UpdatePreferredEndpoint("auto")
+	_ = config.UpdateEndpointFallback(true)
+	sharedAccountEndpointRoutes.reset()
+	t.Cleanup(sharedAccountEndpointRoutes.reset)
+
+	var runtimeCalls, qCalls int
+	runtimeServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		runtimeCalls++
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"message":"MCP route unavailable"}`))
+	}))
+	defer runtimeServer.Close()
+	qServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		qCalls++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","result":{"content":[{"type":"text","text":"{\"results\":[{\"title\":\"Kiro\",\"url\":\"https://kiro.dev/\",\"snippet\":\"Kiro\"}]}"}]}}`))
+	}))
+	defer qServer.Close()
+
+	oldEndpoints := webSearchRouteEndpoints
+	webSearchRouteEndpoints = []kiroEndpoint{
+		{Key: "runtime-mcp", URL: runtimeServer.URL, Name: "Kiro Runtime MCP", RequiresProfileArn: true},
+		{Key: "q-mcp", URL: qServer.URL, Name: "Kiro Q MCP"},
+	}
+	t.Cleanup(func() { webSearchRouteEndpoints = oldEndpoints })
+
+	account := &config.Account{
+		ID:          "websearch-fallback",
+		AccessToken: "token",
+		ProfileArn:  "arn:aws:codewhisperer:us-east-1:123456789012:profile/test",
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		results, err := callMCPWebSearchContext(context.Background(), account, "kiro")
+		if err != nil || results == nil || len(results.Results) != 1 || results.Results[0].Title != "Kiro" {
+			t.Fatalf("web search fallback attempt %d: results=%+v err=%v", attempt+1, results, err)
+		}
+	}
+	if runtimeCalls != 1 || qCalls != 2 {
+		t.Fatalf("unexpected MCP routing calls: runtime=%d q=%d", runtimeCalls, qCalls)
+	}
+}
+
+func TestMCPWebSearchFixedRuntimeWithoutProfileDoesNotUseQ(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	_ = config.UpdateEndpointFallback(false)
+	sharedAccountEndpointRoutes.reset()
+	t.Cleanup(sharedAccountEndpointRoutes.reset)
+
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","result":{"content":[{"type":"text","text":"{\"results\":[]}"}]}}`))
+	}))
+	defer server.Close()
+	oldEndpoints := webSearchRouteEndpoints
+	webSearchRouteEndpoints = []kiroEndpoint{
+		{Key: "runtime-mcp", URL: server.URL, Name: "Kiro Runtime MCP", RequiresProfileArn: true},
+		{Key: "q-mcp", URL: server.URL, Name: "Kiro Q MCP"},
+	}
+	t.Cleanup(func() { webSearchRouteEndpoints = oldEndpoints })
+
+	_, err := callMCPWebSearchContext(context.Background(), &config.Account{
+		ID:                 "runtime-without-profile",
+		AuthMethod:         "api_key",
+		KiroApiKey:         "ksk_test",
+		AccessToken:        "ksk_test",
+		EndpointPreference: "runtime",
+	}, "kiro")
+	if err == nil || !strings.Contains(err.Error(), "no compatible MCP endpoint") {
+		t.Fatalf("expected incompatible runtime MCP error, got %v", err)
+	}
+	if calls != 0 {
+		t.Fatalf("fixed runtime request unexpectedly fell back to Q: calls=%d", calls)
 	}
 }
 

@@ -74,6 +74,10 @@ type Account struct {
 	// Per-account outbound proxy (falls back to global ProxyURL if empty)
 	ProxyURL string `json:"proxyURL,omitempty"`
 
+	// EndpointPreference optionally overrides the global generation endpoint.
+	// Empty inherits the global setting; "auto" enables account-adaptive routing.
+	EndpointPreference string `json:"endpointPreference,omitempty"`
+
 	// Priority weight for load balancing (higher = more requests)
 	Weight int `json:"weight,omitempty"` // 0 or 1 = normal, 2+ = higher priority
 
@@ -521,7 +525,7 @@ const (
 )
 
 // Version current version
-const Version = "1.2.43"
+const Version = "1.2.44"
 
 var (
 	cfg           *Config
@@ -830,6 +834,7 @@ func normalizeKiroAPIKeyAccount(account *Account) {
 	if account.MaxConcurrency > 1000 {
 		account.MaxConcurrency = 1000
 	}
+	account.EndpointPreference = normalizeAccountEndpointPreference(account.EndpointPreference)
 	if strings.EqualFold(account.AuthMethod, "api_key") || strings.EqualFold(account.AuthMethod, "apikey") || account.KiroApiKey != "" {
 		account.AuthMethod = "api_key"
 		if account.KiroApiKey == "" {
@@ -842,6 +847,16 @@ func normalizeKiroAPIKeyAccount(account *Account) {
 		account.ExpiresAt = 0
 	}
 	normalizeAccountCredentialFingerprint(account)
+}
+
+func normalizeAccountEndpointPreference(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	switch value {
+	case "auto", "runtime", "kiro", "codewhisperer", "amazonq":
+		return value
+	default:
+		return ""
+	}
 }
 
 func normalizeAccountCredentialFingerprint(account *Account) {
@@ -2384,13 +2399,14 @@ func ClearAccountBan(id string, autoEnableReasonFragments ...string) (Account, e
 // AccountAdminPatch is the allow-list of account fields editable from the
 // admin API. Credentials and runtime counters are intentionally absent.
 type AccountAdminPatch struct {
-	Enabled        *bool
-	Nickname       *string
-	MachineId      *string
-	Weight         *int
-	Priority       *int
-	MaxConcurrency *int
-	ProxyURL       *string
+	Enabled            *bool
+	Nickname           *string
+	MachineId          *string
+	Weight             *int
+	Priority           *int
+	MaxConcurrency     *int
+	ProxyURL           *string
+	EndpointPreference *string
 }
 
 // PatchAccountAdmin applies an admin update to the latest persisted account
@@ -2436,6 +2452,13 @@ func PatchAccountAdmin(id string, patch AccountAdminPatch) (Account, error) {
 		}
 		if patch.ProxyURL != nil {
 			candidate.ProxyURL = *patch.ProxyURL
+		}
+		if patch.EndpointPreference != nil {
+			value := strings.ToLower(strings.TrimSpace(*patch.EndpointPreference))
+			if value != "" && normalizeAccountEndpointPreference(value) == "" {
+				return Account{}, fmt.Errorf("endpointPreference must be empty, auto, runtime, kiro, codewhisperer, or amazonq")
+			}
+			candidate.EndpointPreference = value
 		}
 		if err := validateAccountProxy(candidate); err != nil {
 			return Account{}, err
@@ -2592,6 +2615,9 @@ func mergeAccountDefaults(account *Account, existing Account) {
 	}
 	if account.ProxyURL == "" {
 		account.ProxyURL = existing.ProxyURL
+	}
+	if account.EndpointPreference == "" {
+		account.EndpointPreference = existing.EndpointPreference
 	}
 	if account.ProfileArn == "" {
 		account.ProfileArn = existing.ProfileArn

@@ -697,23 +697,53 @@ func getRequestEndpoints(preferred string, payload *KiroPayload) []kiroEndpoint 
 	return endpoints
 }
 
-func getRequestEndpointsForAccount(preferred string, payload *KiroPayload, account *config.Account) []kiroEndpoint {
-	endpoints := getRequestEndpoints(preferred, payload)
-	if !isKiroAPIKeyAccount(account) || strings.TrimSpace(account.ProfileArn) != "" {
-		return endpoints
-	}
-
-	compatible := make([]kiroEndpoint, 0, len(endpoints))
-	for _, endpoint := range endpoints {
-		if !endpoint.RequiresProfileArn {
-			compatible = append(compatible, endpoint)
+func preferredEndpointForAccount(account *config.Account) string {
+	if account != nil {
+		if preferred := strings.ToLower(strings.TrimSpace(account.EndpointPreference)); preferred != "" {
+			return preferred
 		}
+	}
+	return strings.ToLower(strings.TrimSpace(config.GetPreferredEndpoint()))
+}
+
+func accountPrefersRuntime(account *config.Account) bool {
+	if account == nil {
+		return false
+	}
+	if strings.TrimSpace(account.ProfileArn) != "" {
+		return true
+	}
+	method := strings.ToLower(strings.TrimSpace(account.AuthMethod))
+	provider := strings.ToLower(strings.TrimSpace(account.Provider))
+	return method == "idc" || provider == "builderid" || provider == "enterprise"
+}
+
+func accountAutoEndpointHint(account *config.Account) string {
+	if accountPrefersRuntime(account) {
+		return "runtime"
+	}
+	return "kiro"
+}
+
+func getRequestEndpointsForAccount(preferred string, payload *KiroPayload, account *config.Account) []kiroEndpoint {
+	if account != nil && strings.TrimSpace(account.EndpointPreference) != "" {
+		preferred = preferredEndpointForAccount(account)
+	}
+	endpoints := getRequestEndpoints(preferred, payload)
+	if isKiroAPIKeyAccount(account) && strings.TrimSpace(account.ProfileArn) == "" {
+		compatible := make([]kiroEndpoint, 0, len(endpoints))
+		for _, endpoint := range endpoints {
+			if !endpoint.RequiresProfileArn {
+				compatible = append(compatible, endpoint)
+			}
+		}
+		endpoints = compatible
 	}
 	preferred = strings.ToLower(strings.TrimSpace(preferred))
 	if preferred == "" || preferred == "auto" {
-		compatible = moveEndpointFirst(compatible, "kiro")
+		endpoints = moveEndpointFirst(endpoints, accountAutoEndpointHint(account))
 	}
-	return compatible
+	return endpoints
 }
 
 // CallKiroAPI calls the Kiro streaming API, trying each configured endpoint with automatic fallback.
@@ -796,7 +826,7 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 
 	// Build endpoint list before profile lookup. Legacy/custom endpoints that do
 	// not require a profile must not pay for a potentially slow profile probe.
-	preferredEndpoint := config.GetPreferredEndpoint()
+	preferredEndpoint := preferredEndpointForAccount(account)
 	endpoints := getRequestEndpointsForAccount(preferredEndpoint, payload, account)
 	accountID := ""
 	accountEmail := ""
@@ -1070,6 +1100,12 @@ endpointLoop:
 				if payload != nil {
 					payload.attemptBudget.recordFailure(ep.Name, lastErr)
 				}
+				// A Kiro API key can be valid in a different data-plane region. Retry
+				// the confirmed candidate before cooling this logical endpoint, or the
+				// recursive call would reject the route that it needs to verify.
+				if handled, retryErr := retryAfterAPIKeyRegionRecovery(requestContext, account, payload, callback, lastErr, false); handled {
+					return retryErr
+				}
 				if cooldown := sharedAccountEndpointRoutes.recordFailure(accountID, modelKey, ep, lastErr); cooldown > 0 {
 					logger.Warnf("[EndpointRouting] Account %s model %s endpoint %s cooling for %s after %v", accountID, modelKey, ep.Name, cooldown, lastErr)
 				}
@@ -1078,9 +1114,6 @@ endpointLoop:
 					sharedUpstreamHealth.endpointFailure(endpointCircuitKey, lastErr, time.Since(attemptStartedAt))
 				} else {
 					sharedUpstreamHealth.endpointSuccess(endpointCircuitKey, time.Since(attemptStartedAt))
-				}
-				if handled, retryErr := retryAfterAPIKeyRegionRecovery(requestContext, account, payload, callback, lastErr, false); handled {
-					return retryErr
 				}
 				if upstreamErr, ok := asUpstreamError(lastErr); ok && upstreamErr.RefreshToken &&
 					payload != nil && payload.takeTokenRefreshAttempt(account) && !isKiroAPIKeyAccount(account) {

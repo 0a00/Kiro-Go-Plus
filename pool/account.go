@@ -419,15 +419,14 @@ func (p *AccountPool) orderSelectionIndexesLocked(indexes []int, model, routingM
 			return indexes
 		}
 
-		// Rotate only the leading priority/capability tier. Lower-priority or
-		// unverified accounts remain available as fallbacks when the preferred
-		// accounts are locally busy.
+		// Rotate every non-negative account in the leading priority tier. Model
+		// lists are advisory and some Runtime accounts cannot query them, so an
+		// unknown account must not be permanently starved by an advertised one.
 		first := p.accounts[indexes[0]]
-		firstAdvertised := p.accountAdvertisesModel(first.ID, model)
 		tierEnd := 1
 		for tierEnd < len(indexes) {
 			candidate := p.accounts[indexes[tierEnd]]
-			if candidate.Priority != first.Priority || p.accountAdvertisesModel(candidate.ID, model) != firstAdvertised {
+			if candidate.Priority != first.Priority {
 				break
 			}
 			tierEnd++
@@ -450,25 +449,14 @@ func (p *AccountPool) orderSelectionIndexesLocked(indexes []int, model, routingM
 		if aScore != bScore {
 			return aScore > bScore
 		}
+		aAdvertised := p.accountAdvertisesModel(a.ID, model)
+		bAdvertised := p.accountAdvertisesModel(b.ID, model)
+		if aAdvertised != bAdvertised {
+			return aAdvertised
+		}
 		return a.ID < b.ID
 	})
-	return p.preferAdvertisedModelsLocked(indexes, model)
-}
-
-func (p *AccountPool) preferAdvertisedModelsLocked(indexes []int, model string) []int {
-	if strings.TrimSpace(model) == "" || len(indexes) < 2 {
-		return indexes
-	}
-	preferred := make([]int, 0, len(indexes))
-	unknown := make([]int, 0, len(indexes))
-	for _, idx := range indexes {
-		if p.accountAdvertisesModel(p.accounts[idx].ID, model) {
-			preferred = append(preferred, idx)
-		} else {
-			unknown = append(unknown, idx)
-		}
-	}
-	return append(preferred, unknown...)
+	return indexes
 }
 
 func (p *AccountPool) commitWeightedSelectionLocked(selectedID string, eligibleIndexes []int, routingMode string) {

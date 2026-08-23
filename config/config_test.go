@@ -959,6 +959,32 @@ func TestAccountFieldPatchesPreserveRefreshedCredentials(t *testing.T) {
 	}
 }
 
+func TestAccountEndpointPreferencePatchValidatesAndPersists(t *testing.T) {
+	if err := Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	if err := AddAccount(Account{ID: "endpoint-account", Enabled: true}); err != nil {
+		t.Fatalf("add account: %v", err)
+	}
+	invalid := "unsupported"
+	if _, err := PatchAccountAdmin("endpoint-account", AccountAdminPatch{EndpointPreference: &invalid}); err == nil {
+		t.Fatal("invalid endpoint preference was accepted")
+	}
+	preference := " Runtime "
+	account, err := PatchAccountAdmin("endpoint-account", AccountAdminPatch{EndpointPreference: &preference})
+	if err != nil {
+		t.Fatalf("patch endpoint preference: %v", err)
+	}
+	if account.EndpointPreference != "runtime" || GetAccounts()[0].EndpointPreference != "runtime" {
+		t.Fatalf("endpoint preference was not normalized and persisted: %+v", account)
+	}
+	inherit := ""
+	account, err = PatchAccountAdmin("endpoint-account", AccountAdminPatch{EndpointPreference: &inherit})
+	if err != nil || account.EndpointPreference != "" {
+		t.Fatalf("clear endpoint preference: account=%+v err=%v", account, err)
+	}
+}
+
 func TestClearAccountBanUsesPersistedReasonForAutoEnable(t *testing.T) {
 	if err := Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatalf("init config: %v", err)

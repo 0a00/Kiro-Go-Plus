@@ -1,5 +1,5 @@
 {
-  "version": "1.2.43",
-  "changelog": "Add official, matched-prefix, and New API/Sub2API target prompt-cache accounting with consistent protocol usage and diagnostics.\n新增真实、匹配前缀和 New API/Sub2API 目标缓存统计模式，并统一协议用量字段与诊断。",
+  "version": "1.2.44",
+  "changelog": "Add account-adaptive endpoint routing with persisted affinity and route-specific cooldowns, Management model discovery, and Runtime MCP fallback.\n新增账号自适应端点路由、持久化亲和与端点级冷却，并接入 Management 模型发现和 Runtime MCP 回退。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }
