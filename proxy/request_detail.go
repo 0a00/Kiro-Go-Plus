@@ -128,6 +128,12 @@ type requestDetailResponse struct {
 	CacheCreation5mTokens    int                    `json:"cacheCreation5mTokens,omitempty"`
 	CacheCreation1hTokens    int                    `json:"cacheCreation1hTokens,omitempty"`
 	HasCacheBreakdown        bool                   `json:"hasCacheBreakdown,omitempty"`
+	CacheAccountingMode      string                 `json:"cacheAccountingMode,omitempty"`
+	CacheTargetReadRate      float64                `json:"cacheTargetReadRate,omitempty"`
+	CacheTargetApplied       bool                   `json:"cacheTargetApplied,omitempty"`
+	CacheUpstreamRead        int                    `json:"upstreamCacheReadInputTokens,omitempty"`
+	CacheUpstreamCreate      int                    `json:"upstreamCacheCreationInputTokens,omitempty"`
+	CacheUpstreamKnown       bool                   `json:"hasUpstreamCacheBreakdown,omitempty"`
 	StopReason               string                 `json:"stopReason,omitempty"`
 	TruncationReason         string                 `json:"truncationReason,omitempty"`
 	Error                    string                 `json:"error,omitempty"`
@@ -1013,10 +1019,20 @@ func (t *requestDetailTrace) finalize(entry requestLogEntry) (requestDetail, boo
 	if usage.ThinkingTokens == 0 {
 		usage.ThinkingTokens = entry.ThinkingTokens
 	}
-	if usage.CacheReadInputTokens == 0 {
+	if entry.CacheAccountingMode != "" {
+		if entry.InputTokens > 0 {
+			usage.InputTokens = entry.InputTokens
+		}
 		usage.CacheReadInputTokens = entry.CacheReadInputTokens
-	}
-	if usage.CacheCreationInputTokens == 0 {
+		usage.CacheCreationInputTokens = entry.CacheCreationInputTokens
+		usage.UncachedInputTokens = maxInt(usage.InputTokens-usage.CacheReadInputTokens-usage.CacheCreationInputTokens, 0)
+		usage.HasCacheBreakdown = entry.CacheUpstreamKnown || usage.CacheReadInputTokens > 0 || usage.CacheCreationInputTokens > 0
+	} else if usage.CacheReadInputTokens == 0 {
+		usage.CacheReadInputTokens = entry.CacheReadInputTokens
+		if usage.CacheCreationInputTokens == 0 {
+			usage.CacheCreationInputTokens = entry.CacheCreationInputTokens
+		}
+	} else if usage.CacheCreationInputTokens == 0 {
 		usage.CacheCreationInputTokens = entry.CacheCreationInputTokens
 	}
 	detail := requestDetail{
@@ -1057,6 +1073,12 @@ func (t *requestDetailTrace) finalize(entry requestLogEntry) (requestDetail, boo
 			CacheCreation5mTokens:    usage.CacheCreation5mTokens,
 			CacheCreation1hTokens:    usage.CacheCreation1hTokens,
 			HasCacheBreakdown:        usage.HasCacheBreakdown,
+			CacheAccountingMode:      entry.CacheAccountingMode,
+			CacheTargetReadRate:      entry.CacheTargetReadRate,
+			CacheTargetApplied:       entry.CacheTargetApplied,
+			CacheUpstreamRead:        entry.CacheUpstreamRead,
+			CacheUpstreamCreate:      entry.CacheUpstreamCreate,
+			CacheUpstreamKnown:       entry.CacheUpstreamKnown,
 			StopReason:               entry.StopReason,
 			TruncationReason:         t.truncation,
 			Error:                    responseError,

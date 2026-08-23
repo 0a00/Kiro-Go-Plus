@@ -448,12 +448,12 @@ func TestWebSearchLoopSSEPreservesToolIDsAndClientTools(t *testing.T) {
 		toolUseID: "srvtoolu_stream", query: "kiro",
 		results: &webSearchResults{Results: []webSearchResult{{Title: "Kiro", URL: "https://example.com"}}},
 	}), ClaudeContentBlock{Type: "tool_use", ID: "toolu_client", Name: "Bash", Input: map[string]interface{}{"command": "pwd"}})
-	session.finish(content, "tool_use", 12, 1)
+	session.finish(content, "tool_use", 100, 12, 3, promptCacheUsage{CacheReadInputTokens: 90}, 1)
 	session.close()
 	body := recorder.Body.String()
 	for _, want := range []string{
 		`event: message_start`, `"id":"srvtoolu_stream"`, `"tool_use_id":"srvtoolu_stream"`,
-		`"id":"toolu_client"`, `"name":"Bash"`, `"web_search_requests":1`, `event: message_stop`,
+		`"id":"toolu_client"`, `"name":"Bash"`, `"cache_read_input_tokens":90`, `"input_tokens":10`, `"web_search_requests":1`, `event: message_stop`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("stream missing %q: %s", want, body)

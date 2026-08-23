@@ -351,6 +351,7 @@ func NewHandler() *Handler {
 	promptCacheCfg := config.GetPromptCacheConfig()
 	promptCache := newPromptCacheTrackerWithEfficiencyRange(time.Duration(promptCacheCfg.KvCacheTTLSecs)*time.Second, promptCacheCfg.CacheReadEfficiencyMin, promptCacheCfg.CacheReadEfficiencyMax)
 	promptCache.ConfigurePolicy(promptCacheCfg.Enabled, promptCacheCfg.NamespaceMode)
+	promptCache.ConfigureAccountingMode(promptCacheCfg.AccountingMode)
 	promptCache.ConfigureLimits(promptCacheCfg.MaxEntriesPerAccount, promptCacheCfg.MaxEntriesTotal)
 	if promptCacheCfg.PersistEnabled {
 		if restored, err := promptCache.Load(promptCachePath()); err != nil {
@@ -2167,7 +2168,13 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 				"model":         responseModel,
 				"stop_reason":   nil,
 				"stop_sequence": nil,
-				"usage":         buildClaudeUsageMap(startInputTokens, 0, 0, messageStartUsage, cacheProfile != nil),
+				"usage": buildClaudeUsageMap(
+					startInputTokens,
+					0,
+					0,
+					messageStartUsage,
+					cacheProfile != nil || messageStartUsage.hasUpstreamBreakdown || messageStartUsage.targetApplied,
+				),
 			},
 		})
 		messageStarted = true
@@ -2240,9 +2247,9 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 			continue
 		}
 		cacheScope := h.promptCache.ScopeKey(account.ID, apiKeyID)
-		cacheUsage, cacheDiagnostic := h.promptCache.ComputeDetailed(cacheScope, cacheProfile)
+		syntheticCacheUsage, cacheDiagnostic := h.promptCache.ComputeDetailed(cacheScope, cacheProfile)
 		payload.setPromptCacheDiagnostic(cacheDiagnostic)
-		messageStartUsage = cacheUsage
+		messageStartUsage, startInputTokens = h.promptCache.ResolveUsage(syntheticCacheUsage, KiroTokenUsage{}, estimatedInputTokens, cacheProfile)
 
 		var inputTokens, outputTokens int
 		var credits float64
@@ -2619,7 +2626,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 			OnUsage: func(usage KiroTokenUsage) {
 				upstreamUsage = usage
 				if !isMessageStarted() && usage.HasCacheBreakdown {
-					messageStartUsage, startInputTokens = resolvePromptCacheUsage(cacheUsage, usage, startInputTokens, cacheProfile)
+					messageStartUsage, startInputTokens = h.promptCache.ResolveUsage(syntheticCacheUsage, usage, startInputTokens, cacheProfile)
 				}
 			},
 			OnStopReason: func(reason string) { upstreamStopReason = reason },
@@ -2693,7 +2700,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 		} else if inputTokens <= 0 {
 			inputTokens = estimatedInputTokens
 		}
-		cacheUsage, inputTokens = resolvePromptCacheUsage(cacheUsage, upstreamUsage, inputTokens, cacheProfile)
+		cacheUsage, inputTokens := h.promptCache.ResolveUsage(syntheticCacheUsage, upstreamUsage, inputTokens, cacheProfile)
 		cacheDiagnostic = finalizePromptCacheDiagnostic(cacheDiagnostic, upstreamUsage, cacheUsage, inputTokens)
 		payload.setPromptCacheDiagnostic(cacheDiagnostic)
 		outputContent, extractedReasoning := extractThinkingFromContent(rawContentBuilder.String())
@@ -2987,7 +2994,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 			continue
 		}
 		cacheScope := h.promptCache.ScopeKey(account.ID, apiKeyID)
-		cacheUsage, cacheDiagnostic := h.promptCache.ComputeDetailed(cacheScope, cacheProfile)
+		syntheticCacheUsage, cacheDiagnostic := h.promptCache.ComputeDetailed(cacheScope, cacheProfile)
 		payload.setPromptCacheDiagnostic(cacheDiagnostic)
 
 		var content string
@@ -3058,7 +3065,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 		} else if inputTokens <= 0 {
 			inputTokens = estimatedInputTokens
 		}
-		cacheUsage, inputTokens = resolvePromptCacheUsage(cacheUsage, upstreamUsage, inputTokens, cacheProfile)
+		cacheUsage, inputTokens := h.promptCache.ResolveUsage(syntheticCacheUsage, upstreamUsage, inputTokens, cacheProfile)
 		cacheDiagnostic = finalizePromptCacheDiagnostic(cacheDiagnostic, upstreamUsage, cacheUsage, inputTokens)
 		payload.setPromptCacheDiagnostic(cacheDiagnostic)
 		thinkingTokens := upstreamUsage.ThinkingTokens
@@ -3666,7 +3673,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 		} else if inputTokens <= 0 {
 			inputTokens = estimatedInputTokens
 		}
-		cacheUsage, inputTokens := resolvePromptCacheUsage(promptCacheUsage{}, upstreamUsage, inputTokens, nil)
+		cacheUsage, inputTokens := h.promptCache.ResolveUsage(promptCacheUsage{}, upstreamUsage, inputTokens, nil)
 		cacheDiagnostic := finalizePromptCacheDiagnostic(promptCacheDiagnostic{Status: "skipped", Reason: "no_cache_breakpoint", Source: "local"}, upstreamUsage, cacheUsage, inputTokens)
 		payload.setPromptCacheDiagnostic(cacheDiagnostic)
 		outputContent, extractedReasoning := extractThinkingFromContent(rawContentBuilder.String())
@@ -3873,7 +3880,7 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 		} else if inputTokens <= 0 {
 			inputTokens = estimatedInputTokens
 		}
-		cacheUsage, inputTokens := resolvePromptCacheUsage(promptCacheUsage{}, upstreamUsage, inputTokens, nil)
+		cacheUsage, inputTokens := h.promptCache.ResolveUsage(promptCacheUsage{}, upstreamUsage, inputTokens, nil)
 		cacheDiagnostic := finalizePromptCacheDiagnostic(promptCacheDiagnostic{Status: "skipped", Reason: "no_cache_breakpoint", Source: "local"}, upstreamUsage, cacheUsage, inputTokens)
 		payload.setPromptCacheDiagnostic(cacheDiagnostic)
 		thinkingTokens := upstreamUsage.ThinkingTokens
@@ -6035,6 +6042,7 @@ func (h *Handler) apiUpdatePromptCache(w http.ResponseWriter, r *http.Request) {
 		Enabled                *bool    `json:"enabled,omitempty"`
 		PersistEnabled         *bool    `json:"persistEnabled,omitempty"`
 		NamespaceMode          *string  `json:"namespaceMode,omitempty"`
+		AccountingMode         *string  `json:"accountingMode,omitempty"`
 		CacheReadEfficiency    *float64 `json:"cacheReadEfficiency,omitempty"`
 		CacheReadEfficiencyMin *float64 `json:"cacheReadEfficiencyMin,omitempty"`
 		CacheReadEfficiencyMax *float64 `json:"cacheReadEfficiencyMax,omitempty"`
@@ -6058,6 +6066,9 @@ func (h *Handler) apiUpdatePromptCache(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.NamespaceMode != nil {
 		current.NamespaceMode = *req.NamespaceMode
+	}
+	if req.AccountingMode != nil {
+		current.AccountingMode = strings.ToLower(strings.TrimSpace(*req.AccountingMode))
 	}
 	if req.CacheReadEfficiency != nil {
 		current.CacheReadEfficiency = *req.CacheReadEfficiency
@@ -6085,6 +6096,13 @@ func (h *Handler) apiUpdatePromptCache(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{"error": "invalid prompt cache entry limits"})
 		return
 	}
+	switch current.AccountingMode {
+	case config.PromptCacheAccountingActual, config.PromptCacheAccountingMatchedPrefix, config.PromptCacheAccountingAggregatorTarget:
+	default:
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(map[string]string{"error": "invalid prompt cache accounting mode"})
+		return
+	}
 	if err := config.UpdatePromptCacheSettings(current); err != nil {
 		w.WriteHeader(500)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
@@ -6098,6 +6116,7 @@ func (h *Handler) apiUpdatePromptCache(w http.ResponseWriter, r *http.Request) {
 		h.promptCache.ConfigureEfficiencyRange(time.Duration(current.KvCacheTTLSecs)*time.Second, current.CacheReadEfficiencyMin, current.CacheReadEfficiencyMax)
 	}
 	h.promptCache.ConfigurePolicy(current.Enabled, current.NamespaceMode)
+	h.promptCache.ConfigureAccountingMode(current.AccountingMode)
 	h.promptCache.ConfigureLimits(current.MaxEntriesPerAccount, current.MaxEntriesTotal)
 	if current.PersistEnabled {
 		if !wasPersistEnabled {

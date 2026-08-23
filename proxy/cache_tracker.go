@@ -34,6 +34,15 @@ type promptCacheUsage struct {
 	CacheReadInputTokens       int
 	CacheCreation5mInputTokens int
 	CacheCreation1hInputTokens int
+
+	localMatchedInputTokens int
+	targetReadRate          float64
+	hasTargetReadRate       bool
+	accountingMode          string
+	targetApplied           bool
+	upstreamCacheRead       int
+	upstreamCacheCreation   int
+	hasUpstreamBreakdown    bool
 }
 
 type promptCacheDiagnostic struct {
@@ -43,6 +52,12 @@ type promptCacheDiagnostic struct {
 	MatchedInputTokens  int
 	EligibleInputTokens int
 	ReadEfficiency      float64
+	AccountingMode      string
+	TargetReadRate      float64
+	TargetApplied       bool
+	UpstreamCacheRead   int
+	UpstreamCacheCreate int
+	HasUpstreamCache    bool
 }
 
 func (d promptCacheDiagnostic) Apply(entry *requestLogEntry) {
@@ -55,6 +70,12 @@ func (d promptCacheDiagnostic) Apply(entry *requestLogEntry) {
 	entry.CacheMatchedInputTokens = d.MatchedInputTokens
 	entry.CacheEligibleInputTokens = d.EligibleInputTokens
 	entry.CacheReadEfficiency = d.ReadEfficiency
+	entry.CacheAccountingMode = d.AccountingMode
+	entry.CacheTargetReadRate = d.TargetReadRate
+	entry.CacheTargetApplied = d.TargetApplied
+	entry.CacheUpstreamRead = d.UpstreamCacheRead
+	entry.CacheUpstreamCreate = d.UpstreamCacheCreate
+	entry.CacheUpstreamKnown = d.HasUpstreamCache
 }
 
 type promptCacheBreakpoint struct {
@@ -108,6 +129,7 @@ type promptCacheTracker struct {
 	maxSupportedTTL      time.Duration
 	readEfficiencyMin    float64
 	readEfficiencyMax    float64
+	accountingMode       string
 	maxEntriesPerAccount int
 	maxEntriesTotal      int
 	entryCount           atomic.Int64
@@ -157,6 +179,7 @@ func newPromptCacheTrackerWithEfficiencyRange(maxTTL time.Duration, readEfficien
 		maxSupportedTTL:      maxTTL,
 		readEfficiencyMin:    readEfficiencyMin,
 		readEfficiencyMax:    readEfficiencyMax,
+		accountingMode:       config.PromptCacheAccountingMatchedPrefix,
 		maxEntriesPerAccount: defaultPromptCacheMaxEntriesPerAccount,
 		maxEntriesTotal:      defaultPromptCacheMaxEntriesTotal,
 		missReasons:          make(map[string]uint64),
@@ -238,6 +261,15 @@ func (t *promptCacheTracker) ConfigureEfficiencyRange(maxTTL time.Duration, read
 	t.readEfficiencyMax = readEfficiencyMax
 	t.settingsMu.Unlock()
 	t.clampEntryTTLs(maxTTL, time.Now())
+}
+
+func (t *promptCacheTracker) ConfigureAccountingMode(mode string) {
+	if t == nil {
+		return
+	}
+	t.settingsMu.Lock()
+	t.accountingMode = normalizePromptCacheAccountingMode(mode)
+	t.settingsMu.Unlock()
 }
 
 func (t *promptCacheTracker) BuildClaudeProfile(req *ClaudeRequest, totalInputTokens int) *promptCacheProfile {
@@ -413,6 +445,9 @@ func (t *promptCacheTracker) ComputeDetailed(accountID string, profile *promptCa
 		CacheReadInputTokens:       matchedTokens,
 		CacheCreation5mInputTokens: cache5m,
 		CacheCreation1hInputTokens: cache1h,
+		localMatchedInputTokens:    rawMatchedTokens,
+		targetReadRate:             readEfficiency,
+		hasTargetReadRate:          true,
 	}
 	diagnostic.MatchedInputTokens = rawMatchedTokens
 	if rawMatchedTokens > 0 {
@@ -472,6 +507,18 @@ func (t *promptCacheTracker) efficiencyRange() (float64, float64) {
 	t.settingsMu.RLock()
 	defer t.settingsMu.RUnlock()
 	return t.readEfficiencyMin, t.readEfficiencyMax
+}
+
+func (t *promptCacheTracker) accountingSettings() (string, float64, float64) {
+	if t == nil {
+		return config.PromptCacheAccountingMatchedPrefix, 1, 1
+	}
+	t.settingsMu.RLock()
+	defer t.settingsMu.RUnlock()
+	if !t.enabled {
+		return config.PromptCacheAccountingActual, t.readEfficiencyMin, t.readEfficiencyMax
+	}
+	return normalizePromptCacheAccountingMode(t.accountingMode), t.readEfficiencyMin, t.readEfficiencyMax
 }
 
 func (t *promptCacheTracker) settingsSnapshot() (time.Duration, int, int) {
@@ -1148,6 +1195,17 @@ func normalizeEfficiencyRange(minValue, maxValue float64) (float64, float64) {
 	return minValue, maxValue
 }
 
+func normalizePromptCacheAccountingMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case config.PromptCacheAccountingActual:
+		return config.PromptCacheAccountingActual
+	case config.PromptCacheAccountingAggregatorTarget:
+		return config.PromptCacheAccountingAggregatorTarget
+	default:
+		return config.PromptCacheAccountingMatchedPrefix
+	}
+}
+
 func deterministicPromptCacheEfficiency(minValue, maxValue float64, accountID string, fingerprint [32]byte, now time.Time) float64 {
 	if minValue >= maxValue {
 		return minValue
@@ -1237,38 +1295,129 @@ func reconcilePromptCacheUsage(usage promptCacheUsage, inputTokens int) promptCa
 	return usage
 }
 
+func (t *promptCacheTracker) ResolveUsage(synthetic promptCacheUsage, upstream KiroTokenUsage, inputTokens int, profile *promptCacheProfile) (promptCacheUsage, int) {
+	mode, targetMin, targetMax := t.accountingSettings()
+	return resolvePromptCacheUsageForMode(synthetic, upstream, inputTokens, profile, mode, targetMin, targetMax)
+}
+
+// resolvePromptCacheUsage retains the historical matched-prefix behavior for
+// focused unit tests and callers without a configured tracker.
 func resolvePromptCacheUsage(synthetic promptCacheUsage, upstream KiroTokenUsage, inputTokens int, profile *promptCacheProfile) (promptCacheUsage, int) {
-	if !upstream.HasCacheBreakdown {
-		return reconcilePromptCacheUsage(synthetic, inputTokens), inputTokens
+	return resolvePromptCacheUsageForMode(
+		synthetic,
+		upstream,
+		inputTokens,
+		profile,
+		config.PromptCacheAccountingMatchedPrefix,
+		0,
+		0,
+	)
+}
+
+func resolvePromptCacheUsageForMode(synthetic promptCacheUsage, upstream KiroTokenUsage, inputTokens int, profile *promptCacheProfile, mode string, targetMin, targetMax float64) (promptCacheUsage, int) {
+	if upstream.HasCacheBreakdown {
+		if upstream.hasUncachedBreakdown {
+			inputTokens = maxInt(upstream.UncachedInputTokens, 0) + maxInt(upstream.CacheReadInputTokens, 0) + maxInt(upstream.CacheCreationInputTokens, 0)
+		} else if upstream.InputTokens > 0 {
+			inputTokens = upstream.InputTokens
+		}
 	}
 
-	usage := promptCacheUsage{
-		CacheCreationInputTokens:   upstream.CacheCreationInputTokens,
-		CacheReadInputTokens:       upstream.CacheReadInputTokens,
-		CacheCreation5mInputTokens: upstream.CacheCreation5mTokens,
-		CacheCreation1hInputTokens: upstream.CacheCreation1hTokens,
-	}
-	if usage.CacheCreationInputTokens > 0 && usage.CacheCreation5mInputTokens+usage.CacheCreation1hInputTokens == 0 {
-		usage.CacheCreation5mInputTokens, usage.CacheCreation1hInputTokens = computePromptCacheTTLBreakdown(profile, 0)
+	localUsage := reconcilePromptCacheUsage(synthetic, inputTokens)
+	baseline := localUsage
+	if upstream.HasCacheBreakdown {
+		baseline = promptCacheUsage{
+			CacheCreationInputTokens:   upstream.CacheCreationInputTokens,
+			CacheReadInputTokens:       upstream.CacheReadInputTokens,
+			CacheCreation5mInputTokens: upstream.CacheCreation5mTokens,
+			CacheCreation1hInputTokens: upstream.CacheCreation1hTokens,
+		}
+		if baseline.CacheCreationInputTokens > 0 && baseline.CacheCreation5mInputTokens+baseline.CacheCreation1hInputTokens == 0 {
+			baseline.CacheCreation5mInputTokens, baseline.CacheCreation1hInputTokens = computePromptCacheTTLBreakdown(profile, 0)
+		}
+		baseline = reconcilePromptCacheUsage(baseline, inputTokens)
 	}
 
-	if upstream.hasUncachedBreakdown {
-		inputTokens = maxInt(upstream.UncachedInputTokens, 0) + maxInt(upstream.CacheReadInputTokens, 0) + maxInt(upstream.CacheCreationInputTokens, 0)
-	} else if upstream.InputTokens > 0 {
-		inputTokens = upstream.InputTokens
+	mode = normalizePromptCacheAccountingMode(mode)
+	reported := baseline
+	targetApplied := false
+	targetRate := 0.0
+	switch mode {
+	case config.PromptCacheAccountingActual:
+		if !upstream.HasCacheBreakdown {
+			reported = promptCacheUsage{}
+		}
+	case config.PromptCacheAccountingAggregatorTarget:
+		warmHit := synthetic.localMatchedInputTokens > 0 || (upstream.HasCacheBreakdown && upstream.CacheReadInputTokens > 0)
+		if warmHit && inputTokens > 0 {
+			if synthetic.hasTargetReadRate {
+				targetRate = synthetic.targetReadRate
+			} else {
+				targetMin, targetMax = normalizeEfficiencyRange(targetMin, targetMax)
+				targetRate = (targetMin + targetMax) / 2
+			}
+			targetRate = clampFloat(targetRate, 0, 1)
+			creation := minInt(maxInt(baseline.CacheCreationInputTokens, 0), inputTokens)
+			targetRead := int(math.Round(float64(inputTokens) * targetRate))
+			targetRead = minInt(maxInt(targetRead, 0), inputTokens-creation)
+			reported.CacheCreationInputTokens = creation
+			reported.CacheReadInputTokens = targetRead
+			reported = reconcilePromptCacheUsage(reported, inputTokens)
+			targetApplied = true
+		}
 	}
-	return reconcilePromptCacheUsage(usage, inputTokens), inputTokens
+
+	reported.accountingMode = mode
+	reported.targetApplied = targetApplied
+	reported.targetReadRate = targetRate
+	reported.hasTargetReadRate = targetApplied
+	reported.localMatchedInputTokens = synthetic.localMatchedInputTokens
+	reported.upstreamCacheRead = maxInt(upstream.CacheReadInputTokens, 0)
+	reported.upstreamCacheCreation = maxInt(upstream.CacheCreationInputTokens, 0)
+	reported.hasUpstreamBreakdown = upstream.HasCacheBreakdown
+	return reported, inputTokens
 }
 
 func finalizePromptCacheDiagnostic(diagnostic promptCacheDiagnostic, upstream KiroTokenUsage, usage promptCacheUsage, inputTokens int) promptCacheDiagnostic {
-	if upstream.HasCacheBreakdown {
-		diagnostic = promptCacheDiagnostic{
-			Status:              "miss",
-			Reason:              "upstream_no_cache_read",
-			Source:              "upstream",
-			MatchedInputTokens:  usage.CacheReadInputTokens,
-			EligibleInputTokens: inputTokens,
+	diagnostic.AccountingMode = normalizePromptCacheAccountingMode(usage.accountingMode)
+	diagnostic.TargetApplied = usage.targetApplied
+	diagnostic.TargetReadRate = usage.targetReadRate
+	diagnostic.UpstreamCacheRead = usage.upstreamCacheRead
+	diagnostic.UpstreamCacheCreate = usage.upstreamCacheCreation
+	diagnostic.HasUpstreamCache = usage.hasUpstreamBreakdown
+	if usage.targetApplied {
+		diagnostic.Source = config.PromptCacheAccountingAggregatorTarget
+		diagnostic.Status = "hit"
+		diagnostic.Reason = ""
+		if usage.CacheCreationInputTokens > 0 {
+			diagnostic.Status = "partial_hit"
 		}
+		if usage.CacheReadInputTokens == 0 {
+			diagnostic.Status = "miss"
+			diagnostic.Reason = "read_efficiency_zero"
+		}
+		if diagnostic.EligibleInputTokens == 0 {
+			diagnostic.EligibleInputTokens = inputTokens
+		}
+		if inputTokens > 0 {
+			diagnostic.ReadEfficiency = float64(usage.CacheReadInputTokens) / float64(inputTokens)
+		}
+		return diagnostic
+	}
+	if diagnostic.AccountingMode == config.PromptCacheAccountingActual && !upstream.HasCacheBreakdown {
+		diagnostic.Status = "skipped"
+		diagnostic.Reason = "upstream_cache_usage_unavailable"
+		diagnostic.Source = "upstream"
+		diagnostic.EligibleInputTokens = inputTokens
+		diagnostic.ReadEfficiency = 0
+		return diagnostic
+	}
+	if upstream.HasCacheBreakdown {
+		diagnostic.Status = "miss"
+		diagnostic.Reason = "upstream_no_cache_read"
+		diagnostic.Source = "upstream"
+		diagnostic.MatchedInputTokens = usage.CacheReadInputTokens
+		diagnostic.EligibleInputTokens = inputTokens
 		if usage.CacheReadInputTokens > 0 {
 			diagnostic.Status = "hit"
 			diagnostic.Reason = ""

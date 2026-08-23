@@ -413,6 +413,9 @@ func TestPromptCacheDefaultsForLegacyConfig(t *testing.T) {
 	if !got.Enabled || !got.PersistEnabled || got.NamespaceMode != PromptCacheNamespaceAccount {
 		t.Fatalf("expected legacy cache policy enabled/persisted/account, got enabled=%v persisted=%v namespace=%q", got.Enabled, got.PersistEnabled, got.NamespaceMode)
 	}
+	if got.AccountingMode != PromptCacheAccountingMatchedPrefix {
+		t.Fatalf("expected legacy cache accounting mode %q, got %q", PromptCacheAccountingMatchedPrefix, got.AccountingMode)
+	}
 	if got.CacheReadEfficiency != 0.87 {
 		t.Fatalf("expected default cacheReadEfficiency 0.87, got %v", got.CacheReadEfficiency)
 	}
@@ -486,6 +489,25 @@ func TestPromptCacheZeroRangePersists(t *testing.T) {
 	}
 	if _, ok := persisted["cacheReadEfficiencyMax"]; !ok {
 		t.Fatalf("expected cacheReadEfficiencyMax to be persisted for zero range")
+	}
+}
+
+func TestPromptCacheAccountingModePersists(t *testing.T) {
+	cfgFile := filepath.Join(t.TempDir(), "config.json")
+	if err := Init(cfgFile); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	if got := GetPromptCacheConfig().AccountingMode; got != PromptCacheAccountingActual {
+		t.Fatalf("new config accounting mode = %q, want %q", got, PromptCacheAccountingActual)
+	}
+
+	settings := GetPromptCacheConfig()
+	settings.AccountingMode = PromptCacheAccountingAggregatorTarget
+	if err := UpdatePromptCacheSettings(settings); err != nil {
+		t.Fatalf("update prompt cache settings: %v", err)
+	}
+	if got := GetPromptCacheConfig().AccountingMode; got != PromptCacheAccountingAggregatorTarget {
+		t.Fatalf("persisted accounting mode = %q, want %q", got, PromptCacheAccountingAggregatorTarget)
 	}
 }
 

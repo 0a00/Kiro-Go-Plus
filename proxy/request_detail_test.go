@@ -134,12 +134,18 @@ func TestRequestDetailTraceCapturesOutputUsageToolsAttemptsAndTimeline(t *testin
 	trace.recordAttempt("account-1", "user@example.com", "runtime", "example.com", time.Now().Add(-20*time.Millisecond), http.StatusOK, "success", nil, "")
 
 	detail, ok := trace.finalize(requestLogEntry{
-		RequestID:  "req-trace",
-		Protocol:   "claude.messages.stream",
-		Model:      "test",
-		Status:     "success",
-		StatusCode: http.StatusOK,
-		DurationMs: 25,
+		RequestID:            "req-trace",
+		Protocol:             "claude.messages.stream",
+		Model:                "test",
+		Status:               "success",
+		StatusCode:           http.StatusOK,
+		DurationMs:           25,
+		CacheReadInputTokens: 9,
+		CacheAccountingMode:  config.PromptCacheAccountingAggregatorTarget,
+		CacheTargetReadRate:  0.9,
+		CacheTargetApplied:   true,
+		CacheUpstreamRead:    3,
+		CacheUpstreamKnown:   true,
 	})
 	if !ok {
 		t.Fatal("trace did not finalize")
@@ -150,8 +156,11 @@ func TestRequestDetailTraceCapturesOutputUsageToolsAttemptsAndTimeline(t *testin
 	if detail.Response.VisibleOutput != "visible" || detail.Response.ThinkingOutput != "thinking" {
 		t.Fatalf("unexpected output capture: %+v", detail.Response)
 	}
-	if detail.Response.InputTokens != 10 || detail.Response.OutputTokens != 4 || detail.Response.CacheReadInputTokens != 3 {
+	if detail.Response.InputTokens != 10 || detail.Response.OutputTokens != 4 || detail.Response.UncachedInputTokens != 1 || detail.Response.CacheReadInputTokens != 9 {
 		t.Fatalf("unexpected usage: %+v", detail.Response)
+	}
+	if detail.Response.CacheAccountingMode != config.PromptCacheAccountingAggregatorTarget || detail.Response.CacheUpstreamRead != 3 || !detail.Response.CacheUpstreamKnown {
+		t.Fatalf("reported and upstream cache usage were not preserved separately: %+v", detail.Response)
 	}
 	if len(detail.Response.Tools) != 1 || detail.Response.Tools[0].ArgumentBytes == 0 || detail.Response.Tools[0].ArgumentSHA256 == "" {
 		t.Fatalf("unexpected tool metadata: %+v", detail.Response.Tools)

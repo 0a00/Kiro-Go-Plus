@@ -439,7 +439,7 @@ func (h *Handler) callClaudeWebSearchRound(
 		}
 
 		cacheScope := h.promptCache.ScopeKey(account.ID, apiKeyID)
-		cacheUsage, cacheDiagnostic := h.promptCache.ComputeDetailed(cacheScope, cacheProfile)
+		syntheticCacheUsage, cacheDiagnostic := h.promptCache.ComputeDetailed(cacheScope, cacheProfile)
 		payload.setPromptCacheDiagnostic(cacheDiagnostic)
 		var text, thinkingText strings.Builder
 		var toolUses []KiroToolUse
@@ -502,7 +502,7 @@ func (h *Handler) callClaudeWebSearchRound(
 		} else if inputTokens <= 0 {
 			inputTokens = estimatedInputTokens
 		}
-		cacheUsage, inputTokens = resolvePromptCacheUsage(cacheUsage, upstreamUsage, inputTokens, cacheProfile)
+		cacheUsage, inputTokens := h.promptCache.ResolveUsage(syntheticCacheUsage, upstreamUsage, inputTokens, cacheProfile)
 		cacheDiagnostic = finalizePromptCacheDiagnostic(cacheDiagnostic, upstreamUsage, cacheUsage, inputTokens)
 		payload.setPromptCacheDiagnostic(cacheDiagnostic)
 		thinkingTokens := upstreamUsage.ThinkingTokens
@@ -629,7 +629,7 @@ func (h *Handler) handleClaudeWebSearchLoop(
 	}
 
 	if stream != nil {
-		stream.finish(result.content, result.stopReason, result.outputTokens, result.webSearchRequests)
+		stream.finish(result.content, result.stopReason, result.inputTokens, result.outputTokens, result.thinkingTokens, result.cacheUsage, result.webSearchRequests)
 	} else {
 		markWebSearchFirstContent(firstContent, result.content)
 		response := buildWebSearchLoopResponse(req.Model, result)
@@ -757,7 +757,7 @@ func (s *webSearchSSESession) stopHeartbeat() {
 	})
 }
 
-func (s *webSearchSSESession) finish(content []ClaudeContentBlock, stopReason string, outputTokens, webSearchRequests int) {
+func (s *webSearchSSESession) finish(content []ClaudeContentBlock, stopReason string, inputTokens, outputTokens, thinkingTokens int, cacheUsage promptCacheUsage, webSearchRequests int) {
 	s.stopHeartbeat()
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -767,13 +767,12 @@ func (s *webSearchSSESession) finish(content []ClaudeContentBlock, stopReason st
 	for index, block := range content {
 		s.sendContentBlockLocked(index, block)
 	}
+	usage := buildClaudeUsageMap(inputTokens, outputTokens, thinkingTokens, cacheUsage, true)
+	usage["server_tool_use"] = map[string]int{"web_search_requests": webSearchRequests}
 	s.sendLocked("message_delta", map[string]interface{}{
 		"type":  "message_delta",
 		"delta": map[string]interface{}{"stop_reason": stopReason},
-		"usage": map[string]interface{}{
-			"output_tokens":   outputTokens,
-			"server_tool_use": map[string]int{"web_search_requests": webSearchRequests},
-		},
+		"usage": usage,
 	}, false)
 	s.sendLocked("message_stop", map[string]interface{}{"type": "message_stop"}, false)
 	s.finished = true

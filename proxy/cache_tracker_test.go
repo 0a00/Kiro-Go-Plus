@@ -488,6 +488,195 @@ func TestResolvePromptCacheUsagePrefersUpstreamBreakdown(t *testing.T) {
 	}
 }
 
+func TestResolvePromptCacheUsageOfficialActualRequiresUpstream(t *testing.T) {
+	synthetic := promptCacheUsage{
+		CacheCreationInputTokens: 200,
+		CacheReadInputTokens:     700,
+		localMatchedInputTokens:  800,
+		targetReadRate:           0.9,
+		hasTargetReadRate:        true,
+	}
+	usage, inputTokens := resolvePromptCacheUsageForMode(
+		synthetic,
+		KiroTokenUsage{},
+		1000,
+		nil,
+		config.PromptCacheAccountingActual,
+		0.9,
+		0.95,
+	)
+	if inputTokens != 1000 || usage.CacheReadInputTokens != 0 || usage.CacheCreationInputTokens != 0 {
+		t.Fatalf("official actual must not synthesize missing upstream usage, input=%d usage=%+v", inputTokens, usage)
+	}
+	if got := billedClaudeInputTokens(inputTokens, usage); got != 1000 {
+		t.Fatalf("official actual uncached input = %d, want 1000", got)
+	}
+	diagnostic := finalizePromptCacheDiagnostic(promptCacheDiagnostic{Status: "hit", Source: "local"}, KiroTokenUsage{}, usage, inputTokens)
+	if diagnostic.Status != "skipped" || diagnostic.Reason != "upstream_cache_usage_unavailable" || diagnostic.AccountingMode != config.PromptCacheAccountingActual {
+		t.Fatalf("unexpected official actual diagnostic: %+v", diagnostic)
+	}
+
+	upstream := KiroTokenUsage{InputTokens: 1000, CacheReadInputTokens: 250, CacheCreationInputTokens: 50, HasCacheBreakdown: true}
+	usage, _ = resolvePromptCacheUsageForMode(synthetic, upstream, 1000, nil, config.PromptCacheAccountingActual, 0.9, 0.95)
+	if usage.CacheReadInputTokens != 250 || usage.CacheCreationInputTokens != 50 || usage.targetApplied {
+		t.Fatalf("official actual must preserve upstream buckets: %+v", usage)
+	}
+}
+
+func TestResolvePromptCacheUsageAggregatorTargetsTotalInput(t *testing.T) {
+	synthetic := promptCacheUsage{
+		CacheReadInputTokens:    100,
+		localMatchedInputTokens: 200,
+		targetReadRate:          0.93,
+		hasTargetReadRate:       true,
+	}
+	upstream := KiroTokenUsage{
+		InputTokens:          1000,
+		CacheReadInputTokens: 150,
+		HasCacheBreakdown:    true,
+	}
+	usage, inputTokens := resolvePromptCacheUsageForMode(
+		synthetic,
+		upstream,
+		1000,
+		nil,
+		config.PromptCacheAccountingAggregatorTarget,
+		0.9,
+		0.95,
+	)
+	if inputTokens != 1000 || usage.CacheReadInputTokens != 930 || usage.CacheCreationInputTokens != 0 {
+		t.Fatalf("aggregator target usage = %+v input=%d, want read=930 creation=0 total=1000", usage, inputTokens)
+	}
+	if got := billedClaudeInputTokens(inputTokens, usage) + usage.CacheCreationInputTokens + usage.CacheReadInputTokens; got != inputTokens {
+		t.Fatalf("Anthropic input buckets total %d, want %d", got, inputTokens)
+	}
+	if !usage.targetApplied || usage.upstreamCacheRead != 150 || !usage.hasUpstreamBreakdown {
+		t.Fatalf("expected target and upstream metadata to remain separate: %+v", usage)
+	}
+
+	diagnostic := finalizePromptCacheDiagnostic(promptCacheDiagnostic{Status: "hit", MatchedInputTokens: 200}, upstream, usage, inputTokens)
+	entry := requestLogEntry{}
+	diagnostic.Apply(&entry)
+	if entry.CacheAccountingMode != config.PromptCacheAccountingAggregatorTarget || !entry.CacheTargetApplied || entry.CacheUpstreamRead != 150 {
+		t.Fatalf("unexpected persisted cache diagnostic: %+v", entry)
+	}
+
+	claudeUsage := buildClaudeUsageMap(inputTokens, 10, 0, usage, true)
+	if claudeUsage["input_tokens"] != 70 || claudeUsage["cache_read_input_tokens"] != 930 {
+		t.Fatalf("unexpected Anthropic usage: %#v", claudeUsage)
+	}
+	openAIUsage := buildOpenAIUsage(inputTokens, 10, 0, usage)
+	if openAIUsage.PromptTokens != 1000 || openAIUsage.TotalTokens != 1010 || openAIUsage.PromptTokensDetails == nil || openAIUsage.PromptTokensDetails.CachedTokens != 930 {
+		t.Fatalf("unexpected OpenAI usage: %+v", openAIUsage)
+	}
+	responsesUsage := buildResponsesUsage(inputTokens, 10, 0, usage)
+	if responsesUsage.InputTokens != 1000 || responsesUsage.TotalTokens != 1010 || responsesUsage.InputTokensDetails == nil || responsesUsage.InputTokensDetails.CachedTokens != 930 {
+		t.Fatalf("unexpected Responses usage: %+v", responsesUsage)
+	}
+}
+
+func TestResolvePromptCacheUsageAggregatorPreservesWarmupAndCreation(t *testing.T) {
+	miss := promptCacheUsage{
+		CacheCreationInputTokens: 800,
+		targetReadRate:           0.95,
+		hasTargetReadRate:        true,
+	}
+	usage, _ := resolvePromptCacheUsageForMode(miss, KiroTokenUsage{}, 1000, nil, config.PromptCacheAccountingAggregatorTarget, 0.9, 0.95)
+	if usage.targetApplied || usage.CacheReadInputTokens != 0 || usage.CacheCreationInputTokens != 800 {
+		t.Fatalf("first request must remain a cache creation miss: %+v", usage)
+	}
+
+	partial := promptCacheUsage{
+		localMatchedInputTokens:    500,
+		targetReadRate:             0.95,
+		hasTargetReadRate:          true,
+		CacheCreationInputTokens:   200,
+		CacheCreation5mInputTokens: 200,
+		CacheReadInputTokens:       300,
+	}
+	usage, _ = resolvePromptCacheUsageForMode(partial, KiroTokenUsage{}, 1000, nil, config.PromptCacheAccountingAggregatorTarget, 0.9, 0.95)
+	if !usage.targetApplied || usage.CacheCreationInputTokens != 200 || usage.CacheReadInputTokens != 800 {
+		t.Fatalf("cache creation must cap the target read bucket: %+v", usage)
+	}
+	if got := billedClaudeInputTokens(1000, usage) + usage.CacheCreationInputTokens + usage.CacheReadInputTokens; got != 1000 {
+		t.Fatalf("partial-hit input buckets total %d, want 1000", got)
+	}
+}
+
+func TestResolvePromptCacheUsageAggregatorUsesRangeMidpointWithoutLocalProfile(t *testing.T) {
+	upstream := KiroTokenUsage{InputTokens: 1000, CacheReadInputTokens: 100, HasCacheBreakdown: true}
+	usage, _ := resolvePromptCacheUsageForMode(
+		promptCacheUsage{},
+		upstream,
+		1000,
+		nil,
+		config.PromptCacheAccountingAggregatorTarget,
+		0.9,
+		0.94,
+	)
+	if usage.CacheReadInputTokens != 920 || !usage.targetApplied {
+		t.Fatalf("upstream-only warm hit should use range midpoint, got %+v", usage)
+	}
+}
+
+func TestPromptCacheAggregatorRatioIsConsistentAcrossUsageUpdates(t *testing.T) {
+	tracker := newPromptCacheTrackerWithSettings(time.Hour, 0.91)
+	tracker.ConfigureAccountingMode(config.PromptCacheAccountingAggregatorTarget)
+	synthetic := promptCacheUsage{
+		CacheReadInputTokens:    200,
+		localMatchedInputTokens: 400,
+		targetReadRate:          0.91,
+		hasTargetReadRate:       true,
+	}
+	startUsage, startInput := tracker.ResolveUsage(synthetic, KiroTokenUsage{}, 1000, nil)
+	finalUsage, finalInput := tracker.ResolveUsage(synthetic, KiroTokenUsage{InputTokens: 1000, CacheReadInputTokens: 100, HasCacheBreakdown: true}, 1000, nil)
+	if startInput != finalInput || startUsage.CacheReadInputTokens != 910 || finalUsage.CacheReadInputTokens != 910 {
+		t.Fatalf("stream usage ratio changed between start and final: start=%+v/%d final=%+v/%d", startUsage, startInput, finalUsage, finalInput)
+	}
+}
+
+func TestPromptCacheAggregatorAppliesOnlyAfterTrackerWarmup(t *testing.T) {
+	tracker := newPromptCacheTrackerWithSettings(time.Hour, 0.9)
+	tracker.ConfigureAccountingMode(config.PromptCacheAccountingAggregatorTarget)
+	profile := &promptCacheProfile{
+		Model:            "claude-sonnet-4.6",
+		TotalInputTokens: 2000,
+		Breakpoints: []promptCacheBreakpoint{{
+			Fingerprint:      [32]byte{1, 2, 3},
+			CumulativeTokens: 2000,
+			TTL:              time.Hour,
+		}},
+	}
+
+	miss, _ := tracker.ComputeDetailed("acct", profile)
+	miss, _ = tracker.ResolveUsage(miss, KiroTokenUsage{}, 2000, profile)
+	if miss.targetApplied || miss.CacheReadInputTokens != 0 || miss.CacheCreationInputTokens != 2000 {
+		t.Fatalf("cold request must remain a creation miss: %+v", miss)
+	}
+
+	tracker.Update("acct", profile)
+	hit, _ := tracker.ComputeDetailed("acct", profile)
+	hit, _ = tracker.ResolveUsage(hit, KiroTokenUsage{}, 2000, profile)
+	if !hit.targetApplied || hit.CacheReadInputTokens != 1800 || hit.CacheCreationInputTokens != 0 {
+		t.Fatalf("warm request must target 90%% of total input: %+v", hit)
+	}
+}
+
+func TestPromptCacheDisabledBypassesAggregatorTarget(t *testing.T) {
+	tracker := newPromptCacheTrackerWithSettings(time.Hour, 0.95)
+	tracker.ConfigureAccountingMode(config.PromptCacheAccountingAggregatorTarget)
+	tracker.ConfigurePolicy(false, config.PromptCacheNamespaceAccount)
+	usage, _ := tracker.ResolveUsage(
+		promptCacheUsage{},
+		KiroTokenUsage{InputTokens: 1000, CacheReadInputTokens: 100, HasCacheBreakdown: true},
+		1000,
+		nil,
+	)
+	if usage.CacheReadInputTokens != 100 || usage.targetApplied || usage.accountingMode != config.PromptCacheAccountingActual {
+		t.Fatalf("disabled local cache must preserve actual upstream accounting, got %+v", usage)
+	}
+}
+
 func TestPromptCacheStatsAndClear(t *testing.T) {
 	tracker := newPromptCacheTracker(time.Hour)
 	var fingerprint [32]byte

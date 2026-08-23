@@ -803,10 +803,15 @@
       if (cacheStatus) cacheDetails.push(cacheStatus);
       if (cacheReason) cacheDetails.push(cacheReason);
       if (item.cacheSource) cacheDetails.push(t('requests.cacheSource') + ': ' + item.cacheSource);
+      if (item.cacheAccountingMode) cacheDetails.push(t('requests.cacheAccountingMode') + ': ' + t('settings.cacheAccounting.' + item.cacheAccountingMode));
       if (item.cacheMatchedInputTokens || item.cacheEligibleInputTokens) {
         cacheDetails.push(t('requests.cacheMatched', item.cacheMatchedInputTokens || 0, item.cacheEligibleInputTokens || 0));
       }
       if (item.cacheReadEfficiency) cacheDetails.push(t('requests.cacheEfficiency') + ': ' + (item.cacheReadEfficiency * 100).toFixed(1) + '%');
+      if (item.cacheTargetApplied) cacheDetails.push(t('requests.cacheTarget', ((item.cacheTargetReadRate || 0) * 100).toFixed(1)));
+      if (item.hasUpstreamCacheBreakdown) {
+        cacheDetails.push(t('requests.cacheUpstreamActual', item.upstreamCacheReadInputTokens || 0, item.upstreamCacheCreationInputTokens || 0));
+      }
       const cacheTitle = cacheDetails.join(' · ');
       const account = item.accountEmail || item.accountId || '-';
       const err = item.error ? item.error : '';
@@ -2704,6 +2709,7 @@
     $('promptCacheEnabled').checked = d.enabled !== false;
     $('promptCachePersistEnabled').checked = d.persistEnabled !== false;
     $('cacheNamespaceMode').value = d.namespaceMode === 'account_api_key' ? 'account_api_key' : 'account';
+    $('cacheAccountingMode').value = normalizeCacheAccountingMode(d.accountingMode);
     const fallback = d.cacheReadEfficiency == null ? 0.87 : d.cacheReadEfficiency;
     $('cacheReadEfficiencyMin').value = Math.round(((d.cacheReadEfficiencyMin == null ? fallback : d.cacheReadEfficiencyMin) * 100));
     $('cacheReadEfficiencyMax').value = Math.round(((d.cacheReadEfficiencyMax == null ? fallback : d.cacheReadEfficiencyMax) * 100));
@@ -2711,6 +2717,18 @@
     $('cacheMaxEntriesPerAccount').value = d.maxEntriesPerAccount || 2048;
     $('cacheMaxEntriesTotal').value = d.maxEntriesTotal || 50000;
     renderPromptCacheStats(d.stats || {});
+    syncPromptCacheAccountingMode();
+  }
+
+  function normalizeCacheAccountingMode(mode) {
+    return ['official_actual', 'matched_prefix', 'aggregator_target'].includes(mode) ? mode : 'official_actual';
+  }
+
+  function syncPromptCacheAccountingMode() {
+    syncCustomSelect($('cacheAccountingMode'));
+    const actualOnly = $('cacheAccountingMode').value === 'official_actual';
+    $('cacheReadEfficiencyMin').disabled = actualOnly;
+    $('cacheReadEfficiencyMax').disabled = actualOnly;
   }
   function renderPromptCacheStats(stats) {
     $('cacheStatEntries').textContent = formatNumber(stats.entries || 0) + ' / ' + formatNumber(stats.accounts || 0);
@@ -2749,6 +2767,7 @@
         enabled: $('promptCacheEnabled').checked,
         persistEnabled: $('promptCachePersistEnabled').checked,
         namespaceMode: $('cacheNamespaceMode').value,
+        accountingMode: normalizeCacheAccountingMode($('cacheAccountingMode').value),
         cacheReadEfficiencyMin: efficiencyMinPct / 100,
         cacheReadEfficiencyMax: efficiencyMaxPct / 100,
         kvCacheTtlSecs: Math.round(ttl),
@@ -2765,12 +2784,14 @@
       $('promptCacheEnabled').checked = d.config.enabled !== false;
       $('promptCachePersistEnabled').checked = d.config.persistEnabled !== false;
       $('cacheNamespaceMode').value = d.config.namespaceMode === 'account_api_key' ? 'account_api_key' : 'account';
+      $('cacheAccountingMode').value = normalizeCacheAccountingMode(d.config.accountingMode);
       const fallback = d.config.cacheReadEfficiency == null ? 0.87 : d.config.cacheReadEfficiency;
       $('cacheReadEfficiencyMin').value = Math.round(((d.config.cacheReadEfficiencyMin == null ? fallback : d.config.cacheReadEfficiencyMin) * 100));
       $('cacheReadEfficiencyMax').value = Math.round(((d.config.cacheReadEfficiencyMax == null ? fallback : d.config.cacheReadEfficiencyMax) * 100));
       $('kvCacheTtlSecs').value = d.config.kvCacheTtlSecs || 3600;
       $('cacheMaxEntriesPerAccount').value = d.config.maxEntriesPerAccount || 2048;
       $('cacheMaxEntriesTotal').value = d.config.maxEntriesTotal || 50000;
+      syncPromptCacheAccountingMode();
     }
     toast(t('settings.promptCacheSaved'), 'success');
     loadPromptCacheConfig();
@@ -4671,6 +4692,7 @@
     $('saveUpstreamProtectionBtn').addEventListener('click', saveUpstreamProtectionConfig);
     $('savePromptCacheBtn').addEventListener('click', savePromptCacheConfig);
     $('clearPromptCacheBtn').addEventListener('click', clearPromptCache);
+    $('cacheAccountingMode').addEventListener('change', syncPromptCacheAccountingMode);
     $('saveDiagnosticsBtn').addEventListener('click', saveDiagnosticsConfig);
     $('saveRequestLogBtn').addEventListener('click', saveRequestLogConfig);
 	$('clearRequestDetailsBtn').addEventListener('click', clearRequestDetails);

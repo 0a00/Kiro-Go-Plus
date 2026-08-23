@@ -1,5 +1,5 @@
 {
-  "version": "1.2.42",
-  "changelog": "Harden credential imports with validated AWS regions, typed refresh failures, strict token responses, and complete snake_case Web normalization.\n通过 AWS Region 校验、结构化刷新错误、严格 Token 响应和完整 snake_case Web 归一化加固凭据导入。",
+  "version": "1.2.43",
+  "changelog": "Add official, matched-prefix, and New API/Sub2API target prompt-cache accounting with consistent protocol usage and diagnostics.\n新增真实、匹配前缀和 New API/Sub2API 目标缓存统计模式，并统一协议用量字段与诊断。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }

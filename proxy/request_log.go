@@ -61,6 +61,12 @@ type requestLogEntry struct {
 	CacheMatchedInputTokens  int      `json:"cacheMatchedInputTokens,omitempty"`
 	CacheEligibleInputTokens int      `json:"cacheEligibleInputTokens,omitempty"`
 	CacheReadEfficiency      float64  `json:"cacheReadEfficiency,omitempty"`
+	CacheAccountingMode      string   `json:"cacheAccountingMode,omitempty"`
+	CacheTargetReadRate      float64  `json:"cacheTargetReadRate,omitempty"`
+	CacheTargetApplied       bool     `json:"cacheTargetApplied,omitempty"`
+	CacheUpstreamRead        int      `json:"upstreamCacheReadInputTokens,omitempty"`
+	CacheUpstreamCreate      int      `json:"upstreamCacheCreationInputTokens,omitempty"`
+	CacheUpstreamKnown       bool     `json:"hasUpstreamCacheBreakdown,omitempty"`
 	WebSearchRequests        int      `json:"webSearchRequests,omitempty"`
 	VisibleOutputChars       int      `json:"visibleOutputChars,omitempty"`
 	ThinkingOutputChars      int      `json:"thinkingOutputChars,omitempty"`

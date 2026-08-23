@@ -419,6 +419,7 @@ func TestApiPromptCacheConfigUpdatesRuntimeTracker(t *testing.T) {
 		"enabled": false,
 		"persistEnabled": false,
 		"namespaceMode": "account_api_key",
+		"accountingMode": "aggregator_target",
 		"cacheReadEfficiencyMin": 0.5,
 		"cacheReadEfficiencyMax": 0.6,
 		"kvCacheTtlSecs": 120,
@@ -436,6 +437,9 @@ func TestApiPromptCacheConfigUpdatesRuntimeTracker(t *testing.T) {
 	if got.Enabled || got.PersistEnabled || got.NamespaceMode != config.PromptCacheNamespaceAccountAPIKey {
 		t.Fatalf("expected persisted disabled/non-persistent/account_api_key policy, got enabled=%v persisted=%v namespace=%q", got.Enabled, got.PersistEnabled, got.NamespaceMode)
 	}
+	if got.AccountingMode != config.PromptCacheAccountingAggregatorTarget {
+		t.Fatalf("expected persisted aggregator accounting mode, got %q", got.AccountingMode)
+	}
 	if got.CacheReadEfficiencyMin != 0.5 || got.CacheReadEfficiencyMax != 0.6 {
 		t.Fatalf("expected persisted cache efficiency range 0.5-0.6, got %v-%v", got.CacheReadEfficiencyMin, got.CacheReadEfficiencyMax)
 	}
@@ -450,6 +454,9 @@ func TestApiPromptCacheConfigUpdatesRuntimeTracker(t *testing.T) {
 	if h.promptCache.enabled || h.promptCache.namespaceMode != config.PromptCacheNamespaceAccountAPIKey {
 		t.Fatalf("expected runtime disabled/account_api_key policy, got enabled=%v namespace=%q", h.promptCache.enabled, h.promptCache.namespaceMode)
 	}
+	if h.promptCache.accountingMode != config.PromptCacheAccountingAggregatorTarget {
+		t.Fatalf("expected runtime aggregator accounting mode, got %q", h.promptCache.accountingMode)
+	}
 	if h.promptCache.readEfficiencyMin != 0.5 || h.promptCache.readEfficiencyMax != 0.6 {
 		t.Fatalf("expected runtime read efficiency range 0.5-0.6, got %v-%v", h.promptCache.readEfficiencyMin, h.promptCache.readEfficiencyMax)
 	}
@@ -458,6 +465,21 @@ func TestApiPromptCacheConfigUpdatesRuntimeTracker(t *testing.T) {
 	}
 	if h.promptCache.maxEntriesPerAccount != 123 || h.promptCache.maxEntriesTotal != 456 {
 		t.Fatalf("expected runtime cache limits 123/456, got %d/%d", h.promptCache.maxEntriesPerAccount, h.promptCache.maxEntriesTotal)
+	}
+}
+
+func TestApiPromptCacheRejectsUnknownAccountingMode(t *testing.T) {
+	if err := config.Init(t.TempDir() + "/config.json"); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	h := &Handler{promptCache: newPromptCacheTracker(time.Hour)}
+	req := httptest.NewRequest(http.MethodPost, "/prompt-cache", strings.NewReader(`{"accountingMode":"unknown"}`))
+	rec := httptest.NewRecorder()
+
+	h.apiUpdatePromptCache(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d body=%s", rec.Code, rec.Body.String())
 	}
 }
 

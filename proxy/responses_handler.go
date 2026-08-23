@@ -355,7 +355,7 @@ func (h *Handler) handleResponsesNonStream(
 		} else if inputTokens <= 0 {
 			inputTokens = estimatedInputTokens
 		}
-		cacheUsage, inputTokens := resolvePromptCacheUsage(promptCacheUsage{}, upstreamUsage, inputTokens, nil)
+		cacheUsage, inputTokens := h.promptCache.ResolveUsage(promptCacheUsage{}, upstreamUsage, inputTokens, nil)
 		cacheDiagnostic := finalizePromptCacheDiagnostic(promptCacheDiagnostic{Status: "skipped", Reason: "no_cache_breakpoint", Source: "local"}, upstreamUsage, cacheUsage, inputTokens)
 		payload.setPromptCacheDiagnostic(cacheDiagnostic)
 		thinkingTokens := upstreamUsage.ThinkingTokens
@@ -969,7 +969,7 @@ func (h *Handler) handleResponsesStream(
 		} else if inputTokens <= 0 {
 			inputTokens = estimatedInputTokens
 		}
-		cacheUsage, inputTokens := resolvePromptCacheUsage(promptCacheUsage{}, upstreamUsage, inputTokens, nil)
+		cacheUsage, inputTokens := h.promptCache.ResolveUsage(promptCacheUsage{}, upstreamUsage, inputTokens, nil)
 		cacheDiagnostic := finalizePromptCacheDiagnostic(promptCacheDiagnostic{Status: "skipped", Reason: "no_cache_breakpoint", Source: "local"}, upstreamUsage, cacheUsage, inputTokens)
 		payload.setPromptCacheDiagnostic(cacheDiagnostic)
 		thinkingTokens := upstreamUsage.ThinkingTokens

@@ -192,6 +192,7 @@ type PromptCacheConfig struct {
 	Enabled                bool    `json:"enabled"`
 	PersistEnabled         bool    `json:"persistEnabled"`
 	NamespaceMode          string  `json:"namespaceMode"`
+	AccountingMode         string  `json:"accountingMode"`
 	CacheReadEfficiency    float64 `json:"cacheReadEfficiency"`
 	CacheReadEfficiencyMin float64 `json:"cacheReadEfficiencyMin"`
 	CacheReadEfficiencyMax float64 `json:"cacheReadEfficiencyMax"`
@@ -203,6 +204,10 @@ type PromptCacheConfig struct {
 const (
 	PromptCacheNamespaceAccount       = "account"
 	PromptCacheNamespaceAccountAPIKey = "account_api_key"
+
+	PromptCacheAccountingActual           = "official_actual"
+	PromptCacheAccountingMatchedPrefix    = "matched_prefix"
+	PromptCacheAccountingAggregatorTarget = "aggregator_target"
 )
 
 // RuntimeConfig contains process-level and client header settings surfaced in Admin.
@@ -467,6 +472,7 @@ type Config struct {
 	PromptCacheEnabled        bool    `json:"promptCacheEnabled"`
 	PromptCachePersistEnabled bool    `json:"promptCachePersistEnabled"`
 	PromptCacheNamespaceMode  string  `json:"promptCacheNamespaceMode,omitempty"`
+	PromptCacheAccountingMode string  `json:"promptCacheAccountingMode,omitempty"`
 	CacheReadEfficiency       float64 `json:"cacheReadEfficiency"`
 	CacheReadEfficiencyMin    float64 `json:"cacheReadEfficiencyMin"`
 	CacheReadEfficiencyMax    float64 `json:"cacheReadEfficiencyMax"`
@@ -515,7 +521,7 @@ const (
 )
 
 // Version current version
-const Version = "1.2.42"
+const Version = "1.2.43"
 
 var (
 	cfg           *Config
@@ -562,6 +568,7 @@ func loadLocked() error {
 				PromptCacheEnabled:        defaultPromptCacheConfig().Enabled,
 				PromptCachePersistEnabled: defaultPromptCacheConfig().PersistEnabled,
 				PromptCacheNamespaceMode:  defaultPromptCacheConfig().NamespaceMode,
+				PromptCacheAccountingMode: defaultPromptCacheConfig().AccountingMode,
 				CacheReadEfficiency:       defaultPromptCacheConfig().CacheReadEfficiency,
 				CacheReadEfficiencyMin:    defaultPromptCacheConfig().CacheReadEfficiencyMin,
 				CacheReadEfficiencyMax:    defaultPromptCacheConfig().CacheReadEfficiencyMax,
@@ -595,6 +602,7 @@ func loadLocked() error {
 		return err
 	}
 	passwordMigrated := false
+	promptCacheModeMigrated := false
 	if strings.TrimSpace(c.Password) == "" {
 		c.Password = "changeme"
 	}
@@ -617,6 +625,12 @@ func loadLocked() error {
 	}
 	if !rawConfigHasKey(data, "promptCacheNamespaceMode") {
 		c.PromptCacheNamespaceMode = defaultPromptCacheConfig().NamespaceMode
+	}
+	if !rawConfigHasKey(data, "promptCacheAccountingMode") {
+		// Preserve the pre-mode behavior for upgraded deployments. New
+		// installations use official_actual from defaultPromptCacheConfig.
+		c.PromptCacheAccountingMode = PromptCacheAccountingMatchedPrefix
+		promptCacheModeMigrated = true
 	}
 	if !rawConfigHasKey(data, "cacheReadEfficiency") {
 		c.CacheReadEfficiency = defaultPromptCacheConfig().CacheReadEfficiency
@@ -766,7 +780,7 @@ func loadLocked() error {
 			overageMigrated = true
 		}
 	}
-	if overageMigrated || fingerprintMigrated || passwordMigrated || secretsMigrated {
+	if overageMigrated || fingerprintMigrated || passwordMigrated || secretsMigrated || promptCacheModeMigrated {
 		if err := saveLocked(); err != nil {
 			return err
 		}
@@ -982,6 +996,7 @@ func defaultPromptCacheConfig() PromptCacheConfig {
 		Enabled:                true,
 		PersistEnabled:         true,
 		NamespaceMode:          PromptCacheNamespaceAccount,
+		AccountingMode:         PromptCacheAccountingActual,
 		CacheReadEfficiency:    0.87,
 		CacheReadEfficiencyMin: 0.87,
 		CacheReadEfficiencyMax: 0.87,
@@ -1478,6 +1493,14 @@ func normalizePromptCacheLocked() {
 	default:
 		cfg.PromptCacheNamespaceMode = PromptCacheNamespaceAccount
 	}
+	switch strings.ToLower(strings.TrimSpace(cfg.PromptCacheAccountingMode)) {
+	case PromptCacheAccountingMatchedPrefix:
+		cfg.PromptCacheAccountingMode = PromptCacheAccountingMatchedPrefix
+	case PromptCacheAccountingAggregatorTarget:
+		cfg.PromptCacheAccountingMode = PromptCacheAccountingAggregatorTarget
+	default:
+		cfg.PromptCacheAccountingMode = PromptCacheAccountingActual
+	}
 	cfg.CacheReadEfficiency = clampFloatConfig(cfg.CacheReadEfficiency, 0, 1)
 	cfg.CacheReadEfficiencyMin = clampFloatConfig(cfg.CacheReadEfficiencyMin, 0, 1)
 	cfg.CacheReadEfficiencyMax = clampFloatConfig(cfg.CacheReadEfficiencyMax, 0, 1)
@@ -1675,6 +1698,7 @@ func GetPromptCacheConfig() PromptCacheConfig {
 		Enabled:                cfg.PromptCacheEnabled,
 		PersistEnabled:         cfg.PromptCachePersistEnabled,
 		NamespaceMode:          cfg.PromptCacheNamespaceMode,
+		AccountingMode:         cfg.PromptCacheAccountingMode,
 		CacheReadEfficiency:    cfg.CacheReadEfficiency,
 		CacheReadEfficiencyMin: cfg.CacheReadEfficiencyMin,
 		CacheReadEfficiencyMax: cfg.CacheReadEfficiencyMax,
@@ -1693,6 +1717,14 @@ func GetPromptCacheConfig() PromptCacheConfig {
 		out.NamespaceMode = PromptCacheNamespaceAccountAPIKey
 	default:
 		out.NamespaceMode = PromptCacheNamespaceAccount
+	}
+	switch strings.ToLower(strings.TrimSpace(out.AccountingMode)) {
+	case PromptCacheAccountingMatchedPrefix:
+		out.AccountingMode = PromptCacheAccountingMatchedPrefix
+	case PromptCacheAccountingAggregatorTarget:
+		out.AccountingMode = PromptCacheAccountingAggregatorTarget
+	default:
+		out.AccountingMode = PromptCacheAccountingActual
 	}
 	if out.CacheReadEfficiencyMin == 0 && out.CacheReadEfficiencyMax == 0 && out.CacheReadEfficiency > 0 {
 		out.CacheReadEfficiencyMin = out.CacheReadEfficiency
@@ -1726,6 +1758,7 @@ func UpdatePromptCacheSettings(settings PromptCacheConfig) error {
 	cfg.PromptCacheEnabled = settings.Enabled
 	cfg.PromptCachePersistEnabled = settings.PersistEnabled
 	cfg.PromptCacheNamespaceMode = settings.NamespaceMode
+	cfg.PromptCacheAccountingMode = settings.AccountingMode
 	cfg.CacheReadEfficiencyMin = settings.CacheReadEfficiencyMin
 	cfg.CacheReadEfficiencyMax = settings.CacheReadEfficiencyMax
 	cfg.CacheReadEfficiency = (settings.CacheReadEfficiencyMin + settings.CacheReadEfficiencyMax) / 2

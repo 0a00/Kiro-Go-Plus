@@ -22,13 +22,13 @@ Kiro-Go Plus 保留原 Kiro-Go 的接口兼容性和部署方式，重点增强�
 - 故障保护：按模型上下文窗口裁剪输入、首包超时、客户端可见输出前的安全同端点重试、有效输出与必需工具调用校验、安全/自适应/平衡/实时四档工具流、长工具截断恢复、端点熔断、持久化账号冷却和有界重试
 - 流式解析：AWS EventStream 长度与 CRC 校验、空闲超时、截断响应检测
 - 认证方式：Builder ID、IAM Identity Center、Kiro 托管 SSO、Microsoft 365 / Entra ID、SSO Token、API Key，以及 Web 后台直接多选 Kiro 原生/KAM JSON 文件导入；OAuth 认证区域与 Profile ARN 数据面区域独立处理，`ksk_` Key 落盘前自动发现并验证数据面区域
-- Prompt Cache：可设置缓存创建与读取比例区间、5m/1h TTL、分片 LRU、API Key 隔离、可选重启持久化指纹、命中率和未命中原因诊断
+- Prompt Cache：支持上游真实统计、旧版匹配前缀效率和兼容 New API/Sub2API 的总输入目标区间，并提供 5m/1h TTL、分片 LRU、API Key 隔离、指纹持久化和诊断
 - 扩展能力：Claude Opus 5 与 Sonnet 5 元数据、GPT-5.6 别名、动态模型能力与 effort 发现、可选安全格式未列出模型透传、文本/思考/工具能力自检、多轮 Web Search、外部 Token 计数和 Responses 历史存储
 - 运维能力：账号库存诊断（延迟/错误 EWMA 与粘性命中率）、持久化请求元数据、账号选择与首 SSE/思考/文本/工具输出耗时、最大事件间隔、可选完整日志（脱敏请求/输出、重试和流时间线）、诊断事件、Webhook 告警、`/health`、`/ready`
 - Token 与 Agent 稳定性：支持 Kiro 原生 reasoning effort，可配置默认思考、最大输出和上下文预算；客户端显式值优先；Claude 工具流支持安全、自适应、平衡和实时四档策略
 - 出站网络：全局和账号级 HTTP / SOCKS5 代理
 
-Prompt Cache 仅模拟并统计 Anthropic 缓存用量，不缓存模型响应正文。持久化仅保存版本化提示词指纹和元数据，文件权限为 `0600`；实时账号健康指标仅用于诊断，不会改变路由。
+Prompt Cache 统计不会缓存模型响应正文或减少 Kiro 请求。`official_actual` 只透传上游真实字段，`matched_prefix` 保留旧版估算，`aggregator_target` 在有效预热命中后按总输入目标区间重分配字段且不改变总 Token。旧配置升级后保留 `matched_prefix`，接入 New API/Sub2API 时需在 Web 设置中选择 `aggregator_target`。持久化仅保存版本化提示词指纹和元数据，文件权限为 `0600`。
 
 Token 预算优先级为：请求显式参数、模型专属配置、Web 全局默认、模型自动识别。按协议支持 `max_tokens`、`max_completion_tokens`、`max_output_tokens`、`context_window` 和 `max_input_tokens` 等覆盖参数。动态模型还可配置 `maxToolTokens`，用于长工具提示和备用模型判断。
 

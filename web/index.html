@@ -843,6 +843,15 @@
             </select>
           </div>
           <div class="form-group">
+            <label data-i18n="settings.cacheAccountingMode"></label>
+            <select id="cacheAccountingMode">
+              <option value="official_actual" data-i18n="settings.cacheAccountingActual"></option>
+              <option value="matched_prefix" data-i18n="settings.cacheAccountingMatchedPrefix"></option>
+              <option value="aggregator_target" data-i18n="settings.cacheAccountingAggregatorTarget"></option>
+            </select>
+            <small data-i18n="settings.cacheAccountingModeHint"></small>
+          </div>
+          <div class="form-group">
             <label data-i18n="settings.cacheReadEfficiency"></label>
             <div class="input-row">
               <input type="number" id="cacheReadEfficiencyMin" min="0" max="100" step="1"
