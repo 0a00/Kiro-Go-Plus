@@ -16,6 +16,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"kiro-go/internal/awsregion"
 	"kiro-go/internal/outboundipv6"
 	"kiro-go/internal/outboundproxy"
 	"os"
@@ -514,7 +515,7 @@ const (
 )
 
 // Version current version
-const Version = "1.2.41"
+const Version = "1.2.42"
 
 var (
 	cfg           *Config
@@ -2667,9 +2668,10 @@ func UpdateAccountProfileArn(id, profileArn string) error {
 // field-level prevents a concurrent token refresh from being overwritten by a
 // stale account snapshot held by the request that performed region recovery.
 func UpdateAccountRegion(id, region string) error {
-	region = strings.ToLower(strings.TrimSpace(region))
-	if !validRegionHostLabel(region) {
-		return fmt.Errorf("invalid region %q", region)
+	var err error
+	region, err = awsregion.Normalize(region)
+	if err != nil {
+		return err
 	}
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
@@ -2686,19 +2688,6 @@ func UpdateAccountRegion(id, region string) error {
 		return nil
 	}
 	return fmt.Errorf("account not found: %s", id)
-}
-
-func validRegionHostLabel(region string) bool {
-	if len(region) < 5 || len(region) > 32 || !strings.Contains(region, "-") {
-		return false
-	}
-	for _, char := range region {
-		if (char < 'a' || char > 'z') && (char < '0' || char > '9') && char != '-' {
-			return false
-		}
-	}
-	last := region[len(region)-1]
-	return last >= '0' && last <= '9'
 }
 
 type AccountCredentialUpdate struct {

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"kiro-go/config"
+	"kiro-go/internal/awsregion"
 	"kiro-go/internal/httpbody"
 	"net/http"
 	"net/url"
@@ -119,18 +120,13 @@ func postExternalIdpTokenContext(ctx context.Context, client *http.Client, token
 		AccessToken  string `json:"access_token"`
 		RefreshToken string `json:"refresh_token"`
 		ExpiresIn    int    `json:"expires_in"`
-		Error        string `json:"error"`
-		Description  string `json:"error_description"`
 	}
 	_ = json.Unmarshal(body, &result)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 || strings.TrimSpace(result.AccessToken) == "" {
 		if isCloudFrontBlockedResponse(resp.StatusCode, body) {
 			return "", "", 0, fmt.Errorf("%w: external identity provider", ErrRefreshUpstreamBlocked)
 		}
-		if result.Error != "" {
-			return "", "", 0, fmt.Errorf("external IdP token exchange failed (status %d): %s: %s", resp.StatusCode, result.Error, result.Description)
-		}
-		return "", "", 0, fmt.Errorf("external IdP token exchange failed (status %d)", resp.StatusCode)
+		return "", "", 0, newRefreshHTTPError("external IdP", resp.StatusCode, body)
 	}
 	if result.ExpiresIn <= 0 {
 		result.ExpiresIn = 3600
@@ -145,6 +141,11 @@ func refreshOIDCToken(ctx context.Context, refreshToken, clientID, clientSecret,
 	}
 	if region == "" {
 		region = "us-east-1"
+	}
+	var err error
+	region, err = awsregion.Normalize(region)
+	if err != nil {
+		return "", "", 0, "", err
 	}
 
 	url := oidcTokenURL(region)
@@ -174,7 +175,7 @@ func refreshOIDCToken(ctx context.Context, refreshToken, clientID, clientSecret,
 		if isCloudFrontBlockedResponse(resp.StatusCode, respBody) {
 			return "", "", 0, "", fmt.Errorf("%w: AWS OIDC", ErrRefreshUpstreamBlocked)
 		}
-		return "", "", 0, "", fmt.Errorf("refresh failed: %d %s", resp.StatusCode, string(respBody))
+		return "", "", 0, "", newRefreshHTTPError("AWS OIDC", resp.StatusCode, respBody)
 	}
 
 	var result struct {
@@ -186,6 +187,9 @@ func refreshOIDCToken(ctx context.Context, refreshToken, clientID, clientSecret,
 
 	if err := json.NewDecoder(httpbody.LimitReader(resp.Body, httpbody.DefaultLimit)).Decode(&result); err != nil {
 		return "", "", 0, "", err
+	}
+	if strings.TrimSpace(result.AccessToken) == "" || result.ExpiresIn <= 0 {
+		return "", "", 0, "", fmt.Errorf("AWS OIDC token refresh returned an invalid success response")
 	}
 
 	expiresAt := time.Now().Unix() + int64(result.ExpiresIn)
@@ -218,7 +222,7 @@ func refreshSocialToken(ctx context.Context, refreshToken string, client *http.C
 		if isCloudFrontBlockedResponse(resp.StatusCode, respBody) {
 			return "", "", 0, "", fmt.Errorf("%w: Kiro Auth Service", ErrRefreshUpstreamBlocked)
 		}
-		return "", "", 0, "", fmt.Errorf("refresh failed: %d %s", resp.StatusCode, string(respBody))
+		return "", "", 0, "", newRefreshHTTPError("Kiro Auth Service", resp.StatusCode, respBody)
 	}
 
 	var result struct {
@@ -230,6 +234,9 @@ func refreshSocialToken(ctx context.Context, refreshToken string, client *http.C
 
 	if err := json.NewDecoder(httpbody.LimitReader(resp.Body, httpbody.DefaultLimit)).Decode(&result); err != nil {
 		return "", "", 0, "", err
+	}
+	if strings.TrimSpace(result.AccessToken) == "" || result.ExpiresIn <= 0 {
+		return "", "", 0, "", fmt.Errorf("Kiro Auth Service token refresh returned an invalid success response")
 	}
 
 	expiresAt := time.Now().Unix() + int64(result.ExpiresIn)

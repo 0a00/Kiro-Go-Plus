@@ -351,7 +351,7 @@ func classifyRefreshFailure(endpoint string, err error) *UpstreamError {
 		retryAccounts = false
 	} else if auth.IsRefreshUpstreamBlocked(err) {
 		kind = UpstreamErrorEndpointUnavailable
-	} else if isRevokedRefreshCredentialError(lower) || accountpool.HasStatusToken(message, "401") {
+	} else if auth.IsRefreshCredentialRejected(err) || isRevokedRefreshCredentialError(lower) || accountpool.HasStatusToken(message, "401") {
 		kind = UpstreamErrorAuthRevoked
 	} else if errors.Is(err, context.Canceled) {
 		kind = UpstreamErrorCanceled

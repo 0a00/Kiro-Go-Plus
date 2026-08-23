@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"kiro-go/config"
+	"kiro-go/internal/awsregion"
 	"kiro-go/internal/httpbody"
 	"net/http"
 	"net/url"
@@ -340,12 +341,11 @@ func webSearchRegionCandidates(account *config.Account) []string {
 	regions := make([]string, 0, 2)
 	seen := make(map[string]bool, 2)
 	add := func(region string) {
-		region = strings.TrimSpace(region)
-		key := strings.ToLower(region)
-		if region == "" || seen[key] {
+		region, err := awsregion.Normalize(region)
+		if err != nil || seen[region] {
 			return
 		}
-		seen[key] = true
+		seen[region] = true
 		regions = append(regions, region)
 	}
 

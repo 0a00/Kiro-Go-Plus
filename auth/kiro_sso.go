@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"kiro-go/config"
+	"kiro-go/internal/awsregion"
 	"kiro-go/internal/httpbody"
 	"kiro-go/logger"
 	"net"
@@ -106,6 +107,11 @@ func StartKiroSsoLogin(region string) (*KiroSsoSession, string, error) {
 	region = strings.TrimSpace(region)
 	if region == "" {
 		region = "us-east-1"
+	}
+	var err error
+	region, err = awsregion.Normalize(region)
+	if err != nil {
+		return nil, "", err
 	}
 	verifier, err := newKiroSsoSecret(96)
 	if err != nil {

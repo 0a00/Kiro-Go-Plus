@@ -28,6 +28,41 @@
     return String(value || '').trim().toLowerCase().replace(/[-\s]+/g, '_');
   }
 
+  function firstCredentialValue(...values) {
+    for (const value of values) {
+      if (value === undefined || value === null) continue;
+      if (typeof value === 'string' && value.trim() === '') continue;
+      return value;
+    }
+    return undefined;
+  }
+
+  function normalizeImportCredentialItem(item) {
+    const record = isRecord(item) ? item : {};
+    const credentials = isRecord(record.credentials) ? record.credentials : {};
+    return {
+      ...record,
+      email: firstCredentialValue(record.email, record.username, record.preferred_username, record.upn),
+      userId: firstCredentialValue(record.userId, record.user_id),
+      machineId: firstCredentialValue(record.machineId, record.machine_id),
+      accessToken: firstCredentialValue(credentials.accessToken, credentials.access_token, record.accessToken, record.access_token),
+      refreshToken: firstCredentialValue(credentials.refreshToken, credentials.refresh_token, record.refreshToken, record.refresh_token),
+      kiroApiKey: firstCredentialValue(credentials.kiroApiKey, credentials.kiro_api_key, record.kiroApiKey, record.kiro_api_key),
+      clientId: firstCredentialValue(credentials.clientId, credentials.client_id, record.clientId, record.client_id),
+      clientSecret: firstCredentialValue(credentials.clientSecret, credentials.client_secret, record.clientSecret, record.client_secret),
+      authMethod: firstCredentialValue(credentials.authMethod, credentials.auth_method, record.authMethod, record.auth_method),
+      provider: firstCredentialValue(credentials.provider, credentials.idp, record.provider, record.idp),
+      region: firstCredentialValue(credentials.region, record.region),
+      authRegion: firstCredentialValue(credentials.authRegion, credentials.auth_region, record.authRegion, record.auth_region),
+      startUrl: firstCredentialValue(credentials.startUrl, credentials.start_url, record.startUrl, record.start_url),
+      expiresAt: firstCredentialValue(credentials.expiresAt, credentials.expires_at, record.expiresAt, record.expires_at),
+      profileArn: firstCredentialValue(credentials.profileArn, credentials.profile_arn, record.profileArn, record.profile_arn),
+      tokenEndpoint: firstCredentialValue(credentials.tokenEndpoint, credentials.token_endpoint, record.tokenEndpoint, record.token_endpoint),
+      issuerUrl: firstCredentialValue(credentials.issuerUrl, credentials.issuer_url, record.issuerUrl, record.issuer_url),
+      scopes: firstCredentialValue(credentials.scopes, record.scopes)
+    };
+  }
+
   function classifyCredentialAuthLabel(label) {
     if (apiKeyAuthAliases.has(label)) return 'api_key';
     if (externalAuthAliases.has(label)) return 'external_idp';
@@ -210,6 +245,7 @@
     inferCredentialAuthMethod,
     isDeclaredCredentialAPIKey,
     isGenericSocialIDCConflict,
+    normalizeImportCredentialItem,
     normalizeCredentialAuthLabel,
     utf8ByteLength,
     validateCredentialBatch

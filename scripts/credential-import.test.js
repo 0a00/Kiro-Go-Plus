@@ -106,3 +106,35 @@ test('explicit Social ignores incidental endpoint metadata', () => {
     tokenEndpoint: 'https://login.microsoftonline.com/tenant/oauth2/v2.0/token'
   }, false), 'social');
 });
+
+test('normalizeImportCredentialItem preserves snake_case credential exports', () => {
+  const normalized = credentialImport.normalizeImportCredentialItem({
+    preferred_username: 'snake@example.com',
+    user_id: 'user-1',
+    machine_id: 'machine-1',
+    credentials: {
+      access_token: 'access',
+      refresh_token: 'refresh',
+      client_id: 'client',
+      client_secret: 'secret',
+      auth_method: 'social',
+      auth_region: 'eu-north-1',
+      start_url: 'https://example.awsapps.com/start',
+      profile_arn: 'arn:profile',
+      token_endpoint: 'https://login.microsoftonline.com/tenant/oauth2/v2.0/token',
+      issuer_url: 'https://login.microsoftonline.com/tenant/v2.0'
+    },
+    provider: 'BuilderId'
+  });
+
+  assert.equal(normalized.email, 'snake@example.com');
+  assert.equal(normalized.userId, 'user-1');
+  assert.equal(normalized.machineId, 'machine-1');
+  assert.equal(normalized.refreshToken, 'refresh');
+  assert.equal(normalized.clientId, 'client');
+  assert.equal(normalized.clientSecret, 'secret');
+  assert.equal(normalized.authMethod, 'social');
+  assert.equal(normalized.authRegion, 'eu-north-1');
+  assert.equal(normalized.profileArn, 'arn:profile');
+  assert.equal(credentialImport.inferCredentialAuthMethod(normalized, false), 'idc');
+});

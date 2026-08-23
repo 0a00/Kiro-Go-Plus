@@ -28,6 +28,8 @@ func TestClassifyRefreshFailureDistinguishesRevokedAndTransientErrors(t *testing
 		{name: "invalid grant", err: errors.New(`refresh failed: 400 {"error":"invalid_grant"}`), wantKind: UpstreamErrorAuthRevoked, retryAccounts: true},
 		{name: "bad credentials", err: errors.New("refresh failed: 401 Bad credentials"), wantKind: UpstreamErrorAuthRevoked, retryAccounts: true},
 		{name: "invalid token", err: errors.New(`refresh failed: 400 {"error":"invalid_token"}`), wantKind: UpstreamErrorAuthRevoked, retryAccounts: true},
+		{name: "typed rejected credential", err: &auth.RefreshHTTPError{StatusCode: 400, CredentialRejected: true}, wantKind: UpstreamErrorAuthRevoked, retryAccounts: true},
+		{name: "typed auth mismatch only", err: &auth.RefreshHTTPError{StatusCode: 400, AuthenticationMismatch: true}, wantKind: UpstreamErrorTransient, retryAccounts: true},
 		{name: "server error", err: errors.New("refresh failed: 503 service unavailable"), wantKind: UpstreamErrorTransient, retryAccounts: true},
 		{name: "network timeout", err: context.DeadlineExceeded, wantKind: UpstreamErrorTransient, retryAccounts: true},
 		{name: "cloudfront block", err: auth.ErrRefreshUpstreamBlocked, wantKind: UpstreamErrorEndpointUnavailable, retryAccounts: true, blocked: true},

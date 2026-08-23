@@ -149,6 +149,16 @@ func TestWebSearchRegionCandidatesDeduplicateDefaultRegion(t *testing.T) {
 	}
 }
 
+func TestWebSearchRegionCandidatesRejectInjectedProfileRegion(t *testing.T) {
+	account := &config.Account{
+		ProfileArn: "arn:aws:codewhisperer:attacker.example#:123456789012:profile/test",
+	}
+	got := webSearchRegionCandidates(account)
+	if len(got) != 1 || got[0] != "us-east-1" {
+		t.Fatalf("expected safe default region, got %v", got)
+	}
+}
+
 func TestMCPWebSearchClassifiesRateLimit(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusTooManyRequests)

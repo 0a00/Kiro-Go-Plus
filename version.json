@@ -1,5 +1,5 @@
 {
-  "version": "1.2.41",
-  "changelog": "Safely repair contradictory generic Social credential exports carrying complete BuilderId/Enterprise IDC credentials, with a validation-only auth-mismatch fallback.\n安全纠正带有完整 BuilderId/Enterprise IdC 凭据的矛盾通用 Social 导出，并仅在认证类型不匹配时执行一次验证回退。",
+  "version": "1.2.42",
+  "changelog": "Harden credential imports with validated AWS regions, typed refresh failures, strict token responses, and complete snake_case Web normalization.\n通过 AWS Region 校验、结构化刷新错误、严格 Token 响应和完整 snake_case Web 归一化加固凭据导入。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }

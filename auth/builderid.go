@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"kiro-go/internal/awsregion"
 	"kiro-go/internal/httpbody"
 	"net/http"
 	"sync"
@@ -32,6 +33,11 @@ var (
 func StartBuilderIdLogin(region string) (*BuilderIdSession, error) {
 	if region == "" {
 		region = "us-east-1"
+	}
+	var err error
+	region, err = awsregion.Normalize(region)
+	if err != nil {
+		return nil, err
 	}
 
 	oidcBase := fmt.Sprintf("https://oidc.%s.amazonaws.com", region)

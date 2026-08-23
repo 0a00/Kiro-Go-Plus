@@ -780,14 +780,9 @@ func TestShouldFallbackIDCImportToSocial(t *testing.T) {
 		err  error
 		want bool
 	}{
-		{name: "HTTP 401", err: fmt.Errorf("refresh failed: 401 unauthorized"), want: true},
-		{name: "bad credentials", err: fmt.Errorf("refresh failed: 403 Bad credentials"), want: true},
-		{name: "invalid client", err: fmt.Errorf("refresh failed: 400 invalid_client"), want: true},
-		{name: "invalid grant", err: fmt.Errorf("refresh failed: 400 invalid_grant"), want: true},
-		{name: "invalid request", err: fmt.Errorf("refresh failed: 400 invalid_request"), want: true},
-		{name: "generic bad request", err: fmt.Errorf("refresh failed: 400 malformed payload"), want: false},
-		{name: "rate limit", err: fmt.Errorf("refresh failed: 429 invalid_request"), want: false},
-		{name: "server error", err: fmt.Errorf("refresh failed: 503 invalid_request"), want: false},
+		{name: "typed auth mismatch", err: &auth.RefreshHTTPError{StatusCode: 401, AuthenticationMismatch: true}, want: true},
+		{name: "typed non-auth failure", err: &auth.RefreshHTTPError{StatusCode: 429}, want: false},
+		{name: "legacy error text is not classified", err: fmt.Errorf("refresh failed: 401 unauthorized"), want: false},
 		{name: "canceled", err: context.Canceled, want: false},
 		{name: "timeout", err: context.DeadlineExceeded, want: false},
 		{name: "CloudFront", err: fmt.Errorf("%w: AWS OIDC", auth.ErrRefreshUpstreamBlocked), want: false},
@@ -796,6 +791,29 @@ func TestShouldFallbackIDCImportToSocial(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			if got := shouldFallbackIDCImportToSocial(test.err); got != test.want {
 				t.Fatalf("fallback classification = %v, want %v for %v", got, test.want, test.err)
+			}
+		})
+	}
+}
+
+func TestPrepareCredentialsAccountRejectsRegionHostInjection(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		region     string
+		authRegion string
+	}{
+		{name: "region fragment", region: "attacker.example#"},
+		{name: "region path", region: "us-east-1/path"},
+		{name: "region query", region: "us-east-1?redirect=attacker"},
+		{name: "auth region overrides safe region", region: "us-east-1", authRegion: "attacker.example#"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, importErr := (&Handler{}).prepareCredentialsAccount(importCredentialsRequest{
+				AuthMethod: "idc", Provider: "BuilderId", RefreshToken: "refresh",
+				ClientID: "client", ClientSecret: "secret", Region: test.region, AuthRegion: test.authRegion,
+			})
+			if importErr == nil || importErr.status != http.StatusBadRequest {
+				t.Fatalf("region %q authRegion %q import error = %v, want HTTP 400", test.region, test.authRegion, importErr)
 			}
 		})
 	}

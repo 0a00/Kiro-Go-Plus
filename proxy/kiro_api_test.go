@@ -90,6 +90,14 @@ func TestRegionalizeURLUsesAPIKeyDataPlaneRegion(t *testing.T) {
 	}
 }
 
+func TestRegionalizeURLRejectsInjectedRegion(t *testing.T) {
+	rawURL := "https://q.us-east-1.amazonaws.com/generateAssistantResponse"
+	account := &config.Account{AuthMethod: "api_key", KiroApiKey: "ksk_test", Region: "attacker.example#"}
+	if got := regionalizeURL(rawURL, account); got != rawURL {
+		t.Fatalf("invalid region changed data-plane URL: %q", got)
+	}
+}
+
 func TestKiroProfileRegionCandidates(t *testing.T) {
 	tests := []struct {
 		name    string

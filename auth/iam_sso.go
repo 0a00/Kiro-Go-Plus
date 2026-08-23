@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"kiro-go/internal/awsregion"
 	"kiro-go/internal/httpbody"
 	"net/http"
 	"net/url"
@@ -59,6 +60,10 @@ func StartIamSsoLogin(startUrl, region string) (sessionID, authorizeUrl string, 
 	}
 	if region == "" {
 		region = "us-east-1"
+	}
+	region, err = awsregion.Normalize(region)
+	if err != nil {
+		return "", "", 0, err
 	}
 
 	oidcBase := fmt.Sprintf("https://oidc.%s.amazonaws.com", region)

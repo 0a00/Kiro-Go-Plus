@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"kiro-go/internal/awsregion"
 	"kiro-go/internal/httpbody"
 	"net/http"
 	"time"
@@ -15,6 +16,10 @@ import (
 func ImportFromSsoToken(bearerToken, region string) (accessToken, refreshToken, clientID, clientSecret string, expiresIn int, err error) {
 	if region == "" {
 		region = "us-east-1"
+	}
+	region, err = awsregion.Normalize(region)
+	if err != nil {
+		return "", "", "", "", 0, err
 	}
 
 	oidcBase := fmt.Sprintf("https://oidc.%s.amazonaws.com", region)

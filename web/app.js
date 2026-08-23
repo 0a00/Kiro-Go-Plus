@@ -3888,7 +3888,7 @@
       toastWarning(t('credentials.sourceMissing'));
       return;
     }
-    let items = credentialImportFileState.items.map(normalizeImportCredentialItem);
+    let items = credentialImportFileState.items.map(window.KiroCredentialImport.normalizeImportCredentialItem);
     let skipped = 0;
     if (raw) {
       let json;
@@ -3900,7 +3900,7 @@
       if (parsedAsJSON) {
         try {
           const jsonItems = window.KiroCredentialImport.extractCredentialRecords(json);
-          items.push(...jsonItems.map(normalizeImportCredentialItem));
+          items.push(...jsonItems.map(window.KiroCredentialImport.normalizeImportCredentialItem));
         } catch (structureError) {
           toastWarning(credentialFileErrorMessage(structureError && structureError.code));
           return;
@@ -3938,6 +3938,8 @@
         userId: item.userId || '',
         machineId: item.machineId || '',
         status: item.status || '',
+        enabled: typeof item.enabled === 'boolean' ? item.enabled : undefined,
+        disabled: typeof item.disabled === 'boolean' ? item.disabled : undefined,
         refreshToken: item.refreshToken,
         accessToken: item.accessToken || '',
         kiroApiKey: item.kiroApiKey || '',
@@ -3991,28 +3993,6 @@
     if (fail > 0) msg += t('sso.importPartial', fail);
     if (skipped > 0) msg += t('credentials.lineParseSkipped', skipped);
     toastPrimary(msg, { duration: 5200 });
-  }
-  function normalizeImportCredentialItem(item) {
-	item = item && typeof item === 'object' ? item : {};
-    const c = (item && item.credentials) || {};
-    return {
-      ...item,
-      accessToken: c.accessToken || item.accessToken,
-      refreshToken: c.refreshToken || item.refreshToken,
-      kiroApiKey: c.kiroApiKey || item.kiroApiKey,
-      clientId: c.clientId || item.clientId,
-      clientSecret: c.clientSecret || item.clientSecret,
-      region: c.region || item.region,
-      authRegion: c.authRegion || c.auth_region || item.authRegion || item.auth_region,
-      startUrl: c.startUrl || c.start_url || item.startUrl || item.start_url,
-      authMethod: c.authMethod || item.authMethod,
-      provider: c.provider || item.provider || item.idp,
-      expiresAt: c.expiresAt || item.expiresAt,
-      profileArn: c.profileArn || item.profileArn,
-      tokenEndpoint: c.tokenEndpoint || item.tokenEndpoint,
-      issuerUrl: c.issuerUrl || item.issuerUrl,
-      scopes: normalizeCredentialScopes(c.scopes || item.scopes)
-    };
   }
   function normalizeCredentialScopes(value) {
     const values = Array.isArray(value) ? value : (typeof value === 'string' ? [value] : []);

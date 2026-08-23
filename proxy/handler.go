@@ -10,6 +10,7 @@ import (
 	"io"
 	"kiro-go/auth"
 	"kiro-go/config"
+	"kiro-go/internal/awsregion"
 	"kiro-go/internal/httpbody"
 	"kiro-go/internal/outboundipv6"
 	"kiro-go/internal/outboundproxy"
@@ -5594,6 +5595,11 @@ func (h *Handler) prepareCredentialsAccountContextWithRecovery(ctx context.Conte
 		if req.Region == "" {
 			req.Region = "us-east-1"
 		}
+		var regionErr error
+		req.Region, regionErr = awsregion.Normalize(req.Region)
+		if regionErr != nil {
+			return config.Account{}, newCredentialImportError(http.StatusBadRequest, regionErr.Error())
+		}
 		if req.Provider == "" {
 			req.Provider = "API Key"
 		}
@@ -5616,6 +5622,11 @@ func (h *Handler) prepareCredentialsAccountContextWithRecovery(ctx context.Conte
 	// OAuth credentials default to the historical OIDC/data-plane region.
 	if req.Region == "" {
 		req.Region = "us-east-1"
+	}
+	var regionErr error
+	req.Region, regionErr = awsregion.Normalize(req.Region)
+	if regionErr != nil {
+		return config.Account{}, newCredentialImportError(http.StatusBadRequest, regionErr.Error())
 	}
 	if req.AuthMethod == "external_idp" {
 		if req.TokenEndpoint == "" {
@@ -5884,37 +5895,7 @@ func isGenericSocialIDCImportConflict(authMethod, provider, refreshToken, client
 }
 
 func shouldFallbackIDCImportToSocial(err error) bool {
-	if err == nil || auth.IsRefreshUpstreamBlocked(err) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return false
-	}
-	var networkErr net.Error
-	if errors.As(err, &networkErr) && networkErr.Timeout() {
-		return false
-	}
-	message := err.Error()
-	for status := 500; status <= 599; status++ {
-		if pool.HasStatusToken(message, strconv.Itoa(status)) {
-			return false
-		}
-	}
-	for _, status := range []string{"408", "425", "429"} {
-		if pool.HasStatusToken(message, status) {
-			return false
-		}
-	}
-	if pool.HasStatusToken(message, "401") {
-		return true
-	}
-	lower := strings.ToLower(message)
-	for _, marker := range []string{
-		"bad credentials", "invalid_client", "invalid client",
-		"invalid_grant", "invalid grant", "invalid_request", "invalid request",
-	} {
-		if strings.Contains(lower, marker) {
-			return true
-		}
-	}
-	return false
+	return auth.IsRefreshAuthMismatch(err)
 }
 
 func normalizeImportAuthMethod(authMethod, provider, refreshToken, clientID, clientSecret, kiroAPIKey, tokenEndpoint, issuerURL string) string {
@@ -7841,7 +7822,9 @@ func diagnoseOutboundIPv6(parent context.Context, requested outboundipv6.Config)
 			if region == "" {
 				region = "us-east-1"
 			}
-			addHost("https://oidc."+region+".amazonaws.com/token", "OIDC token refresh")
+			if normalized, err := awsregion.Normalize(region); err == nil {
+				addHost("https://oidc."+normalized+".amazonaws.com/token", "OIDC token refresh")
+			}
 		case "social":
 			addHost("https://prod.us-east-1.auth.desktop.kiro.dev/refreshToken", "Kiro social token refresh")
 		case "external_idp":

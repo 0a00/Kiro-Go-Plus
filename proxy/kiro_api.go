@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"kiro-go/auth"
 	"kiro-go/config"
+	"kiro-go/internal/awsregion"
 	"kiro-go/internal/httpbody"
 	"kiro-go/logger"
 	accountpool "kiro-go/pool"
@@ -112,11 +113,12 @@ func regionalizeURLForProfile(rawURL string, account *config.Account, profileArn
 }
 
 func regionalizeURLForRegion(rawURL, region string) string {
-	region = strings.TrimSpace(region)
-	if region == "us-east-1" {
+	var err error
+	region, err = awsregion.Normalize(region)
+	if err != nil {
 		return rawURL
 	}
-	if region == "" {
+	if region == "us-east-1" {
 		return rawURL
 	}
 	regionalHost := "q." + region + ".amazonaws.com"
@@ -151,17 +153,7 @@ func kiroAPIKeyCandidateRegions() []string {
 }
 
 func validKiroRegion(region string) bool {
-	region = strings.TrimSpace(region)
-	if len(region) < 5 || len(region) > 32 || !strings.Contains(region, "-") {
-		return false
-	}
-	for _, r := range region {
-		if (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '-' {
-			return false
-		}
-	}
-	last := region[len(region)-1]
-	return last >= '0' && last <= '9'
+	return awsregion.Valid(region)
 }
 
 var probeKiroAPIKeyRegion = func(ctx context.Context, key, region, proxyURL string) (*config.AccountInfo, error) {
