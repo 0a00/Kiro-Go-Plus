@@ -188,7 +188,7 @@ func TestFallbackModelsAdvertiseGeneration5Limits(t *testing.T) {
 	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatalf("config.Init: %v", err)
 	}
-	models := fallbackAnthropicModels("-thinking")
+	models := fallbackAnthropicModels("-thinking", true)
 	for _, id := range []string{"claude-opus-5", "claude-opus-5-thinking", "claude-sonnet-5", "claude-sonnet-5-thinking"} {
 		var found map[string]interface{}
 		for _, model := range models {
@@ -213,7 +213,7 @@ func TestFallbackModelsIncludeGPT56WithoutGuessedLimits(t *testing.T) {
 	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatalf("config.Init: %v", err)
 	}
-	models := fallbackAnthropicModels("-thinking")
+	models := fallbackAnthropicModels("-thinking", true)
 	for _, id := range []string{"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"} {
 		var found map[string]interface{}
 		for _, model := range models {

@@ -1989,15 +1989,18 @@ func TestBuildAnthropicModelsResponseGeneratesThinkingVariants(t *testing.T) {
 			MaxInputTokens:  200000,
 			MaxOutputTokens: 64000,
 		},
-	}}, "-thinking")
+	}}, "-thinking", true)
 
 	if len(models) != 2 {
 		t.Fatalf("expected base model and thinking variant, got %d", len(models))
 	}
-	if models[0]["id"] != "claude-sonnet-4.5" {
+	if models[0]["id"] != "claude-sonnet-4-5" {
 		t.Fatalf("unexpected base model id: %#v", models[0]["id"])
 	}
-	if models[1]["id"] != "claude-sonnet-4.5-thinking" {
+	if models[0]["kiro_model_id"] != "claude-sonnet-4.5" {
+		t.Fatalf("unexpected Kiro model id: %#v", models[0]["kiro_model_id"])
+	}
+	if models[1]["id"] != "claude-sonnet-4-5-thinking" {
 		t.Fatalf("unexpected thinking model id: %#v", models[1]["id"])
 	}
 	if supportsImage, ok := models[0]["supports_image"].(bool); !ok || !supportsImage {

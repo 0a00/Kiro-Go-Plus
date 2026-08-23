@@ -507,7 +507,16 @@ func TestResponsesNonStreamRoundTrip(t *testing.T) {
 	h, cleanup := setupResponsesTestHandler(t)
 	defer cleanup()
 
+	upstreamModel := make(chan string, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload KiroPayload
+		model := ""
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("decode upstream payload: %v", err)
+		} else {
+			model = payload.ConversationState.CurrentMessage.UserInputMessage.ModelID
+		}
+		upstreamModel <- model
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{
 			"content": "responses non-stream OK",
@@ -519,7 +528,7 @@ func TestResponsesNonStreamRoundTrip(t *testing.T) {
 	defer server.Close()
 	defer swapKiroEndpointsForTest(t, server)()
 
-	body := strings.NewReader(`{"model":"claude-sonnet-4.5","input":"hi from test","store":true}`)
+	body := strings.NewReader(`{"model":"claude-sonnet-4-5","input":"hi from test","store":true}`)
 	req := httptest.NewRequest(http.MethodPost, "/v1/responses", body)
 	req = req.WithContext(context.Background())
 	rec := httptest.NewRecorder()
@@ -540,6 +549,12 @@ func TestResponsesNonStreamRoundTrip(t *testing.T) {
 	if resp.Status != "completed" {
 		t.Fatalf("expected status=completed, got %q", resp.Status)
 	}
+	if resp.Model != "claude-sonnet-4-5" {
+		t.Fatalf("expected official response model, got %q", resp.Model)
+	}
+	if got := <-upstreamModel; got != "claude-sonnet-4.5" {
+		t.Fatalf("expected Kiro dot-form model upstream, got %q", got)
+	}
 	if len(resp.Output) == 0 {
 		t.Fatalf("expected output items, got none")
 	}
@@ -554,8 +569,8 @@ func TestResponsesNonStreamRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadResponse: %v", err)
 	}
-	if loaded.ID != resp.ID {
-		t.Fatalf("stored response id mismatch")
+	if loaded.ID != resp.ID || loaded.Model != "claude-sonnet-4-5" {
+		t.Fatalf("stored response mismatch: %+v", loaded)
 	}
 }
 
@@ -619,7 +634,7 @@ func TestResponsesStreamSSE(t *testing.T) {
 	defer server.Close()
 	defer swapKiroEndpointsForTest(t, server)()
 
-	body := strings.NewReader(`{"model":"claude-sonnet-4.5","input":"stream please","stream":true,"store":false}`)
+	body := strings.NewReader(`{"model":"claude-sonnet-4-5","input":"stream please","stream":true,"store":false}`)
 	req := httptest.NewRequest(http.MethodPost, "/v1/responses", body)
 	rec := httptest.NewRecorder()
 
@@ -642,6 +657,9 @@ func TestResponsesStreamSSE(t *testing.T) {
 	}
 	if !strings.Contains(bodyStr, "stream chunk") {
 		t.Fatalf("expected stream content delta, got:\n%s", bodyStr)
+	}
+	if !strings.Contains(bodyStr, `"model":"claude-sonnet-4-5"`) {
+		t.Fatalf("expected official model name in stream, got:\n%s", bodyStr)
 	}
 }
 

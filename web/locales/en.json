@@ -312,6 +312,8 @@
   "settings.purgeResponsesDone": "Deleted {0} stored responses.",
   "settings.modelRegistry": "Dynamic Model Registry",
   "settings.modelNegativeCacheTtl": "Account-model negative cache TTL (seconds)",
+  "settings.useOfficialModelNames": "Expose official Anthropic model IDs",
+  "settings.useOfficialModelNamesHint": "Enabled by default. Model lists and API responses use dash-separated versions while Kiro keeps dot-separated internal IDs.",
   "settings.allowUnlistedModels": "Allow safe unlisted model IDs",
   "settings.allowUnlistedModelsHint": "Disabled by default. When enabled, syntactically safe IDs pass to Kiro and the upstream API remains the final validator.",
   "settings.modelRegistryJson": "Model mappings (JSON array)",

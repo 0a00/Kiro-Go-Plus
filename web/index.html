@@ -681,6 +681,13 @@
           </div>
           <div class="form-group">
             <label class="flex items-center gap-2">
+              <span class="switch"><input type="checkbox" id="useOfficialModelNames" /><span class="slider"></span></span>
+              <span data-i18n="settings.useOfficialModelNames"></span>
+            </label>
+            <small data-i18n="settings.useOfficialModelNamesHint"></small>
+          </div>
+          <div class="form-group">
+            <label class="flex items-center gap-2">
               <span class="switch"><input type="checkbox" id="allowUnlistedModels" /><span class="slider"></span></span>
               <span data-i18n="settings.allowUnlistedModels"></span>
             </label>
@@ -696,7 +703,7 @@
           <div class="form-group model-health-controls">
             <label data-i18n="settings.modelHealthModel"></label>
             <div class="input-row">
-              <input type="text" id="modelHealthModel" placeholder="claude-sonnet-4.6" />
+              <input type="text" id="modelHealthModel" placeholder="claude-sonnet-4-6" />
               <input type="number" id="modelHealthTimeoutSeconds" min="10" max="300" step="10" value="90"
                 data-i18n-aria-label="settings.modelHealthTimeout" />
             </div>

@@ -291,6 +291,7 @@ type ModelEntry struct {
 type ModelRegistryConfig struct {
 	NegativeCacheTTLSeconds int          `json:"negativeCacheTtlSeconds"`
 	AllowUnlistedModels     bool         `json:"allowUnlistedModels"`
+	UseOfficialModelNames   *bool        `json:"useOfficialModelNames,omitempty"`
 	Models                  []ModelEntry `json:"models,omitempty"`
 }
 
@@ -513,7 +514,7 @@ const (
 )
 
 // Version current version
-const Version = "1.2.38"
+const Version = "1.2.39"
 
 var (
 	cfg           *Config
@@ -1276,7 +1277,12 @@ func normalizeResponsesStorageLocked() {
 }
 
 func defaultModelRegistryConfig() ModelRegistryConfig {
-	return ModelRegistryConfig{NegativeCacheTTLSeconds: 3600, Models: []ModelEntry{}}
+	useOfficialModelNames := true
+	return ModelRegistryConfig{
+		NegativeCacheTTLSeconds: 3600,
+		UseOfficialModelNames:   &useOfficialModelNames,
+		Models:                  []ModelEntry{},
+	}
 }
 
 func normalizeModelRegistryLocked() {
@@ -1289,6 +1295,9 @@ func normalizeModelRegistryLocked() {
 	}
 	if cfg.ModelRegistry.Models == nil {
 		cfg.ModelRegistry.Models = []ModelEntry{}
+	}
+	if cfg.ModelRegistry.UseOfficialModelNames == nil {
+		cfg.ModelRegistry.UseOfficialModelNames = defaults.UseOfficialModelNames
 	}
 	for i := range cfg.ModelRegistry.Models {
 		normalizeModelEntry(&cfg.ModelRegistry.Models[i])
@@ -1952,11 +1961,21 @@ func GetModelRegistryConfig() ModelRegistryConfig {
 		return defaultModelRegistryConfig()
 	}
 	out := cfg.ModelRegistry
+	if cfg.ModelRegistry.UseOfficialModelNames != nil {
+		value := *cfg.ModelRegistry.UseOfficialModelNames
+		out.UseOfficialModelNames = &value
+	}
 	out.Models = append([]ModelEntry(nil), cfg.ModelRegistry.Models...)
 	for i := range out.Models {
 		out.Models[i].MatchKeywords = append([]string(nil), out.Models[i].MatchKeywords...)
 	}
 	return out
+}
+
+func GetUseOfficialModelNames() bool {
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	return cfg == nil || cfg.ModelRegistry.UseOfficialModelNames == nil || *cfg.ModelRegistry.UseOfficialModelNames
 }
 
 func UpdateModelRegistryConfig(registry ModelRegistryConfig) error {

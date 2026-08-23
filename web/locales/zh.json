@@ -312,6 +312,8 @@
   "settings.purgeResponsesDone": "已删除 {0} 条 Responses 记录。",
   "settings.modelRegistry": "动态模型管理",
   "settings.modelNegativeCacheTtl": "账号-模型负缓存 TTL（秒）",
+  "settings.useOfficialModelNames": "对外使用 Anthropic 官方模型名",
+  "settings.useOfficialModelNamesHint": "默认开启；模型列表和 API 响应使用横线版本号，Kiro 内部仍使用点号。关闭后恢复 Kiro 点号名称。",
   "settings.allowUnlistedModels": "允许安全格式的未列出模型",
   "settings.allowUnlistedModelsHint": "默认关闭；开启后仅透传格式安全的模型 ID，最终是否可用仍由 Kiro 上游判定。",
   "settings.modelRegistryJson": "模型映射（JSON 数组）",

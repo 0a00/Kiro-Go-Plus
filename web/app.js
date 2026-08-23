@@ -2217,10 +2217,11 @@
     const res = await api('/model-registry');
     const d = await res.json();
     $('modelNegativeCacheTTLSeconds').value = d.negativeCacheTtlSeconds || 3600;
+    $('useOfficialModelNames').checked = d.useOfficialModelNames !== false;
     $('allowUnlistedModels').checked = d.allowUnlistedModels === true;
     const models = Array.isArray(d.models) ? d.models : [];
     $('modelRegistryJson').value = JSON.stringify(models, null, 2);
-    if (!$('modelHealthModel').value.trim()) $('modelHealthModel').value = (models[0] && models[0].id) || 'claude-sonnet-4.6';
+    if (!$('modelHealthModel').value.trim()) $('modelHealthModel').value = (models[0] && models[0].id) || 'claude-sonnet-4-6';
   }
   async function saveModelRegistryConfig() {
     const ttl = Math.round(Number($('modelNegativeCacheTTLSeconds').value) || 0);
@@ -2240,6 +2241,7 @@
       method: 'POST',
       body: JSON.stringify({
         negativeCacheTtlSeconds: ttl,
+        useOfficialModelNames: $('useOfficialModelNames').checked,
         allowUnlistedModels: $('allowUnlistedModels').checked,
         models
       })

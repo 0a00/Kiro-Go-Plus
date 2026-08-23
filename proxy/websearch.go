@@ -521,7 +521,7 @@ func buildWebSearchClaudeResponse(model, query, summary string, results *webSear
 			{Type: "web_search_tool_result", ToolUseID: toolUseID, Content: webSearchResultBlocks(results)},
 			{Type: "text", Text: summary},
 		},
-		Model:      model,
+		Model:      exposedModelID(model),
 		StopReason: "end_turn",
 		Usage: ClaudeUsage{
 			InputTokens:  inputTokens,
@@ -538,6 +538,7 @@ func (h *Handler) sendWebSearchSSE(w http.ResponseWriter, model, query string, r
 }
 
 func (h *Handler) sendWebSearchSSEWithTiming(w http.ResponseWriter, model, query string, results *webSearchResults, inputTokens, outputTokens int, timing *requestFirstContentTimer) {
+	responseModel := exposedModelID(model)
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -559,7 +560,7 @@ func (h *Handler) sendWebSearchSSEWithTiming(w http.ResponseWriter, model, query
 			"id":            msgID,
 			"type":          "message",
 			"role":          "assistant",
-			"model":         model,
+			"model":         responseModel,
 			"content":       []interface{}{},
 			"stop_reason":   nil,
 			"stop_sequence": nil,

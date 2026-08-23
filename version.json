@@ -1,5 +1,5 @@
 {
-  "version": "1.2.38",
-  "changelog": "Handle Kiro output-limit completion safely, harden token refresh and account state races, refresh prompt-cache TTL/LRU on hits, support adaptive Opus thinking, and prevent duplicate SSO starts.\n安全处理 Kiro 输出上限完成事件，强化 Token 刷新与账号状态并发保护，命中时刷新提示词缓存 TTL/LRU，支持 Opus 自适应思考，并防止 SSO 重复启动。",
+  "version": "1.2.39",
+  "changelog": "Expose official dash-separated Anthropic model IDs by default while preserving Kiro's internal dot-separated routing, with a Web setting for compatibility.\n默认对外使用 Anthropic 官方横线模型名，同时保留 Kiro 内部点号路由，并提供 Web 兼容开关。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }

@@ -1253,12 +1253,14 @@ func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request) {
 	}
 
 	thinkingSuffix := config.GetThinkingConfig().Suffix
+	registry := config.GetModelRegistryConfig()
+	useOfficialNames := registry.UseOfficialModelNames == nil || *registry.UseOfficialModelNames
 
-	models := buildAnthropicModelsResponse(cached, thinkingSuffix)
+	models := buildAnthropicModelsResponse(cached, thinkingSuffix, useOfficialNames)
 	if len(models) == 0 {
-		models = fallbackAnthropicModels(thinkingSuffix)
+		models = fallbackAnthropicModels(thinkingSuffix, useOfficialNames)
 	}
-	models = mergeConfiguredModels(models, config.GetModelRegistryConfig().Models, thinkingSuffix)
+	models = mergeConfiguredModels(models, registry.Models, thinkingSuffix, useOfficialNames)
 
 	// 添加别名模型
 	models = append(models,
@@ -1276,7 +1278,7 @@ func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request) {
 	return
 }
 
-func buildAnthropicModelsResponse(cached []ModelInfo, thinkingSuffix string) []map[string]interface{} {
+func buildAnthropicModelsResponse(cached []ModelInfo, thinkingSuffix string, useOfficialNames bool) []map[string]interface{} {
 	if len(cached) == 0 {
 		return nil
 	}
@@ -1284,6 +1286,8 @@ func buildAnthropicModelsResponse(cached []ModelInfo, thinkingSuffix string) []m
 	models := make([]map[string]interface{}, 0, len(cached)*2)
 	if len(cached) > 0 {
 		for _, m := range cached {
+			kiroModelID := modelIDForAPI(m.ModelId, false)
+			publicModelID := modelIDForAPI(kiroModelID, useOfficialNames)
 			supportsImage := modelSupportsImage(m.InputTypes)
 			maxInputTokens, maxOutputTokens := 0, 0
 			if m.TokenLimits != nil {
@@ -1293,11 +1297,17 @@ func buildAnthropicModelsResponse(cached []ModelInfo, thinkingSuffix string) []m
 			if maxInputTokens <= 0 {
 				maxInputTokens = m.ContextWindow
 			}
-			base := buildModelInfoWithLimits(m.ModelId, "anthropic", supportsImage, maxInputTokens, maxOutputTokens)
+			base := buildModelInfoWithLimits(kiroModelID, "anthropic", supportsImage, maxInputTokens, maxOutputTokens)
+			base["id"] = publicModelID
+			if publicModelID != kiroModelID {
+				base["kiro_model_id"] = kiroModelID
+			}
 			enrichModelResponse(base, m)
 			models = append(models, base)
 			// 自动生成 thinking 变体
-			thinkingModel := buildModelInfoWithLimits(m.ModelId+thinkingSuffix, "anthropic", supportsImage, maxInputTokens, maxOutputTokens)
+			thinkingModel := buildModelInfoWithLimits(kiroModelID+thinkingSuffix, "anthropic", supportsImage, maxInputTokens, maxOutputTokens)
+			thinkingModel["id"] = publicModelID + thinkingSuffix
+			thinkingModel["kiro_model_id"] = kiroModelID
 			enrichModelResponse(thinkingModel, m)
 			models = append(models, thinkingModel)
 		}
@@ -1305,7 +1315,7 @@ func buildAnthropicModelsResponse(cached []ModelInfo, thinkingSuffix string) []m
 	return models
 }
 
-func fallbackAnthropicModels(thinkingSuffix string) []map[string]interface{} {
+func fallbackAnthropicModels(thinkingSuffix string, useOfficialNames bool) []map[string]interface{} {
 	opus5 := buildModelInfoWithFixedLimits("claude-opus-5", "anthropic", true, 1_000_000, 128_000)
 	opus5Thinking := buildModelInfoWithFixedLimits("claude-opus-5"+thinkingSuffix, "anthropic", true, 1_000_000, 128_000)
 	for _, model := range []map[string]interface{}{opus5, opus5Thinking} {
@@ -1321,7 +1331,7 @@ func fallbackAnthropicModels(thinkingSuffix string) []map[string]interface{} {
 		model["upstream_context_window"] = 1_000_000
 		model["upstream_max_output_tokens"] = 128_000
 	}
-	return []map[string]interface{}{
+	models := []map[string]interface{}{
 		opus5,
 		opus5Thinking,
 		sonnet5,
@@ -1346,6 +1356,23 @@ func fallbackAnthropicModels(thinkingSuffix string) []map[string]interface{} {
 		buildModelInfo("claude-opus-4.5", "anthropic", true),
 		buildModelInfo("claude-opus-4.5"+thinkingSuffix, "anthropic", true),
 	}
+	for _, model := range models {
+		id, _ := model["id"].(string)
+		kiroModelID := id
+		thinkingVariant := thinkingSuffix != "" && strings.HasSuffix(kiroModelID, thinkingSuffix)
+		if thinkingVariant {
+			kiroModelID = strings.TrimSuffix(kiroModelID, thinkingSuffix)
+		}
+		publicModelID := modelIDForAPI(kiroModelID, useOfficialNames)
+		if thinkingVariant {
+			publicModelID += thinkingSuffix
+		}
+		model["id"] = publicModelID
+		if publicModelID != id || thinkingVariant {
+			model["kiro_model_id"] = kiroModelID
+		}
+	}
+	return models
 }
 
 func enrichModelResponse(response map[string]interface{}, model ModelInfo) {
@@ -1475,7 +1502,7 @@ func buildModelInfoResponse(id, ownedBy string, supportsImage bool, maxInputToke
 	return model
 }
 
-func mergeConfiguredModels(models []map[string]interface{}, configured []config.ModelEntry, thinkingSuffix string) []map[string]interface{} {
+func mergeConfiguredModels(models []map[string]interface{}, configured []config.ModelEntry, thinkingSuffix string, useOfficialNames bool) []map[string]interface{} {
 	index := make(map[string]int, len(models))
 	for i, model := range models {
 		if id, ok := model["id"].(string); ok {
@@ -1483,8 +1510,17 @@ func mergeConfiguredModels(models []map[string]interface{}, configured []config.
 		}
 	}
 	for _, entry := range configured {
-		for _, id := range []string{entry.ID, entry.ID + thinkingSuffix} {
-			info := buildModelInfoWithLimits(id, "configured", true, entry.ContextWindow, entry.MaxTokens)
+		publicBaseID := entry.ID
+		if strings.EqualFold(modelIDForAPI(entry.ID, true), modelIDForAPI(entry.KiroModelID, true)) {
+			publicBaseID = modelIDForAPI(entry.ID, useOfficialNames)
+		}
+		for i, id := range []string{publicBaseID, publicBaseID + thinkingSuffix} {
+			configuredID := entry.ID
+			if i == 1 {
+				configuredID += thinkingSuffix
+			}
+			info := buildModelInfoWithLimits(configuredID, "configured", true, entry.ContextWindow, entry.MaxTokens)
+			info["id"] = id
 			info["display_name"] = entry.DisplayName
 			info["kiro_model_id"] = entry.KiroModelID
 			info["created"] = entry.Created
@@ -2072,6 +2108,7 @@ func (h *Handler) handleClaudeMessages(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, thinkingOpts claudeThinkingResponseOptions, estimatedInputTokens int, cacheProfile *promptCacheProfile, apiKeyID, routeKey string) {
 	startedAt := time.Now()
 	firstContent := payload.beginRequestTiming(startedAt)
+	responseModel := exposedModelID(model)
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -2126,7 +2163,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 				"type":          "message",
 				"role":          "assistant",
 				"content":       []interface{}{},
-				"model":         model,
+				"model":         responseModel,
 				"stop_reason":   nil,
 				"stop_sequence": nil,
 				"usage":         buildClaudeUsageMap(startInputTokens, 0, 0, messageStartUsage, cacheProfile != nil),
@@ -3241,6 +3278,7 @@ func (h *Handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int, apiKeyID string) {
 	startedAt := time.Now()
 	firstContent := payload.beginRequestTiming(startedAt)
+	responseModel := exposedModelID(model)
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -3329,7 +3367,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 						"id":      chatID,
 						"object":  "chat.completion.chunk",
 						"created": time.Now().Unix(),
-						"model":   model,
+						"model":   responseModel,
 						"choices": []map[string]interface{}{{
 							"index":         0,
 							"delta":         map[string]string{"content": text},
@@ -3353,7 +3391,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 						"id":      chatID,
 						"object":  "chat.completion.chunk",
 						"created": time.Now().Unix(),
-						"model":   model,
+						"model":   responseModel,
 						"choices": []map[string]interface{}{{
 							"index":         0,
 							"delta":         map[string]string{"content": text},
@@ -3368,7 +3406,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 						"id":      chatID,
 						"object":  "chat.completion.chunk",
 						"created": time.Now().Unix(),
-						"model":   model,
+						"model":   responseModel,
 						"choices": []map[string]interface{}{{
 							"index":         0,
 							"delta":         map[string]string{"reasoning_content": content},
@@ -3384,7 +3422,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 					"id":      chatID,
 					"object":  "chat.completion.chunk",
 					"created": time.Now().Unix(),
-					"model":   model,
+					"model":   responseModel,
 					"choices": []map[string]interface{}{{
 						"index":         0,
 						"delta":         map[string]string{"content": content},
@@ -3534,7 +3572,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 					"id":      chatID,
 					"object":  "chat.completion.chunk",
 					"created": time.Now().Unix(),
-					"model":   model,
+					"model":   responseModel,
 					"choices": []map[string]interface{}{{
 						"index": 0,
 						"delta": map[string]interface{}{
@@ -3679,7 +3717,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 			"id":      chatID,
 			"object":  "chat.completion.chunk",
 			"created": time.Now().Unix(),
-			"model":   model,
+			"model":   responseModel,
 			"choices": []map[string]interface{}{{
 				"index":         0,
 				"delta":         map[string]interface{}{},

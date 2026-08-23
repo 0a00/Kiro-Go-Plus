@@ -1291,7 +1291,7 @@ func KiroToClaudeResponse(content, thinkingContent string, includeEmptyThinkingB
 		Type:       "message",
 		Role:       "assistant",
 		Content:    blocks,
-		Model:      model,
+		Model:      exposedModelID(model),
 		StopReason: stopReason,
 		Usage: ClaudeUsage{
 			InputTokens:  inputTokens,
@@ -2714,7 +2714,7 @@ func KiroToOpenAIResponse(content string, toolUses []KiroToolUse, inputTokens, o
 		ID:      "chatcmpl-" + uuid.New().String(),
 		Object:  "chat.completion",
 		Created: time.Now().Unix(),
-		Model:   model,
+		Model:   exposedModelID(model),
 		Choices: []OpenAIChoice{{
 			Index:        0,
 			Message:      msg,
@@ -2795,7 +2795,7 @@ func KiroToOpenAIResponseWithReasoning(content, reasoningContent string, toolUse
 		"id":      "chatcmpl-" + uuid.New().String(),
 		"object":  "chat.completion",
 		"created": time.Now().Unix(),
-		"model":   model,
+		"model":   exposedModelID(model),
 		"choices": []map[string]interface{}{{
 			"index":         0,
 			"message":       message,

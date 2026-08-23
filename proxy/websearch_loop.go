@@ -651,7 +651,7 @@ func buildWebSearchLoopResponse(model string, result *webSearchLoopResult) *Clau
 	}
 	return &ClaudeResponse{
 		ID: "msg_" + uuid.New().String(), Type: "message", Role: "assistant", Content: result.content,
-		Model: model, StopReason: result.stopReason,
+		Model: exposedModelID(model), StopReason: result.stopReason,
 		Usage: ClaudeUsage{
 			InputTokens:  billedClaudeInputTokens(result.inputTokens, result.cacheUsage),
 			OutputTokens: result.outputTokens, ThinkingTokens: result.thinkingTokens,
@@ -712,6 +712,7 @@ func newWebSearchSSESession(ctx context.Context, handler *Handler, w http.Respon
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
+	responseModel := exposedModelID(model)
 	session := &webSearchSSESession{
 		ctx: ctx, handler: handler, w: w, flusher: flusher, model: model,
 		messageID: "msg_" + uuid.New().String(), timing: timing, done: make(chan struct{}),
@@ -719,7 +720,7 @@ func newWebSearchSSESession(ctx context.Context, handler *Handler, w http.Respon
 	session.sendLocked("message_start", map[string]interface{}{
 		"type": "message_start",
 		"message": map[string]interface{}{
-			"id": session.messageID, "type": "message", "role": "assistant", "model": model,
+			"id": session.messageID, "type": "message", "role": "assistant", "model": responseModel,
 			"content": []interface{}{}, "stop_reason": nil, "stop_sequence": nil,
 			"usage": buildClaudeUsageMap(inputTokens, 0, 0, promptCacheUsage{}, false),
 		},

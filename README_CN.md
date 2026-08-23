@@ -120,15 +120,17 @@ curl http://127.0.0.1:8080/v1/messages \
   -H 'Content-Type: application/json' \
   -H 'anthropic-version: 2023-06-01' \
   -H "x-api-key: ${KIRO_API_KEY}" \
-  -d '{"model":"claude-sonnet-4.5","max_tokens":1024,"messages":[{"role":"user","content":"你好"}]}'
+  -d '{"model":"claude-sonnet-4-6","max_tokens":1024,"messages":[{"role":"user","content":"你好"}]}'
 ```
 
 ```bash
 curl http://127.0.0.1:8080/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -H "Authorization: Bearer ${KIRO_API_KEY}" \
-  -d '{"model":"claude-sonnet-4.5","messages":[{"role":"user","content":"你好"}]}'
+  -d '{"model":"claude-sonnet-4-6","messages":[{"role":"user","content":"你好"}]}'
 ```
+
+模型列表与响应默认使用 Anthropic 官方横线 ID。请求同时兼容 `claude-sonnet-4-6` 和 Kiro 点号形式 `claude-sonnet-4.6`；可在 **设置 > 动态模型管理** 中切换对外展示形式。
 
 当前 Key 的只读用量、自助信息和最近请求日志：
 

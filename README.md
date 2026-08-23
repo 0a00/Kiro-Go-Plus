@@ -120,15 +120,17 @@ curl http://127.0.0.1:8080/v1/messages \
   -H 'Content-Type: application/json' \
   -H 'anthropic-version: 2023-06-01' \
   -H "x-api-key: ${KIRO_API_KEY}" \
-  -d '{"model":"claude-sonnet-4.5","max_tokens":1024,"messages":[{"role":"user","content":"Hello"}]}'
+  -d '{"model":"claude-sonnet-4-6","max_tokens":1024,"messages":[{"role":"user","content":"Hello"}]}'
 ```
 
 ```bash
 curl http://127.0.0.1:8080/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -H "Authorization: Bearer ${KIRO_API_KEY}" \
-  -d '{"model":"claude-sonnet-4.5","messages":[{"role":"user","content":"Hello"}]}'
+  -d '{"model":"claude-sonnet-4-6","messages":[{"role":"user","content":"Hello"}]}'
 ```
+
+Model lists and responses use official Anthropic dash-separated IDs by default. Requests accept both `claude-sonnet-4-6` and Kiro's `claude-sonnet-4.6`; the presentation can be changed under **Settings > Dynamic Model Registry**.
 
 Read-only usage, profile, and recent request logs for the current key:
 

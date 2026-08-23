@@ -271,6 +271,7 @@ func (h *Handler) handleResponsesNonStream(
 ) {
 	startedAt := time.Now()
 	firstContent := payload.beginRequestTiming(startedAt)
+	responseModel := exposedModelID(model)
 	attempts := h.newAccountAttemptController(payload.requestContext)
 	excluded := attempts.excluded
 	var lastErr error
@@ -390,7 +391,7 @@ func (h *Handler) handleResponsesNonStream(
 		entry.DurationMs = requestDurationMs(startedAt)
 		h.recordRequestLogForPayload(payload, entry)
 
-		respObj := buildResponsesObject(respID, model, finalContent, reasoningContent, toolUses, inputTokens, outputTokens, thinkingTokens, cacheUsage, req, customTools)
+		respObj := buildResponsesObject(respID, responseModel, finalContent, reasoningContent, toolUses, inputTokens, outputTokens, thinkingTokens, cacheUsage, req, customTools)
 		if responseStopReasonIsIncomplete(upstreamStopReason) {
 			markResponseIncomplete(respObj)
 		}
@@ -573,6 +574,7 @@ func (h *Handler) handleResponsesStream(
 ) {
 	startedAt := time.Now()
 	firstContent := payload.beginRequestTiming(startedAt)
+	responseModel := exposedModelID(model)
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -599,7 +601,7 @@ func (h *Handler) handleResponsesStream(
 		Object:             "response",
 		CreatedAt:          createdAt,
 		Status:             "in_progress",
-		Model:              model,
+		Model:              responseModel,
 		Output:             []ResponseOutputItem{},
 		Usage:              ResponsesUsage{},
 		PreviousResponseID: req.PreviousResponseID,
@@ -1001,7 +1003,7 @@ func (h *Handler) handleResponsesStream(
 			Credits:                  credits,
 		}
 
-		respObj := buildResponsesObject(respID, model, finalContent, reasoning, toolUses, inputTokens, outputTokens, thinkingTokens, cacheUsage, req, customTools)
+		respObj := buildResponsesObject(respID, responseModel, finalContent, reasoning, toolUses, inputTokens, outputTokens, thinkingTokens, cacheUsage, req, customTools)
 		if responseStopReasonIsIncomplete(upstreamStopReason) {
 			markResponseIncomplete(respObj)
 		}

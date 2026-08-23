@@ -690,6 +690,58 @@ func TestConfiguredModelResolutionUsesExactThenLongestKeyword(t *testing.T) {
 	}
 }
 
+func TestOfficialModelNamesDefaultMigrationAndPersistence(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := Init(path); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	if !GetUseOfficialModelNames() {
+		t.Fatal("official model names must default to enabled")
+	}
+
+	registry := GetModelRegistryConfig()
+	if registry.UseOfficialModelNames == nil {
+		t.Fatal("official model names default was not materialized")
+	}
+	*registry.UseOfficialModelNames = false
+	if !GetUseOfficialModelNames() {
+		t.Fatal("mutating a returned registry must not mutate live config")
+	}
+	if err := UpdateModelRegistryConfig(registry); err != nil {
+		t.Fatalf("disable official model names: %v", err)
+	}
+	if err := Init(path); err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	if GetUseOfficialModelNames() {
+		t.Fatal("disabled official model names setting was not persisted")
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	var document map[string]interface{}
+	if err := json.Unmarshal(raw, &document); err != nil {
+		t.Fatalf("parse config: %v", err)
+	}
+	modelRegistry := document["modelRegistry"].(map[string]interface{})
+	delete(modelRegistry, "useOfficialModelNames")
+	raw, err = json.Marshal(document)
+	if err != nil {
+		t.Fatalf("marshal legacy config: %v", err)
+	}
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatalf("write legacy config: %v", err)
+	}
+	if err := Init(path); err != nil {
+		t.Fatalf("reload legacy config: %v", err)
+	}
+	if !GetUseOfficialModelNames() {
+		t.Fatal("missing official model names setting must migrate to enabled")
+	}
+}
+
 func TestModelRegistryRejectsConflictingKeywords(t *testing.T) {
 	if err := Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatalf("init config: %v", err)
