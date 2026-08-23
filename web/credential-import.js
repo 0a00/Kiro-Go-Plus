@@ -9,6 +9,10 @@
 
   const DEFAULT_MAX_ACCOUNTS = 5000;
   const DEFAULT_MAX_BYTES = 8 * 1024 * 1024;
+  const externalAuthAliases = new Set(['external_idp', 'azuread', 'azure_ad', 'azure', 'entra', 'entra_id', 'microsoft', 'm365', 'office365', 'external']);
+  const idcAuthAliases = new Set(['idc', 'builderid', 'builder_id', 'enterprise', 'identity_center', 'aws_sso']);
+  const socialAuthAliases = new Set(['social', 'google', 'github']);
+  const apiKeyAuthAliases = new Set(['api_key', 'apikey', 'kiro_api_key']);
 
   function codedError(code) {
     const error = new Error(code);
@@ -18,6 +22,57 @@
 
   function isRecord(value) {
     return value !== null && typeof value === 'object' && !Array.isArray(value);
+  }
+
+  function normalizeCredentialAuthLabel(value) {
+    return String(value || '').trim().toLowerCase().replace(/[-\s]+/g, '_');
+  }
+
+  function classifyCredentialAuthLabel(label) {
+    if (apiKeyAuthAliases.has(label)) return 'api_key';
+    if (externalAuthAliases.has(label)) return 'external_idp';
+    if (idcAuthAliases.has(label)) return 'idc';
+    if (socialAuthAliases.has(label)) return 'social';
+    return '';
+  }
+
+  function isDeclaredCredentialAPIKey(item) {
+    const record = isRecord(item) ? item : {};
+    return apiKeyAuthAliases.has(normalizeCredentialAuthLabel(record.authMethod)) ||
+      apiKeyAuthAliases.has(normalizeCredentialAuthLabel(record.provider));
+  }
+
+  function isGenericSocialIDCConflict(item) {
+    const record = isRecord(item) ? item : {};
+    const method = normalizeCredentialAuthLabel(record.authMethod);
+    const provider = normalizeCredentialAuthLabel(record.provider);
+    return method === 'social' &&
+      (provider === 'builderid' || provider === 'enterprise') &&
+      Boolean(String(record.refreshToken || '').trim()) &&
+      Boolean(String(record.clientId || '').trim()) &&
+      Boolean(String(record.clientSecret || '').trim());
+  }
+
+  function inferCredentialAuthMethod(item, hasKiroApiKey) {
+    const record = isRecord(item) ? item : {};
+    if (hasKiroApiKey || String(record.kiroApiKey || '').trim()) return 'api_key';
+
+    const method = normalizeCredentialAuthLabel(record.authMethod);
+    const provider = normalizeCredentialAuthLabel(record.provider);
+    if (apiKeyAuthAliases.has(method) || apiKeyAuthAliases.has(provider)) return 'api_key';
+    if (externalAuthAliases.has(method) || externalAuthAliases.has(provider)) return 'external_idp';
+    if (provider === 'google' || provider === 'github') return 'social';
+    if (isGenericSocialIDCConflict(record)) return 'idc';
+
+    const methodClass = classifyCredentialAuthLabel(method);
+    if (methodClass) return methodClass;
+    const providerClass = classifyCredentialAuthLabel(provider);
+    if (providerClass) return providerClass;
+
+    // Endpoint metadata is only an inference hint without an explicit label.
+    if (!method && !provider && (record.tokenEndpoint || record.issuerUrl)) return 'external_idp';
+    if (method || provider) return record.clientId && record.clientSecret ? 'idc' : 'social';
+    return record.clientId ? 'idc' : 'social';
   }
 
   function extractCredentialRecords(value) {
@@ -152,6 +207,10 @@
     DEFAULT_MAX_BYTES,
     analyzeCredentialFiles,
     extractCredentialRecords,
+    inferCredentialAuthMethod,
+    isDeclaredCredentialAPIKey,
+    isGenericSocialIDCConflict,
+    normalizeCredentialAuthLabel,
     utf8ByteLength,
     validateCredentialBatch
   });

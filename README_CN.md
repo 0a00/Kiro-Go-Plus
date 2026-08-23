@@ -32,6 +32,8 @@ Prompt Cache 仅模拟并统计 Anthropic 缓存用量，不缓存模型响应�
 
 Token 预算优先级为：请求显式参数、模型专属配置、Web 全局默认、模型自动识别。按协议支持 `max_tokens`、`max_completion_tokens`、`max_output_tokens`、`context_window` 和 `max_input_tokens` 等覆盖参数。动态模型还可配置 `maxToolTokens`，用于长工具提示和备用模型判断。
 
+凭据导入只会纠正一种明确矛盾：`authMethod` 为通用 `social`、Provider 为 `BuilderId` 或 `Enterprise`，并且 Refresh Token、Client ID、Client Secret 全部存在。后端先验证 IdC，仅在明确的认证类型不匹配时尝试一次 Social；超时、限流、上游拦截和服务端错误不会触发回退。刷新成功前不会保存账号。
+
 ## Web 管理
 
 访问 `/admin` 后可以管理：

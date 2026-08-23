@@ -32,6 +32,8 @@ Prompt Cache simulates and reports Anthropic cache usage. It does not cache mode
 
 Token-budget precedence is: explicit request values, per-model registry values, global Web defaults, then automatic model detection. Supported request overrides include `max_tokens`, `max_completion_tokens`, `max_output_tokens`, `context_window`, and `max_input_tokens` where applicable. Dynamic model entries may also set `maxToolTokens` for long-tool guidance and fallback decisions.
 
+Credential import narrowly repairs exports labeled as generic `social` when the provider is `BuilderId` or `Enterprise` and refresh token, client ID, and client secret are all present. The backend validates IDC first and retries Social once only for a clear authentication mismatch; timeouts, rate limits, upstream blocks, and server errors never trigger this fallback. Accounts are persisted only after a successful refresh.
+
 ## Web Administration
 
 Open `/admin` to manage:

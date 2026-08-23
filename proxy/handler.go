@@ -5366,7 +5366,7 @@ func credentialImportIdentity(req importCredentialsRequest) string {
 	material := strings.TrimSpace(req.RefreshToken)
 	prefix := "refresh"
 	method := normalizeImportAuthMethod(
-		req.AuthMethod, req.Provider, req.ClientID, req.ClientSecret,
+		req.AuthMethod, req.Provider, req.RefreshToken, req.ClientID, req.ClientSecret,
 		req.KiroApiKey, req.TokenEndpoint, req.IssuerURL,
 	)
 	if method == "api_key" {
@@ -5553,6 +5553,9 @@ func (h *Handler) prepareCredentialsAccountContextWithRecovery(ctx context.Conte
 	req = normalizeNestedCredentialImport(req)
 	originalRefreshToken := strings.TrimSpace(req.RefreshToken)
 	clientSuppliedProfileArn := strings.TrimSpace(req.ProfileArn)
+	correctedGenericSocialIDC := isGenericSocialIDCImportConflict(
+		req.AuthMethod, req.Provider, req.RefreshToken, req.ClientID, req.ClientSecret,
+	)
 	derivedTokenEndpoint, derivedIssuer, derivedScopes := auth.DeriveExternalIdpEndpoints(req.UserID, req.ClientID, req.AccessToken)
 	tokenEndpointHint := req.TokenEndpoint
 	if strings.TrimSpace(tokenEndpointHint) == "" {
@@ -5563,7 +5566,7 @@ func (h *Handler) prepareCredentialsAccountContextWithRecovery(ctx context.Conte
 		issuerHint = derivedIssuer
 	}
 	req.AuthMethod = normalizeImportAuthMethod(
-		req.AuthMethod, req.Provider, req.ClientID, req.ClientSecret,
+		req.AuthMethod, req.Provider, req.RefreshToken, req.ClientID, req.ClientSecret,
 		req.KiroApiKey, tokenEndpointHint, issuerHint,
 	)
 	normalizeImportedIDCMetadata(&req)
@@ -5665,6 +5668,25 @@ func (h *Handler) prepareCredentialsAccountContextWithRecovery(ctx context.Conte
 		var newRefreshToken string
 		var err error
 		accessToken, newRefreshToken, expiresAt, refreshedProfileArn, err = auth.RefreshTokenContext(ctx, tempAccount)
+		if err != nil && correctedGenericSocialIDC && shouldFallbackIDCImportToSocial(err) {
+			idcErr := err
+			fallbackAccount := *tempAccount
+			fallbackAccount.AuthMethod = "social"
+			fallbackAccount.ClientID = ""
+			fallbackAccount.ClientSecret = ""
+			fallbackAccount.StartUrl = ""
+			accessToken, newRefreshToken, expiresAt, refreshedProfileArn, err = auth.RefreshTokenContext(ctx, &fallbackAccount)
+			if err == nil {
+				req.AuthMethod = "social"
+				req.Provider = "Kiro SSO"
+				req.ClientID = ""
+				req.ClientSecret = ""
+				req.StartUrl = ""
+				req.StartUrlAlt = ""
+			} else {
+				err = fmt.Errorf("IDC refresh failed: %v; Social fallback failed: %w", idcErr, err)
+			}
+		}
 		if err != nil {
 			return config.Account{}, newCredentialImportError(http.StatusBadRequest, "Token refresh failed: "+err.Error())
 		}
@@ -5837,47 +5859,94 @@ func normalizeImportAuthLabel(value string) string {
 	return strings.NewReplacer("-", "_", " ", "_").Replace(value)
 }
 
-func normalizeImportAuthMethod(authMethod, provider, clientID, clientSecret, kiroAPIKey, tokenEndpoint, issuerURL string) string {
+func classifyImportAuthLabel(label string) string {
+	switch {
+	case apiKeyAuthMethodAliases[label]:
+		return "api_key"
+	case externalIdpAuthMethodAliases[label]:
+		return "external_idp"
+	case idcAuthMethodAliases[label]:
+		return "idc"
+	case socialAuthMethodAliases[label]:
+		return "social"
+	default:
+		return ""
+	}
+}
+
+func isGenericSocialIDCImportConflict(authMethod, provider, refreshToken, clientID, clientSecret string) bool {
+	normalizedProvider := normalizeImportAuthLabel(provider)
+	return normalizeImportAuthLabel(authMethod) == "social" &&
+		(normalizedProvider == "builderid" || normalizedProvider == "enterprise") &&
+		strings.TrimSpace(refreshToken) != "" &&
+		strings.TrimSpace(clientID) != "" &&
+		strings.TrimSpace(clientSecret) != ""
+}
+
+func shouldFallbackIDCImportToSocial(err error) bool {
+	if err == nil || auth.IsRefreshUpstreamBlocked(err) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var networkErr net.Error
+	if errors.As(err, &networkErr) && networkErr.Timeout() {
+		return false
+	}
+	message := err.Error()
+	for status := 500; status <= 599; status++ {
+		if pool.HasStatusToken(message, strconv.Itoa(status)) {
+			return false
+		}
+	}
+	for _, status := range []string{"408", "425", "429"} {
+		if pool.HasStatusToken(message, status) {
+			return false
+		}
+	}
+	if pool.HasStatusToken(message, "401") {
+		return true
+	}
+	lower := strings.ToLower(message)
+	for _, marker := range []string{
+		"bad credentials", "invalid_client", "invalid client",
+		"invalid_grant", "invalid grant", "invalid_request", "invalid request",
+	} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeImportAuthMethod(authMethod, provider, refreshToken, clientID, clientSecret, kiroAPIKey, tokenEndpoint, issuerURL string) string {
 	if kiroAPIKey != "" {
 		return "api_key"
 	}
 
 	normalizedMethod := normalizeImportAuthLabel(authMethod)
-	if normalizedMethod != "" {
-		switch {
-		case apiKeyAuthMethodAliases[normalizedMethod]:
-			return "api_key"
-		case idcAuthMethodAliases[normalizedMethod]:
-			return "idc"
-		case socialAuthMethodAliases[normalizedMethod]:
-			return "social"
-		case externalIdpAuthMethodAliases[normalizedMethod]:
-			return "external_idp"
-		default:
-			if clientID != "" && clientSecret != "" {
-				return "idc"
-			}
-			return "social"
-		}
-	}
-
 	normalizedProvider := normalizeImportAuthLabel(provider)
-	if normalizedProvider != "" {
-		switch {
-		case apiKeyAuthMethodAliases[normalizedProvider]:
-			return "api_key"
-		case idcAuthMethodAliases[normalizedProvider]:
+	if apiKeyAuthMethodAliases[normalizedMethod] || apiKeyAuthMethodAliases[normalizedProvider] {
+		return "api_key"
+	}
+	if externalIdpAuthMethodAliases[normalizedMethod] || externalIdpAuthMethodAliases[normalizedProvider] {
+		return "external_idp"
+	}
+	if normalizedProvider == "google" || normalizedProvider == "github" {
+		return "social"
+	}
+	if isGenericSocialIDCImportConflict(authMethod, provider, refreshToken, clientID, clientSecret) {
+		return "idc"
+	}
+	if method := classifyImportAuthLabel(normalizedMethod); method != "" {
+		return method
+	}
+	if method := classifyImportAuthLabel(normalizedProvider); method != "" {
+		return method
+	}
+	if normalizedMethod != "" || normalizedProvider != "" {
+		if clientID != "" && clientSecret != "" {
 			return "idc"
-		case socialAuthMethodAliases[normalizedProvider]:
-			return "social"
-		case externalIdpAuthMethodAliases[normalizedProvider]:
-			return "external_idp"
-		default:
-			if clientID != "" && clientSecret != "" {
-				return "idc"
-			}
-			return "social"
 		}
+		return "social"
 	}
 
 	// Endpoint metadata is only an inference hint when neither the method nor

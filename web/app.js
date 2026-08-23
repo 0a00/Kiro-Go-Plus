@@ -3821,29 +3821,6 @@
   }
 
   // Import handlers
-  const externalCredentialAuthAliases = new Set(['external_idp', 'azuread', 'azure_ad', 'azure', 'entra', 'entra_id', 'microsoft', 'm365', 'office365', 'external']);
-  const idcCredentialAuthAliases = new Set(['idc', 'builderid', 'builder_id', 'enterprise', 'identity_center', 'aws_sso']);
-  const socialCredentialAuthAliases = new Set(['social', 'google', 'github']);
-  const apiKeyCredentialAuthAliases = new Set(['api_key', 'apikey', 'kiro_api_key']);
-  function normalizeCredentialAuthLabel(value) {
-    return String(value || '').trim().toLowerCase().replace(/[-\s]+/g, '_');
-  }
-  function inferCredentialAuthMethod(item, hasKiroApiKey) {
-    if (hasKiroApiKey) return 'api_key';
-    const classify = label => {
-      if (apiKeyCredentialAuthAliases.has(label)) return 'api_key';
-      if (idcCredentialAuthAliases.has(label)) return 'idc';
-      if (socialCredentialAuthAliases.has(label)) return 'social';
-      if (externalCredentialAuthAliases.has(label)) return 'external_idp';
-      return '';
-    };
-    const explicitMethod = normalizeCredentialAuthLabel(item.authMethod);
-    if (explicitMethod) return classify(explicitMethod) || (item.clientId && item.clientSecret ? 'idc' : 'social');
-    const explicitProvider = normalizeCredentialAuthLabel(item.provider);
-    if (explicitProvider) return classify(explicitProvider) || (item.clientId && item.clientSecret ? 'idc' : 'social');
-    if (item.tokenEndpoint || item.issuerUrl) return 'external_idp';
-    return item.clientId ? 'idc' : 'social';
-  }
   async function handleCredentialRecoveryResponse(data) {
     const recoveries = Array.isArray(data?.recoveries) ? data.recoveries.slice() : [];
     if (data?.rotatedRefreshToken) {
@@ -3945,11 +3922,11 @@
     let ok = 0, fail = 0;
     const payloads = [];
     for (const item of items) {
-      const declaredApiKey = apiKeyCredentialAuthAliases.has(normalizeCredentialAuthLabel(item.authMethod)) ||
-        apiKeyCredentialAuthAliases.has(normalizeCredentialAuthLabel(item.provider));
+      const declaredApiKey = window.KiroCredentialImport.isDeclaredCredentialAPIKey(item);
       const hasKiroApiKey = !!(item.kiroApiKey || (declaredApiKey && item.accessToken));
       if (!item.refreshToken && !hasKiroApiKey) { fail++; continue; }
-      const authMethod = inferCredentialAuthMethod(item, hasKiroApiKey);
+      const authMethod = window.KiroCredentialImport.inferCredentialAuthMethod(item, hasKiroApiKey);
+      const declaredAuthMethod = String(item.authMethod || '').trim();
       let provider = item.provider || '';
       if (!provider && authMethod === 'social') provider = 'Google';
       if (!provider && authMethod === 'idc') provider = 'BuilderId';
@@ -3966,7 +3943,9 @@
         kiroApiKey: item.kiroApiKey || '',
         clientId: item.clientId || '',
         clientSecret: item.clientSecret || '',
-        authMethod, provider,
+        // Preserve the source label so the backend can authoritatively classify
+        // contradictions and decide whether a guarded refresh fallback applies.
+        authMethod: declaredAuthMethod || authMethod, provider,
         region: authMethod === 'api_key' ? (item.region || '') : (item.region || 'us-east-1'),
         authRegion: item.authRegion || '',
         startUrl: item.startUrl || '',

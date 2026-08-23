@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -607,11 +608,12 @@ func TestEnsureValidTokenNoopsForKiroAPIKey(t *testing.T) {
 	}
 }
 
-func TestNormalizeImportAuthMethodRecognizesExternalIdp(t *testing.T) {
+func TestNormalizeImportAuthMethod(t *testing.T) {
 	tests := []struct {
 		name          string
 		authMethod    string
 		provider      string
+		refreshToken  string
 		clientID      string
 		clientSecret  string
 		kiroAPIKey    string
@@ -627,13 +629,173 @@ func TestNormalizeImportAuthMethodRecognizesExternalIdp(t *testing.T) {
 		{name: "api key wins", authMethod: "external_idp", kiroAPIKey: "key", want: "api_key"},
 		{name: "idc remains idc", authMethod: "idc", clientID: "client", clientSecret: "secret", tokenEndpoint: "https://login.microsoftonline.com/t/oauth2/v2.0/token", want: "idc"},
 		{name: "social remains social", authMethod: "social", tokenEndpoint: "https://login.microsoftonline.com/t/oauth2/v2.0/token", want: "social"},
+		{name: "generic social BuilderId conflict", authMethod: "social", provider: "BuilderId", refreshToken: "refresh", clientID: "client", clientSecret: "secret", want: "idc"},
+		{name: "generic social Enterprise conflict", authMethod: "social", provider: "Enterprise", refreshToken: "refresh", clientID: "client", clientSecret: "secret", want: "idc"},
+		{name: "incomplete generic social conflict remains social", authMethod: "social", provider: "BuilderId", refreshToken: "refresh", clientID: "client", want: "social"},
+		{name: "Google provider remains social with IDC fields", authMethod: "social", provider: "Google", refreshToken: "refresh", clientID: "client", clientSecret: "secret", want: "social"},
+		{name: "GitHub provider overrides IDC label", authMethod: "idc", provider: "GitHub", refreshToken: "refresh", clientID: "client", clientSecret: "secret", want: "social"},
+		{name: "specific social method is not generic conflict", authMethod: "google", provider: "BuilderId", refreshToken: "refresh", clientID: "client", clientSecret: "secret", want: "social"},
+		{name: "external provider overrides generic social", authMethod: "social", provider: "Microsoft", refreshToken: "refresh", clientID: "client", clientSecret: "secret", want: "external_idp"},
 		{name: "enterprise provider wins", provider: "Enterprise", clientID: "client", tokenEndpoint: "https://login.microsoftonline.com/t/oauth2/v2.0/token", want: "idc"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			got := normalizeImportAuthMethod(test.authMethod, test.provider, test.clientID, test.clientSecret, test.kiroAPIKey, test.tokenEndpoint, test.issuerURL)
+			got := normalizeImportAuthMethod(test.authMethod, test.provider, test.refreshToken, test.clientID, test.clientSecret, test.kiroAPIKey, test.tokenEndpoint, test.issuerURL)
 			if got != test.want {
 				t.Fatalf("normalized auth method = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestPrepareCredentialsAccountCorrectsGenericSocialIDC(t *testing.T) {
+	accessPayload := fmt.Sprintf(`{"email":"corrected-idc@example.com","exp":%d}`, time.Now().Add(time.Hour).Unix())
+	accessToken := "header." + base64.RawURLEncoding.EncodeToString([]byte(accessPayload)) + ".signature"
+	var idcCalls, socialCalls int
+	previousClient := auth.SetGlobalAuthClientForTest(&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.URL.Host {
+		case "oidc.import.test":
+			idcCalls++
+			body := fmt.Sprintf(`{"accessToken":%q,"refreshToken":"idc-rotated","expiresIn":3600}`, accessToken)
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+		default:
+			socialCalls++
+			return &http.Response{StatusCode: http.StatusInternalServerError, Body: io.NopCloser(strings.NewReader("unexpected Social refresh")), Header: make(http.Header)}, nil
+		}
+	})})
+	defer auth.SetGlobalAuthClientForTest(previousClient)
+	oldOIDC := authOidcURL()
+	auth.SetOIDCTokenURLForTest(func(string) string { return "https://oidc.import.test/token" })
+	defer auth.SetOIDCTokenURLForTest(oldOIDC)
+
+	account, importErr := (&Handler{}).prepareCredentialsAccount(importCredentialsRequest{
+		AuthMethod: "social", Provider: "BuilderId", RefreshToken: "refresh",
+		ClientID: "client", ClientSecret: "secret", Region: "us-east-1",
+	})
+	if importErr != nil {
+		t.Fatalf("prepare corrected IDC account: %v", importErr)
+	}
+	if idcCalls != 1 || socialCalls != 0 {
+		t.Fatalf("refresh calls: IDC=%d Social=%d, want 1/0", idcCalls, socialCalls)
+	}
+	if account.AuthMethod != "idc" || account.Provider != "BuilderId" || account.ClientID != "client" || account.ClientSecret != "secret" {
+		t.Fatalf("corrected IDC account metadata = %+v", account)
+	}
+}
+
+func TestPrepareCredentialsAccountFallsBackForCorrectedSocialIDCAuthMismatch(t *testing.T) {
+	accessPayload := fmt.Sprintf(`{"email":"fallback-social@example.com","exp":%d}`, time.Now().Add(time.Hour).Unix())
+	accessToken := "header." + base64.RawURLEncoding.EncodeToString([]byte(accessPayload)) + ".signature"
+	var idcCalls, socialCalls int
+	previousClient := auth.SetGlobalAuthClientForTest(&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.URL.Host {
+		case "oidc.import.test":
+			idcCalls++
+			return &http.Response{StatusCode: http.StatusUnauthorized, Body: io.NopCloser(strings.NewReader(`{"error":"Bad credentials"}`)), Header: make(http.Header)}, nil
+		case "prod.us-east-1.auth.desktop.kiro.dev":
+			socialCalls++
+			body := fmt.Sprintf(`{"accessToken":%q,"refreshToken":"social-rotated","expiresIn":3600,"profileArn":"social-profile"}`, accessToken)
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+		default:
+			return nil, fmt.Errorf("unexpected auth host %q", req.URL.Host)
+		}
+	})})
+	defer auth.SetGlobalAuthClientForTest(previousClient)
+	oldOIDC := authOidcURL()
+	auth.SetOIDCTokenURLForTest(func(string) string { return "https://oidc.import.test/token" })
+	defer auth.SetOIDCTokenURLForTest(oldOIDC)
+
+	account, importErr := (&Handler{}).prepareCredentialsAccount(importCredentialsRequest{
+		AuthMethod: "social", Provider: "BuilderId", RefreshToken: "refresh",
+		ClientID: "client", ClientSecret: "secret", StartUrl: "https://view.awsapps.com/start",
+		Region: "us-east-1",
+	})
+	if importErr != nil {
+		t.Fatalf("prepare fallback Social account: %v", importErr)
+	}
+	if idcCalls != 1 || socialCalls != 1 {
+		t.Fatalf("refresh calls: IDC=%d Social=%d, want 1/1", idcCalls, socialCalls)
+	}
+	if account.AuthMethod != "social" || account.Provider != "Kiro SSO" || account.RefreshToken != "social-rotated" {
+		t.Fatalf("fallback Social classification = %+v", account)
+	}
+	if account.ClientID != "" || account.ClientSecret != "" || account.StartUrl != "" {
+		t.Fatalf("fallback retained contradictory IDC metadata: %+v", account)
+	}
+}
+
+func TestCorrectedSocialIDCDoesNotFallbackOnTransientFailures(t *testing.T) {
+	tests := []struct {
+		name      string
+		response  *http.Response
+		transport error
+	}{
+		{name: "timeout", transport: context.DeadlineExceeded},
+		{name: "CloudFront block", response: &http.Response{
+			StatusCode: http.StatusForbidden,
+			Body:       io.NopCloser(strings.NewReader("The request could not be satisfied. Request blocked. Generated by cloudfront")),
+			Header:     make(http.Header),
+		}},
+		{name: "server error", response: &http.Response{
+			StatusCode: http.StatusServiceUnavailable,
+			Body:       io.NopCloser(strings.NewReader(`{"error":"invalid_request"}`)),
+			Header:     make(http.Header),
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var socialCalls int
+			previousClient := auth.SetGlobalAuthClientForTest(&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				if req.URL.Host == "prod.us-east-1.auth.desktop.kiro.dev" {
+					socialCalls++
+					return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"accessToken":"unexpected","expiresIn":3600}`)), Header: make(http.Header)}, nil
+				}
+				if test.transport != nil {
+					return nil, test.transport
+				}
+				return test.response, nil
+			})})
+			defer auth.SetGlobalAuthClientForTest(previousClient)
+			oldOIDC := authOidcURL()
+			auth.SetOIDCTokenURLForTest(func(string) string { return "https://oidc.import.test/token" })
+			defer auth.SetOIDCTokenURLForTest(oldOIDC)
+
+			_, importErr := (&Handler{}).prepareCredentialsAccount(importCredentialsRequest{
+				AuthMethod: "social", Provider: "BuilderId", RefreshToken: "refresh",
+				ClientID: "client", ClientSecret: "secret", Region: "us-east-1",
+			})
+			if importErr == nil {
+				t.Fatal("expected import refresh to fail")
+			}
+			if socialCalls != 0 {
+				t.Fatalf("Social fallback calls = %d, want 0", socialCalls)
+			}
+		})
+	}
+}
+
+func TestShouldFallbackIDCImportToSocial(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "HTTP 401", err: fmt.Errorf("refresh failed: 401 unauthorized"), want: true},
+		{name: "bad credentials", err: fmt.Errorf("refresh failed: 403 Bad credentials"), want: true},
+		{name: "invalid client", err: fmt.Errorf("refresh failed: 400 invalid_client"), want: true},
+		{name: "invalid grant", err: fmt.Errorf("refresh failed: 400 invalid_grant"), want: true},
+		{name: "invalid request", err: fmt.Errorf("refresh failed: 400 invalid_request"), want: true},
+		{name: "generic bad request", err: fmt.Errorf("refresh failed: 400 malformed payload"), want: false},
+		{name: "rate limit", err: fmt.Errorf("refresh failed: 429 invalid_request"), want: false},
+		{name: "server error", err: fmt.Errorf("refresh failed: 503 invalid_request"), want: false},
+		{name: "canceled", err: context.Canceled, want: false},
+		{name: "timeout", err: context.DeadlineExceeded, want: false},
+		{name: "CloudFront", err: fmt.Errorf("%w: AWS OIDC", auth.ErrRefreshUpstreamBlocked), want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := shouldFallbackIDCImportToSocial(test.err); got != test.want {
+				t.Fatalf("fallback classification = %v, want %v for %v", got, test.want, test.err)
 			}
 		})
 	}

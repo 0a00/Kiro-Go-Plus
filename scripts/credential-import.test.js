@@ -65,3 +65,44 @@ test('validateCredentialBatch measures UTF-8 payload bytes', () => {
   assert.equal(credentialImport.validateCredentialBatch([{ refreshToken: 'too-large' }], { maxBytes: 8 }).code, 'payload_too_large');
   assert.equal(credentialImport.validateCredentialBatch([{}, {}], { maxAccounts: 1 }).code, 'too_many_accounts');
 });
+
+test('inferCredentialAuthMethod repairs only complete generic Social IDC exports', () => {
+  for (const provider of ['BuilderId', 'Enterprise']) {
+    const item = {
+      authMethod: 'social',
+      provider,
+      refreshToken: 'refresh',
+      clientId: 'client',
+      clientSecret: 'secret'
+    };
+    assert.equal(credentialImport.isGenericSocialIDCConflict(item), true);
+    assert.equal(credentialImport.inferCredentialAuthMethod(item, false), 'idc');
+  }
+
+  assert.equal(credentialImport.inferCredentialAuthMethod({
+    authMethod: 'social', provider: 'BuilderId', refreshToken: 'refresh', clientId: 'client'
+  }, false), 'social');
+});
+
+test('inferCredentialAuthMethod preserves specific and higher-priority providers', () => {
+  for (const provider of ['Google', 'GitHub']) {
+    assert.equal(credentialImport.inferCredentialAuthMethod({
+      authMethod: 'social', provider, refreshToken: 'refresh', clientId: 'client', clientSecret: 'secret'
+    }, false), 'social');
+  }
+  assert.equal(credentialImport.inferCredentialAuthMethod({
+    authMethod: 'social', provider: 'Microsoft', refreshToken: 'refresh', clientId: 'client', clientSecret: 'secret'
+  }, false), 'external_idp');
+  assert.equal(credentialImport.inferCredentialAuthMethod({
+    authMethod: 'social', provider: 'Google', kiroApiKey: 'ksk_example'
+  }, true), 'api_key');
+});
+
+test('explicit Social ignores incidental endpoint metadata', () => {
+  assert.equal(credentialImport.inferCredentialAuthMethod({
+    authMethod: 'social',
+    provider: 'Kiro SSO',
+    refreshToken: 'refresh',
+    tokenEndpoint: 'https://login.microsoftonline.com/tenant/oauth2/v2.0/token'
+  }, false), 'social');
+});

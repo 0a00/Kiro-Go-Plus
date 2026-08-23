@@ -1,5 +1,5 @@
 {
-  "version": "1.2.40",
-  "changelog": "Import one or many native/Kiro Account Manager JSON files directly from the authenticated Web admin, with client-side structure, count, and size validation.\n支持在 Web 后台直接选择一个或多个原生/Kiro Account Manager JSON 文件，并在导入前校验结构、数量和大小。",
+  "version": "1.2.41",
+  "changelog": "Safely repair contradictory generic Social credential exports carrying complete BuilderId/Enterprise IDC credentials, with a validation-only auth-mismatch fallback.\n安全纠正带有完整 BuilderId/Enterprise IdC 凭据的矛盾通用 Social 导出，并仅在认证类型不匹配时执行一次验证回退。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }
