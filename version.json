@@ -1,5 +1,5 @@
 {
-  "version": "1.2.39",
-  "changelog": "Expose official dash-separated Anthropic model IDs by default while preserving Kiro's internal dot-separated routing, with a Web setting for compatibility.\n默认对外使用 Anthropic 官方横线模型名，同时保留 Kiro 内部点号路由，并提供 Web 兼容开关。",
+  "version": "1.2.40",
+  "changelog": "Import one or many native/Kiro Account Manager JSON files directly from the authenticated Web admin, with client-side structure, count, and size validation.\n支持在 Web 后台直接选择一个或多个原生/Kiro Account Manager JSON 文件，并在导入前校验结构、数量和大小。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }

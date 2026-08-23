@@ -46,6 +46,8 @@
   let customSelectRefreshQueued = false;
   let requestRefreshTimer = null;
   let currentTab = 'overview';
+  let credentialImportFileState = emptyCredentialImportFileState();
+  let credentialImportFileReadGeneration = 0;
   const settingsGroups = ['access', 'routing', 'generation', 'cache', 'diagnostics', 'integrations', 'security'];
   let settingsGroup = localStorage.getItem('kiro_settings_group') || 'access';
   if (!settingsGroups.includes(settingsGroup)) settingsGroup = 'access';
@@ -3427,6 +3429,7 @@
       '</button>';
   }
   function showModal(type) {
+    if (type !== 'credentials') resetCredentialImportFileMemory();
     const modal = $('addModal');
     const title = $('modalTitle');
     const body = $('modalBody');
@@ -3443,6 +3446,7 @@
     enhanceCustomSelects(body);
   }
   function closeModal() {
+    resetCredentialImportFileMemory();
     cancelKiroSsoLogin(false);
     closeDialog('addModal');
     iamSession = '';
@@ -3607,10 +3611,24 @@
     $('importLocalBtn').addEventListener('click', importLocalKiro);
   }
   function modalCredentials(title, body) {
+    resetCredentialImportFileMemory();
     title.textContent = t('modal.credentialsTitle');
     body.innerHTML =
       '<p class="help-block">' + escapeHtml(t('modal.credentialsDesc')) + '</p>' +
       '<p class="help-block">' + escapeHtml(t('credentials.batchHint')) + '</p>' +
+      '<div class="form-group credential-file-group"><label>' + escapeHtml(t('credentials.fileLabel')) + '</label>' +
+      '<div class="credential-file-actions">' +
+      '<label class="btn btn-outline btn-sm credential-file-select"><i class="fa-solid fa-file-arrow-up" aria-hidden="true"></i>' +
+      '<span>' + escapeHtml(t('credentials.selectFiles')) + '</span>' +
+      '<input type="file" accept=".json,application/json" multiple id="credFiles" class="file-input-hidden" />' +
+      '</label>' +
+      '<button class="btn btn-icon btn-outline btn-sm hidden" id="clearCredFilesBtn" type="button" title="' + escapeAttr(t('credentials.clearFiles')) + '" aria-label="' + escapeAttr(t('credentials.clearFiles')) + '">' +
+      '<i class="fa-solid fa-xmark" aria-hidden="true"></i></button>' +
+      '</div>' +
+      '<div id="credFileSummary" class="credential-file-summary" role="status" aria-live="polite"></div>' +
+      '<div id="credFileErrors" class="credential-file-errors hidden"></div>' +
+      '</div>' +
+      '<div class="credential-source-divider"><span>' + escapeHtml(t('credentials.orPaste')) + '</span></div>' +
       '<div class="form-group"><label>' + escapeHtml(t('credentials.label')) + '</label>' +
       '<textarea id="credJson" class="font-mono" placeholder=\'[{"refreshToken":"xxx","provider":"BuilderID"}]&#10;[{"authMethod":"api_key","kiroApiKey":"xxx"}]&#10;or&#10;email----password----refreshToken----clientId----clientSecret\'></textarea>' +
       '</div>' +
@@ -3618,7 +3636,98 @@
       '<button class="btn btn-secondary" data-modal-goto="add" type="button">' + escapeHtml(t('common.back')) + '</button>' +
       '<button class="btn btn-primary" id="importCredBtn" type="button">' + escapeHtml(t('common.add')) + '</button>' +
       '</div>';
+    $('credFiles').addEventListener('change', e => loadCredentialFiles(e.target.files));
+    $('clearCredFilesBtn').addEventListener('click', clearCredentialFiles);
     $('importCredBtn').addEventListener('click', importCredentials);
+    renderCredentialFileState();
+  }
+
+  function emptyCredentialImportFileState() {
+    return { fileCount: 0, accountCount: 0, sourceBytes: 0, items: [], errors: [], loading: false };
+  }
+
+  function resetCredentialImportFileMemory() {
+    credentialImportFileReadGeneration++;
+    credentialImportFileState = emptyCredentialImportFileState();
+  }
+
+  function credentialFileErrorMessage(code) {
+    const keys = {
+      invalid_json: 'credentials.fileErrorInvalidJSON',
+      invalid_structure: 'credentials.fileErrorInvalidStructure',
+      empty_accounts: 'credentials.fileErrorEmpty',
+      read_failed: 'credentials.fileErrorRead',
+      selection_too_large: 'credentials.fileErrorSelectionTooLarge',
+      too_many_accounts: 'credentials.fileErrorTooManyAccounts',
+      payload_too_large: 'credentials.fileErrorPayloadTooLarge'
+    };
+    return t(keys[code] || 'credentials.fileErrorInvalidStructure');
+  }
+
+  function renderCredentialFileState() {
+    const summary = $('credFileSummary');
+    const errors = $('credFileErrors');
+    const clear = $('clearCredFilesBtn');
+    const submit = $('importCredBtn');
+    if (!summary || !errors || !clear || !submit) return;
+    const state = credentialImportFileState;
+    if (state.loading) {
+      summary.textContent = t('credentials.filesReading', state.fileCount);
+    } else if (state.fileCount > 0) {
+      summary.textContent = t('credentials.fileSummary', state.fileCount, state.accountCount, state.errors.length);
+    } else {
+      summary.textContent = t('credentials.noFiles');
+    }
+    summary.classList.toggle('danger-text', state.errors.length > 0);
+    clear.classList.toggle('hidden', state.fileCount === 0);
+    submit.disabled = state.loading || state.errors.length > 0;
+
+    const counts = new Map();
+    state.errors.forEach(error => counts.set(error.code, (counts.get(error.code) || 0) + 1));
+    const messages = Array.from(counts.entries()).map(([code, count]) => {
+      const message = credentialFileErrorMessage(code);
+      return count > 1 ? t('credentials.fileErrorCount', message, count) : message;
+    });
+    errors.innerHTML = messages.map(escapeHtml).join('<br>');
+    errors.classList.toggle('hidden', messages.length === 0);
+  }
+
+  async function loadCredentialFiles(files) {
+    const generation = ++credentialImportFileReadGeneration;
+    const selected = Array.from(files || []);
+    credentialImportFileState = {
+      fileCount: selected.length,
+      accountCount: 0,
+      sourceBytes: 0,
+      items: [],
+      errors: [],
+      loading: selected.length > 0
+    };
+    renderCredentialFileState();
+    if (selected.length === 0) return;
+    try {
+      const result = await window.KiroCredentialImport.analyzeCredentialFiles(selected);
+      if (generation !== credentialImportFileReadGeneration) return;
+      credentialImportFileState = { ...result, loading: false };
+    } catch (error) {
+      if (generation !== credentialImportFileReadGeneration) return;
+      credentialImportFileState = {
+        fileCount: selected.length,
+        accountCount: 0,
+        sourceBytes: 0,
+        items: [],
+        errors: [{ code: 'read_failed' }],
+        loading: false
+      };
+    }
+    renderCredentialFileState();
+  }
+
+  function clearCredentialFiles() {
+    resetCredentialImportFileMemory();
+    const input = $('credFiles');
+    if (input) input.value = '';
+    renderCredentialFileState();
   }
   function modalCookie(title, body) {
     title.textContent = t('modal.cookieTitle');
@@ -3790,27 +3899,47 @@
   }
   async function importCredentials() {
     const raw = $('credJson').value.trim();
-    if (!raw) { toastWarning(t('credentials.jsonError')); return; }
-    let items;
+    if (credentialImportFileState.loading) {
+      toastWarning(t('credentials.filesStillReading'));
+      return;
+    }
+    if (credentialImportFileState.errors.length > 0) {
+      toastWarning(t('credentials.fileErrorsBlockImport'));
+      return;
+    }
+    if (!raw && credentialImportFileState.items.length === 0) {
+      toastWarning(t('credentials.sourceMissing'));
+      return;
+    }
+    let items = credentialImportFileState.items.map(normalizeImportCredentialItem);
     let skipped = 0;
-    try {
-      const json = JSON.parse(raw);
-      if (json.accounts && Array.isArray(json.accounts)) {
-        items = json.accounts.map(normalizeImportCredentialItem);
+    if (raw) {
+      let json;
+      let parsedAsJSON = false;
+      try {
+        json = JSON.parse(raw);
+        parsedAsJSON = true;
+      } catch (jsonError) { }
+      if (parsedAsJSON) {
+        try {
+          const jsonItems = window.KiroCredentialImport.extractCredentialRecords(json);
+          items.push(...jsonItems.map(normalizeImportCredentialItem));
+        } catch (structureError) {
+          toastWarning(credentialFileErrorMessage(structureError && structureError.code));
+          return;
+        }
       } else {
-        items = (Array.isArray(json) ? json : [json]).map(normalizeImportCredentialItem);
-      }
-    } catch {
-      const parsed = parseLineCredentials(raw);
-      items = parsed.items;
-      skipped = parsed.skipped;
-      if (items.length === 0 && skipped === 0) {
-        toastWarning(t('credentials.jsonError'));
-        return;
-      }
-      if (items.length === 0) {
-        toastWarning(t('credentials.lineParseAllSkipped', skipped));
-        return;
+        const parsed = parseLineCredentials(raw);
+        items.push(...parsed.items);
+        skipped = parsed.skipped;
+        if (parsed.items.length === 0 && skipped === 0) {
+          toastWarning(t('credentials.jsonError'));
+          return;
+        }
+        if (items.length === 0) {
+          toastWarning(t('credentials.lineParseAllSkipped', skipped));
+          return;
+        }
       }
     }
     let ok = 0, fail = 0;
@@ -3848,6 +3977,15 @@
         subscription: item.subscription || null,
         usage: item.usage || null
       });
+    }
+    const batchValidation = window.KiroCredentialImport.validateCredentialBatch(payloads);
+    if (batchValidation.code === 'too_many_accounts') {
+      toastWarning(t('credentials.fileErrorTooManyAccounts'));
+      return;
+    }
+    if (batchValidation.code === 'payload_too_large') {
+      toastWarning(t('credentials.fileErrorPayloadTooLarge'));
+      return;
     }
     if (payloads.length > 0) {
       try {

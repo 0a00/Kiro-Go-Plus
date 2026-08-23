@@ -1,0 +1,67 @@
+'use strict';
+
+const assert = require('node:assert/strict');
+const test = require('node:test');
+const credentialImport = require('../web/credential-import.js');
+
+function jsonFile(value) {
+  const text = typeof value === 'string' ? value : JSON.stringify(value);
+  return {
+    size: Buffer.byteLength(text),
+    text: async () => text
+  };
+}
+
+test('extractCredentialRecords accepts supported export shapes', () => {
+  const flat = { refreshToken: 'refresh-1' };
+  const nested = { credentials: { refreshToken: 'refresh-2' } };
+  assert.deepEqual(credentialImport.extractCredentialRecords(flat), [flat]);
+  assert.deepEqual(credentialImport.extractCredentialRecords([flat, nested]), [flat, nested]);
+  assert.deepEqual(credentialImport.extractCredentialRecords({ accounts: [nested] }), [nested]);
+});
+
+test('extractCredentialRecords rejects empty and non-object records', () => {
+  for (const value of [null, 'token', 1, [], { accounts: [] }, { accounts: 'invalid' }, [null]]) {
+    assert.throws(() => credentialImport.extractCredentialRecords(value), error => Boolean(error.code));
+  }
+});
+
+test('analyzeCredentialFiles aggregates valid files without exposing names', async () => {
+  const result = await credentialImport.analyzeCredentialFiles([
+    jsonFile('\uFEFF{"refreshToken":"refresh-1"}'),
+    jsonFile({ accounts: [{ credentials: { refreshToken: 'refresh-2' } }] })
+  ]);
+  assert.equal(result.fileCount, 2);
+  assert.equal(result.accountCount, 2);
+  assert.deepEqual(result.errors, []);
+  assert.equal(Object.prototype.hasOwnProperty.call(result, 'fileNames'), false);
+});
+
+test('analyzeCredentialFiles reports malformed files and keeps valid records isolated', async () => {
+  const result = await credentialImport.analyzeCredentialFiles([
+    jsonFile({ refreshToken: 'refresh-1' }),
+    jsonFile('{broken'),
+    jsonFile({ accounts: [null] })
+  ]);
+  assert.equal(result.accountCount, 1);
+  assert.deepEqual(result.errors.map(error => error.code), ['invalid_json', 'invalid_structure']);
+});
+
+test('analyzeCredentialFiles enforces source and account limits', async () => {
+  const oversized = await credentialImport.analyzeCredentialFiles([
+    { size: 20, text: async () => '{}' }
+  ], { maxBytes: 10 });
+  assert.deepEqual(oversized.errors.map(error => error.code), ['selection_too_large']);
+
+  const tooMany = await credentialImport.analyzeCredentialFiles([
+    jsonFile([{ refreshToken: 'one' }, { refreshToken: 'two' }])
+  ], { maxAccounts: 1 });
+  assert.deepEqual(tooMany.errors.map(error => error.code), ['too_many_accounts']);
+});
+
+test('validateCredentialBatch measures UTF-8 payload bytes', () => {
+  assert.equal(credentialImport.utf8ByteLength('A\u4e2d\u{1f600}'), 8);
+  assert.equal(credentialImport.validateCredentialBatch([{ refreshToken: 'ok' }]).code, '');
+  assert.equal(credentialImport.validateCredentialBatch([{ refreshToken: 'too-large' }], { maxBytes: 8 }).code, 'payload_too_large');
+  assert.equal(credentialImport.validateCredentialBatch([{}, {}], { maxAccounts: 1 }).code, 'too_many_accounts');
+});

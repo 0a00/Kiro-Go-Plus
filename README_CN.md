@@ -21,7 +21,7 @@ Kiro-Go Plus 保留原 Kiro-Go 的接口兼容性和部署方式，重点增强�
 - 刷新体系：Token 刷新去重、并发队列、超时、抖动、自适应批量刷新，适合几十到数百账号
 - 故障保护：按模型上下文窗口裁剪输入、首包超时、客户端可见输出前的安全同端点重试、有效输出与必需工具调用校验、安全/自适应/平衡/实时四档工具流、长工具截断恢复、端点熔断、持久化账号冷却和有界重试
 - 流式解析：AWS EventStream 长度与 CRC 校验、空闲超时、截断响应检测
-- 认证方式：Builder ID、IAM Identity Center、Kiro 托管 SSO、Microsoft 365 / Entra ID、SSO Token、API Key、Kiro 原生/KAM JSON 导入；OAuth 认证区域与 Profile ARN 数据面区域独立处理，`ksk_` Key 落盘前自动发现并验证数据面区域
+- 认证方式：Builder ID、IAM Identity Center、Kiro 托管 SSO、Microsoft 365 / Entra ID、SSO Token、API Key，以及 Web 后台直接多选 Kiro 原生/KAM JSON 文件导入；OAuth 认证区域与 Profile ARN 数据面区域独立处理，`ksk_` Key 落盘前自动发现并验证数据面区域
 - Prompt Cache：可设置缓存创建与读取比例区间、5m/1h TTL、分片 LRU、API Key 隔离、可选重启持久化指纹、命中率和未命中原因诊断
 - 扩展能力：Claude Opus 5 与 Sonnet 5 元数据、GPT-5.6 别名、动态模型能力与 effort 发现、可选安全格式未列出模型透传、文本/思考/工具能力自检、多轮 Web Search、外部 Token 计数和 Responses 历史存储
 - 运维能力：账号库存诊断（延迟/错误 EWMA 与粘性命中率）、持久化请求元数据、账号选择与首 SSE/思考/文本/工具输出耗时、最大事件间隔、可选完整日志（脱敏请求/输出、重试和流时间线）、诊断事件、Webhook 告警、`/health`、`/ready`
