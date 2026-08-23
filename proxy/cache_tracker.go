@@ -333,6 +333,7 @@ func (t *promptCacheTracker) ComputeDetailed(accountID string, profile *promptCa
 	now := time.Now()
 
 	readEfficiencyMin, readEfficiencyMax := t.efficiencyRange()
+	maxTTL, _, _ := t.settingsSnapshot()
 	shard := t.shardFor(accountID)
 	shard.mu.Lock()
 	expiredMatch := false
@@ -352,6 +353,7 @@ func (t *promptCacheTracker) ComputeDetailed(accountID string, profile *promptCa
 
 	rawMatchedTokens := 0
 	var matchedFingerprint [32]byte
+	touched := false
 	for i := len(profile.Breakpoints) - 1; i >= 0; i-- {
 		breakpoint := profile.Breakpoints[i]
 		// Skip breakpoints below the minimum cacheable token threshold.
@@ -367,10 +369,23 @@ func (t *promptCacheTracker) ComputeDetailed(accountID string, profile *promptCa
 			rawMatchedTokens = lastTokens
 		}
 		matchedFingerprint = breakpoint.Fingerprint
+		entry.TTL = effectivePromptCacheTTL(maxTTL, entry.TTL)
+		entry.LastAccess = now
+		entry.ExpiresAt = now.Add(entry.TTL)
+		if order := shard.accountOrder[accountID]; order != nil && entry.accountElem != nil {
+			order.MoveToFront(entry.accountElem)
+		}
+		if shard.order != nil && entry.shardElem != nil {
+			shard.order.MoveToFront(entry.shardElem)
+		}
+		touched = true
 		break
 	}
 	namespaceEntries := len(entries)
 	shard.mu.Unlock()
+	if touched {
+		t.markStateChanged()
+	}
 	if rawMatchedTokens == 0 {
 		diagnostic.Status = "miss"
 		if expiredMatch {

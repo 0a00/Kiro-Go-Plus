@@ -838,7 +838,7 @@ func IsAuthFailure(err error) bool {
 
 	// Match HTTP status codes only when they appear as standalone tokens to avoid
 	// false positives from arbitrary digits in the error body (e.g. request IDs).
-	if hasStatusToken(msg, "401") || hasStatusToken(msg, "403") {
+	if HasStatusToken(msg, "401") || HasStatusToken(msg, "403") {
 		return true
 	}
 	if strings.Contains(lower, "bad credentials") ||
@@ -854,26 +854,36 @@ func IsAuthFailure(err error) bool {
 	return false
 }
 
-// hasStatusToken returns true when status appears in s with non-digit boundaries
-// on both sides, so "401" matches "HTTP 401 from ..." but not "request_401abc".
-func hasStatusToken(s, status string) bool {
-	for {
-		idx := strings.Index(s, status)
-		if idx < 0 {
+// HasStatusToken returns true when status appears in s with non-alphanumeric
+// boundaries on both sides, so "401" matches "HTTP 401 from ..." but not
+// "4011", "14013", or an alphanumeric token like "request_401abc".
+func HasStatusToken(s, status string) bool {
+	if status == "" {
+		return false
+	}
+	for offset := 0; offset < len(s); {
+		relative := strings.Index(s[offset:], status)
+		if relative < 0 {
 			return false
 		}
-		leftOK := idx == 0 || !isDigit(s[idx-1])
+		idx := offset + relative
+		leftOK := idx == 0 || !isAlphaNum(s[idx-1])
 		rightIdx := idx + len(status)
-		rightOK := rightIdx >= len(s) || !isDigit(s[rightIdx])
+		rightOK := rightIdx >= len(s) || !isAlphaNum(s[rightIdx])
 		if leftOK && rightOK {
 			return true
 		}
-		s = s[idx+len(status):]
+		offset = idx + 1
 	}
+	return false
 }
 
 func isDigit(b byte) bool {
 	return b >= '0' && b <= '9'
+}
+
+func isAlphaNum(b byte) bool {
+	return isDigit(b) || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
 }
 
 // IsSuspensionError reports whether the error indicates the account has been

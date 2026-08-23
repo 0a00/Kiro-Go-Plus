@@ -2,12 +2,14 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"kiro-go/auth"
 	"kiro-go/config"
 	"kiro-go/internal/outboundipv6"
 	"kiro-go/logger"
 	accountpool "kiro-go/pool"
+	"net"
 	"strings"
 	"sync"
 	"time"
@@ -151,20 +153,18 @@ func (c *tokenRefreshCoordinator) execute(account *config.Account, refreshConfig
 	}
 	defer c.releaseSlot()
 
-	accessToken, refreshToken, expiresAt, profileArn, err := auth.RefreshTokenContext(ctx, account)
-	if outboundipv6.IsBindError(err) {
-		err = classifyRefreshFailure("token_refresh", err)
-	}
-	if auth.IsRefreshUpstreamBlocked(err) {
-		c.markRefreshUpstreamBlocked(refreshUpstreamBlockCooldown)
-	}
+	accessToken, refreshToken, expiresAt, profileArn, refreshErr := auth.RefreshTokenContext(ctx, account)
 	result := coordinatedRefreshResult{
 		accessToken: accessToken, refreshToken: refreshToken,
-		expiresAt: expiresAt, profileArn: profileArn, err: err,
+		expiresAt: expiresAt, profileArn: profileArn,
 	}
-	if result.err != nil {
+	if refreshErr != nil {
 		if ctx.Err() != nil {
-			result.err = fmt.Errorf("token refresh timed out after %s: %w", timeout, ctx.Err())
+			refreshErr = fmt.Errorf("token refresh timed out after %s: %w", timeout, ctx.Err())
+		}
+		result.err = classifyRefreshFailure("token_refresh", refreshErr)
+		if auth.IsRefreshUpstreamBlocked(result.err) {
+			c.markRefreshUpstreamBlocked(refreshUpstreamBlockCooldown)
 		}
 		return result
 	}
@@ -343,7 +343,7 @@ func classifyRefreshFailure(endpoint string, err error) *UpstreamError {
 	if err != nil {
 		message += ": " + err.Error()
 	}
-	kind := UpstreamErrorTokenExpired
+	kind := UpstreamErrorTransient
 	lower := strings.ToLower(message)
 	retryAccounts := true
 	if outboundipv6.IsBindError(err) || isLocalConfigurationError(err) {
@@ -351,8 +351,18 @@ func classifyRefreshFailure(endpoint string, err error) *UpstreamError {
 		retryAccounts = false
 	} else if auth.IsRefreshUpstreamBlocked(err) {
 		kind = UpstreamErrorEndpointUnavailable
-	} else if strings.Contains(lower, "invalid_grant") || strings.Contains(lower, "bad credentials") || strings.Contains(lower, "revoked") {
+	} else if isRevokedRefreshCredentialError(lower) || accountpool.HasStatusToken(message, "401") {
 		kind = UpstreamErrorAuthRevoked
+	} else if errors.Is(err, context.Canceled) {
+		kind = UpstreamErrorCanceled
+		retryAccounts = false
+	} else if errors.Is(err, context.DeadlineExceeded) {
+		kind = UpstreamErrorTransient
+	} else {
+		var netErr net.Error
+		if errors.As(err, &netErr) && netErr.Timeout() {
+			kind = UpstreamErrorTransient
+		}
 	}
 	return &UpstreamError{
 		Kind:                kind,
@@ -361,4 +371,18 @@ func classifyRefreshFailure(endpoint string, err error) *UpstreamError {
 		Cause:               err,
 		RetryAcrossAccounts: retryAccounts,
 	}
+}
+
+func isRevokedRefreshCredentialError(lower string) bool {
+	return strings.Contains(lower, "invalid_grant") ||
+		strings.Contains(lower, "invalid grant") ||
+		strings.Contains(lower, "bad credentials") ||
+		strings.Contains(lower, "refresh token revoked") ||
+		strings.Contains(lower, "refresh token is revoked") ||
+		strings.Contains(lower, "token has been revoked") ||
+		strings.Contains(lower, "invalid_token") ||
+		strings.Contains(lower, "invalid refresh token") ||
+		strings.Contains(lower, "refresh token invalid") ||
+		strings.Contains(lower, "refresh token has expired") ||
+		strings.Contains(lower, "refresh token expired")
 }

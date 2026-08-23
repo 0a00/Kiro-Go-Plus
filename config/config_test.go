@@ -937,6 +937,29 @@ func TestAccountInfoBatchPreservesSubscriptionOnEmptyResponse(t *testing.T) {
 	}
 }
 
+func TestAccountInfoUpdateCannotRollbackNewerCredentials(t *testing.T) {
+	if err := Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	if err := AddAccount(Account{
+		ID: "info-token-race", Enabled: true, AccessToken: "old-access", RefreshToken: "old-refresh", ExpiresAt: 100,
+	}); err != nil {
+		t.Fatalf("add account: %v", err)
+	}
+	if err := UpdateAccountCredentials("info-token-race", "new-access", "new-refresh", 200, "new-profile"); err != nil {
+		t.Fatalf("update credentials: %v", err)
+	}
+	if err := UpdateAccountInfo("info-token-race", AccountInfo{
+		SubscriptionType: "POWER", UsageCurrent: 10, UsageLimit: 1000, LastRefresh: 123,
+	}); err != nil {
+		t.Fatalf("update account info: %v", err)
+	}
+	account := GetAccounts()[0]
+	if account.AccessToken != "new-access" || account.RefreshToken != "new-refresh" || account.ExpiresAt != 200 || account.ProfileArn != "new-profile" {
+		t.Fatalf("account info update rolled back credentials: %+v", account)
+	}
+}
+
 func TestPrivacySensitiveDefaultsAndProxyValidation(t *testing.T) {
 	if err := Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatalf("init config: %v", err)

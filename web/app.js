@@ -30,6 +30,8 @@
   let iamSession = '';
   let kiroSsoSession = '';
   let kiroSsoPollTimer = null;
+  let kiroSsoStarting = false;
+  let kiroSsoStartController = null;
   let exportSelectedIds = new Set();
   let currentVersion = '';
   let ipv6DiagnosticReport = null;
@@ -3959,10 +3961,15 @@
     } else toastError(t('common.failed') + ': ' + (d.error || ''));
   }
   async function startKiroSsoLogin() {
-    if (kiroSsoSession) return;
+    if (kiroSsoSession || kiroSsoStarting) return;
+    kiroSsoStarting = true;
+    const startButton = $('startKiroSsoBtn');
+    if (startButton) startButton.disabled = true;
+    const startController = new AbortController();
+    kiroSsoStartController = startController;
     const popup = window.open('about:blank', '_blank');
     try {
-      const res = await api('/auth/kiro-sso/start', { method: 'POST', body: '{}' });
+      const res = await api('/auth/kiro-sso/start', { method: 'POST', body: '{}', signal: startController.signal });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.sessionId || !data.signInUrl) throw new Error(data.error || t('common.failed'));
       kiroSsoSession = data.sessionId;
@@ -3978,7 +3985,13 @@
       pollKiroSso(data.interval || 2);
     } catch (e) {
       if (popup) popup.close();
-      toastError((e && e.message) || t('common.failed'));
+      if (!e || e.name !== 'AbortError') toastError((e && e.message) || t('common.failed'));
+    } finally {
+      if (kiroSsoStartController === startController) {
+        kiroSsoStartController = null;
+        kiroSsoStarting = false;
+      }
+      if (startButton && startButton.isConnected) startButton.disabled = false;
     }
   }
   function pollKiroSso(interval) {
@@ -4042,6 +4055,11 @@
     });
   }
   function cancelKiroSsoLogin(returnToAdd) {
+    if (kiroSsoStartController) {
+      kiroSsoStartController.abort();
+      kiroSsoStartController = null;
+    }
+    kiroSsoStarting = false;
     if (kiroSsoPollTimer) { clearTimeout(kiroSsoPollTimer); kiroSsoPollTimer = null; }
     const sessionId = kiroSsoSession;
     kiroSsoSession = '';

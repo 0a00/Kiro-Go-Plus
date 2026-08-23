@@ -247,20 +247,19 @@ func (h *Handler) acquireNextAccountForRequest(controller *accountAttemptControl
 
 func isQuotaErrorMessage(msg string) bool {
 	msg = strings.ToLower(msg)
-	return strings.Contains(msg, "429") || strings.Contains(msg, "quota")
+	return accountpool.HasStatusToken(msg, "429") || strings.Contains(msg, "quota")
 }
 
 func isRateLimitErrorMessage(msg string) bool {
 	msg = strings.ToLower(msg)
-	return strings.Contains(msg, "http 429") ||
-		strings.Contains(msg, " 429 ") ||
+	return accountpool.HasStatusToken(msg, "429") ||
 		strings.Contains(msg, "too many requests") ||
 		strings.Contains(msg, "rate limit")
 }
 
 func isOverageErrorMessage(msg string) bool {
 	msg = strings.ToLower(msg)
-	return strings.Contains(msg, "402") && strings.Contains(msg, "overage")
+	return accountpool.HasStatusToken(msg, "402") && strings.Contains(msg, "overage")
 }
 
 func isSuspensionErrorMessage(msg string) bool {
@@ -276,13 +275,12 @@ func isProfileUnavailableErrorMessage(msg string) bool {
 }
 
 func isAuthErrorMessage(msg string) bool {
-	msg = strings.ToLower(msg)
-	return strings.Contains(msg, "authentication failed") ||
-		strings.Contains(msg, "token invalid") ||
-		strings.Contains(msg, "token expired") ||
-		strings.Contains(msg, "invalid_grant") ||
-		strings.Contains(msg, "access token expired") ||
-		strings.Contains(msg, "refresh token expired")
+	lower := strings.ToLower(msg)
+	return accountpool.IsAuthFailure(errors.New(msg)) ||
+		strings.Contains(lower, "authentication failed") ||
+		strings.Contains(lower, "token invalid") ||
+		strings.Contains(lower, "access token expired") ||
+		strings.Contains(lower, "refresh token expired")
 }
 
 func (h *Handler) disableAccount(account *config.Account, banStatus, banReason string) {

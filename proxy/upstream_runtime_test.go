@@ -763,6 +763,41 @@ func TestEventStreamExceptionIsClassified(t *testing.T) {
 	}
 }
 
+func TestCallKiroAPIMapsContentLengthExceededToMaxTokens(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	if err := config.UpdatePreferredEndpoint("runtime"); err != nil {
+		t.Fatalf("set endpoint: %v", err)
+	}
+	if err := config.UpdateEndpointFallback(false); err != nil {
+		t.Fatalf("disable endpoint fallback: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "bounded output"}))
+		_, _ = w.Write(awsEventStreamExceptionFrame(t, "ContentLengthExceededException", map[string]interface{}{"message": "limit"}))
+	}))
+	defer server.Close()
+	oldEndpoints := kiroEndpoints
+	kiroEndpoints = []kiroEndpoint{{Key: "runtime", URL: server.URL, Name: "Kiro Runtime"}}
+	t.Cleanup(func() { kiroEndpoints = oldEndpoints })
+
+	var output strings.Builder
+	var stopReason string
+	err := CallKiroAPI(&config.Account{ID: "max-token-account", AccessToken: "token"}, &KiroPayload{}, &KiroStreamCallback{
+		OnText:       func(text string, _ bool) { output.WriteString(text) },
+		OnStopReason: func(reason string) { stopReason = reason },
+	})
+	if err != nil {
+		t.Fatalf("max-token endpoint response failed: %v", err)
+	}
+	if output.String() != "bounded output" || stopReason != "max_tokens" || mapClaudeStopReason(stopReason, 0) != "max_tokens" {
+		t.Fatalf("unexpected endpoint completion: output=%q reason=%q", output.String(), stopReason)
+	}
+}
+
 func TestRuntimeUnknown403FallsBackWithoutMarkingRevoked(t *testing.T) {
 	err := classifyUpstreamHTTPError(http.StatusForbidden, "Kiro Runtime", []byte(`{"message":"Forbidden"}`))
 	if err.Kind != UpstreamErrorForbidden || !err.RetryAcrossEndpoints || !err.RetryAcrossAccounts {

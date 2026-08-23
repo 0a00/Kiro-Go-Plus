@@ -1349,6 +1349,16 @@ func parseEventStream(body io.Reader, callback *KiroStreamCallback) error {
 
 		payloadBytes := frame.payload
 		lowerType := strings.ToLower(eventType)
+		if strings.EqualFold(strings.TrimSpace(eventType), "ContentLengthExceededException") {
+			sawCompletionSignal = true
+			if pendingToolUses.recoverCompletePrefix(callback, fmt.Errorf("%s completion signal", eventType)) > 0 {
+				recoveredToolUse = true
+			}
+			if callback.OnStopReason != nil {
+				callback.OnStopReason("max_tokens")
+			}
+			continue
+		}
 		if messageType == "error" || messageType == "exception" ||
 			strings.Contains(lowerType, "exception") || strings.Contains(lowerType, "error") {
 			reason, message := upstreamErrorDetails(payloadBytes)

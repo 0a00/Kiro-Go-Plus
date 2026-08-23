@@ -45,6 +45,62 @@ func TestResolveSupportedEffortUsesClosestAdvertisedLevel(t *testing.T) {
 	}
 }
 
+func TestAdaptiveThinkingModelFallbacks(t *testing.T) {
+	for _, model := range []string{
+		"claude-opus-4.6", "claude-opus-4.7", "claude-opus-4.8",
+		"claude-sonnet-5", "claude-opus-5",
+	} {
+		if !supportsAdaptiveThinking(model) {
+			t.Errorf("model %q should support adaptive thinking", model)
+		}
+	}
+	for _, model := range []string{"claude-opus-4.5", "claude-sonnet-4.6", "claude-haiku-4.5"} {
+		if supportsAdaptiveThinking(model) {
+			t.Errorf("legacy model %q unexpectedly uses adaptive fallback", model)
+		}
+	}
+}
+
+func TestOpus4ThinkingSuffixUsesSyntheticAdaptiveMode(t *testing.T) {
+	for _, model := range []string{"claude-opus-4.6", "claude-opus-4.7", "claude-opus-4.8"} {
+		req := &ClaudeRequest{Model: model, MaxTokens: 4096}
+		prompt := claudeThinkingPrompt(req, true)
+		if prompt != "<thinking_mode>adaptive</thinking_mode>\n<thinking_effort>high</thinking_effort>" {
+			t.Errorf("model %q produced %q", model, prompt)
+		}
+	}
+}
+
+func TestOpenAIOpus4ThinkingSuffixUsesSyntheticAdaptiveMode(t *testing.T) {
+	for _, model := range []string{"claude-opus-4.6", "claude-opus-4.7", "claude-opus-4.8"} {
+		req := &OpenAIRequest{Model: model, MaxTokens: 4096, ReasoningEffort: effortMedium}
+		prompt := openAIThinkingPrompt(req, true)
+		if prompt != "<thinking_mode>adaptive</thinking_mode>\n<thinking_effort>medium</thinking_effort>" {
+			t.Errorf("model %q produced %q", model, prompt)
+		}
+	}
+	legacy := openAIThinkingPrompt(&OpenAIRequest{Model: "claude-opus-4.5", MaxTokens: 4096}, true)
+	if !strings.Contains(legacy, "<thinking_mode>enabled</thinking_mode>") {
+		t.Fatalf("legacy OpenAI suffix lost budget fallback: %q", legacy)
+	}
+}
+
+func TestDiscoveredOpus4EffortMetadataTakesPriority(t *testing.T) {
+	const model = "claude-opus-4.8"
+	discoveredModelMetadata.Delete(model)
+	t.Cleanup(func() { discoveredModelMetadata.Delete(model) })
+	rememberDiscoveredModelMetadata([]ModelInfo{{
+		ModelId: model, EffortLevels: []string{effortLow, effortHigh}, EffortSchemaPath: "reasoning",
+	}})
+	req := &ClaudeRequest{
+		Model: model, Thinking: &ClaudeThinkingConfig{Type: "adaptive", Effort: effortLow},
+	}
+	(&Handler{}).prepareClaudeNativeEffort(req, true)
+	if req.NativeEffort != effortLow || req.NativeEffortPath != "reasoning" {
+		t.Fatalf("discovered metadata was not preferred: effort=%q path=%q", req.NativeEffort, req.NativeEffortPath)
+	}
+}
+
 func TestClaudeOpus5UsesNativeKiroEffort(t *testing.T) {
 	h := &Handler{}
 	req := &ClaudeRequest{

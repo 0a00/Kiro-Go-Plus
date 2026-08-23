@@ -98,6 +98,39 @@ func TestPromptCacheTrackerEnforcesPerAccountAndGlobalLimits(t *testing.T) {
 	}
 }
 
+func TestPromptCacheHitProtectsEntryFromLRUEviction(t *testing.T) {
+	tracker := newPromptCacheTracker(time.Hour)
+	tracker.ConfigureLimits(2, 10)
+	profile := func(marker byte) *promptCacheProfile {
+		var fingerprint [32]byte
+		fingerprint[0] = marker
+		return &promptCacheProfile{
+			Model: "claude-sonnet-4.5", TotalInputTokens: 2048,
+			Breakpoints: []promptCacheBreakpoint{{Fingerprint: fingerprint, CumulativeTokens: 2048, TTL: time.Hour}},
+		}
+	}
+
+	first := profile(1)
+	second := profile(2)
+	third := profile(3)
+	tracker.Update("acct-1", first)
+	tracker.Update("acct-1", second)
+	if usage := tracker.Compute("acct-1", first); usage.CacheReadInputTokens == 0 {
+		t.Fatalf("expected first entry to hit: %+v", usage)
+	}
+	tracker.Update("acct-1", third)
+
+	if _, ok := tracker.entry("acct-1", first.Breakpoints[0].Fingerprint); !ok {
+		t.Fatal("recently hit entry was evicted")
+	}
+	if _, ok := tracker.entry("acct-1", second.Breakpoints[0].Fingerprint); ok {
+		t.Fatal("least recently used entry was retained")
+	}
+	if _, ok := tracker.entry("acct-1", third.Breakpoints[0].Fingerprint); !ok {
+		t.Fatal("new cache entry was not retained")
+	}
+}
+
 func TestPromptCachePolicyAndNamespace(t *testing.T) {
 	tracker := newPromptCacheTracker(time.Hour)
 	request := &ClaudeRequest{
@@ -339,7 +372,7 @@ func TestPromptCacheGlobalTTLDoesNotExtendRequestedTTL(t *testing.T) {
 	}
 }
 
-func TestPromptCacheComputeDoesNotRefreshBeforeSuccess(t *testing.T) {
+func TestPromptCacheHitRefreshesTTLAndMarksStateChanged(t *testing.T) {
 	tracker := newPromptCacheTrackerWithSettings(time.Hour, 1)
 	var fingerprint [32]byte
 	fingerprint[0] = 2
@@ -354,10 +387,15 @@ func TestPromptCacheComputeDoesNotRefreshBeforeSuccess(t *testing.T) {
 	}
 
 	tracker.Update("acct-1", profile)
-	before, ok := tracker.entry("acct-1", fingerprint)
-	if !ok {
-		t.Fatal("expected cache entry")
-	}
+	oldAccess := time.Now().Add(-time.Hour)
+	oldExpiry := time.Now().Add(time.Minute)
+	shard := tracker.shardFor("acct-1")
+	shard.mu.Lock()
+	entry := shard.entriesByAccount["acct-1"][fingerprint]
+	entry.LastAccess = oldAccess
+	entry.ExpiresAt = oldExpiry
+	shard.mu.Unlock()
+	beforeGeneration := tracker.stateGeneration.Load()
 	if got := tracker.Compute("acct-1", profile); got.CacheReadInputTokens == 0 {
 		t.Fatalf("expected cache hit, got %+v", got)
 	}
@@ -365,8 +403,11 @@ func TestPromptCacheComputeDoesNotRefreshBeforeSuccess(t *testing.T) {
 	if !ok {
 		t.Fatal("expected cache entry after compute")
 	}
-	if !after.ExpiresAt.Equal(before.ExpiresAt) || !after.LastAccess.Equal(before.LastAccess) {
-		t.Fatalf("compute refreshed cache before upstream success: before=%+v after=%+v", before, after)
+	if !after.LastAccess.After(oldAccess) || !after.ExpiresAt.After(oldExpiry) {
+		t.Fatalf("cache hit did not refresh TTL/LRU: access=%s expiry=%s", after.LastAccess, after.ExpiresAt)
+	}
+	if tracker.stateGeneration.Load() <= beforeGeneration {
+		t.Fatal("cache hit did not mark persisted state as changed")
 	}
 }
 

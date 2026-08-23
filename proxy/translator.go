@@ -456,6 +456,9 @@ func claudeThinkingPrompt(req *ClaudeRequest, enabled bool) string {
 		// request's native thinking block is disabled.
 		thinking = nil
 	}
+	if thinking == nil && supportsAdaptiveThinking(req.Model) {
+		thinking = &ClaudeThinkingConfig{Type: "adaptive"}
+	}
 	defaultBudget := cfg.DefaultBudgetTokens
 	budgetCap := cfg.BudgetCapTokens
 	explicitBudget := thinking != nil && strings.EqualFold(strings.TrimSpace(thinking.Type), "enabled") && thinking.BudgetTokens > 0
@@ -469,32 +472,20 @@ func claudeThinkingPrompt(req *ClaudeRequest, enabled bool) string {
 }
 
 func buildThinkingPrompt(thinking *ClaudeThinkingConfig, outputConfig *ClaudeOutputConfig, maxTokens, defaultBudget, budgetCap int) string {
-	requestedBudget := 0
 	clientBudget := false
 	if thinking != nil {
 		switch strings.ToLower(strings.TrimSpace(thinking.Type)) {
 		case "disabled":
 			return ""
 		case "adaptive":
-			effort := strings.ToLower(strings.TrimSpace(thinking.Effort))
+			effort := normalizeRequestedEffort(thinking.Effort)
 			if effort == "" && outputConfig != nil {
-				effort = strings.ToLower(strings.TrimSpace(outputConfig.Effort))
+				effort = normalizeRequestedEffort(outputConfig.Effort)
 			}
-			if effort != "low" && effort != "medium" && effort != "high" {
-				effort = "medium"
+			if effort == "" {
+				effort = effortHigh
 			}
-			base := defaultBudget
-			if base <= 0 {
-				base = defaultThinkingBudgetTokens
-			}
-			switch effort {
-			case "low":
-				requestedBudget = max(minimumThinkingBudgetTokens, base/2)
-			case "medium":
-				requestedBudget = base
-			default:
-				requestedBudget = max(base, 8000)
-			}
+			return fmt.Sprintf("<thinking_mode>adaptive</thinking_mode>\n<thinking_effort>%s</thinking_effort>", effort)
 		}
 	}
 	if maxTokens > 0 && maxTokens <= minimumThinkingBudgetTokens {
@@ -508,9 +499,6 @@ func buildThinkingPrompt(thinking *ClaudeThinkingConfig, outputConfig *ClaudeOut
 	if thinking != nil && strings.EqualFold(strings.TrimSpace(thinking.Type), "enabled") && thinking.BudgetTokens > 0 {
 		budget = thinking.BudgetTokens
 		clientBudget = true
-	}
-	if requestedBudget > 0 {
-		budget = requestedBudget
 	}
 	if budgetCap < 0 {
 		budgetCap = defaultThinkingBudgetCap
@@ -532,6 +520,18 @@ func buildThinkingPrompt(thinking *ClaudeThinkingConfig, outputConfig *ClaudeOut
 		budget = minimumThinkingBudgetTokens
 	}
 	return fmt.Sprintf("<thinking_mode>enabled</thinking_mode>\n<max_thinking_length>%d</max_thinking_length>", budget)
+}
+
+func openAIThinkingPrompt(req *OpenAIRequest, enabled bool) string {
+	if !enabled || req == nil || req.NativeEffort != "" {
+		return ""
+	}
+	cfg := config.GetThinkingConfig()
+	var thinking *ClaudeThinkingConfig
+	if supportsAdaptiveThinking(req.Model) {
+		thinking = &ClaudeThinkingConfig{Type: "adaptive", Effort: req.ReasoningEffort}
+	}
+	return buildThinkingPrompt(thinking, nil, req.MaxTokens, cfg.DefaultBudgetTokens, cfg.BudgetCapTokens)
 }
 
 func hasThinkingModeTags(text string) bool {
@@ -1503,8 +1503,7 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 
 	// 如果启用 thinking 模式，注入 thinking 提示
 	if thinking && req.NativeEffort == "" {
-		thinkingCfg := config.GetThinkingConfig()
-		thinkingPrompt := buildThinkingPrompt(nil, nil, req.MaxTokens, thinkingCfg.DefaultBudgetTokens, thinkingCfg.BudgetCapTokens)
+		thinkingPrompt := openAIThinkingPrompt(req, true)
 		if !hasThinkingModeTags(systemPrompt) {
 			systemPrompt = thinkingPrompt + "\n\n" + systemPrompt
 		}

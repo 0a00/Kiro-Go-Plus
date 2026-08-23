@@ -195,17 +195,51 @@ func TestIsAuthFailureRecognizes401And403(t *testing.T) {
 }
 
 func TestIsAuthFailureIgnoresFalsePositives(t *testing.T) {
-	// hasStatusToken only excludes digit boundaries; e.g. "4011" contains "401"
-	// but the trailing '1' is a digit so it does NOT match.
 	negatives := []string{
-		"status code 4011 found", // digit immediately after 401 → not a standalone token
-		"error 14013 exceeded",   // digit before and after 401
+		"status code 4011 found",
+		"error 14013 exceeded",
+		"req_403abc",
+		"request_401xyz",
 		"some random error",
 		"status 200 OK",
 	}
 	for _, msg := range negatives {
 		if IsAuthFailure(errors.New(msg)) {
 			t.Errorf("IsAuthFailure(%q) = true, want false", msg)
+		}
+	}
+}
+
+func TestHasStatusTokenUsesAlphanumericBoundaries(t *testing.T) {
+	positives := []struct {
+		message string
+		status  string
+	}{
+		{message: "HTTP 401 Unauthorized", status: "401"},
+		{message: "status=402; overage", status: "402"},
+		{message: "received (403)", status: "403"},
+		{message: "retry after 429", status: "429"},
+	}
+	for _, tc := range positives {
+		if !HasStatusToken(tc.message, tc.status) {
+			t.Errorf("HasStatusToken(%q, %q) = false, want true", tc.message, tc.status)
+		}
+	}
+
+	negatives := []struct {
+		message string
+		status  string
+	}{
+		{message: "request_401abc", status: "401"},
+		{message: "abc402xyz", status: "402"},
+		{message: "req_403abc", status: "403"},
+		{message: "trace_4290f3", status: "429"},
+		{message: "a403403b", status: "403"},
+		{message: "HTTP 401", status: ""},
+	}
+	for _, tc := range negatives {
+		if HasStatusToken(tc.message, tc.status) {
+			t.Errorf("HasStatusToken(%q, %q) = true, want false", tc.message, tc.status)
 		}
 	}
 }

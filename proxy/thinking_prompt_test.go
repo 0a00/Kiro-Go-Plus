@@ -19,7 +19,7 @@ func TestBuildThinkingPromptUsesExplicitClientBudget(t *testing.T) {
 	}
 }
 
-func TestBuildThinkingPromptBoundsAdaptiveMode(t *testing.T) {
+func TestBuildThinkingPromptUsesAdaptiveEffort(t *testing.T) {
 	prompt := buildThinkingPrompt(
 		&ClaudeThinkingConfig{Type: "adaptive"},
 		&ClaudeOutputConfig{Effort: "medium"},
@@ -27,13 +27,13 @@ func TestBuildThinkingPromptBoundsAdaptiveMode(t *testing.T) {
 		4000,
 		10000,
 	)
-	want := "<thinking_mode>enabled</thinking_mode>\n<max_thinking_length>4000</max_thinking_length>"
+	want := "<thinking_mode>adaptive</thinking_mode>\n<thinking_effort>medium</thinking_effort>"
 	if prompt != want {
-		t.Fatalf("unexpected bounded adaptive prompt: got %q want %q", prompt, want)
+		t.Fatalf("unexpected adaptive prompt: got %q want %q", prompt, want)
 	}
 }
 
-func TestBuildThinkingPromptDefaultsAdaptiveToMediumBudget(t *testing.T) {
+func TestBuildThinkingPromptDefaultsAdaptiveToHighEffort(t *testing.T) {
 	prompt := buildThinkingPrompt(
 		&ClaudeThinkingConfig{Type: "adaptive"},
 		nil,
@@ -41,7 +41,7 @@ func TestBuildThinkingPromptDefaultsAdaptiveToMediumBudget(t *testing.T) {
 		4000,
 		10000,
 	)
-	if !strings.Contains(prompt, "<max_thinking_length>4000</max_thinking_length>") {
+	if prompt != "<thinking_mode>adaptive</thinking_mode>\n<thinking_effort>high</thinking_effort>" {
 		t.Fatalf("unexpected adaptive default: %q", prompt)
 	}
 }
@@ -68,6 +68,7 @@ func TestBuildThinkingPromptKeepsHeadroomForProxyDefault(t *testing.T) {
 
 func TestClaudeThinkingPromptPreservesExplicitBudgetWhenToolIsRequired(t *testing.T) {
 	req := &ClaudeRequest{
+		Model:          "claude-opus-4.8",
 		MaxTokens:      32000,
 		Thinking:       &ClaudeThinkingConfig{Type: "enabled", BudgetTokens: 12000},
 		RequireToolUse: true,
@@ -84,14 +85,28 @@ func TestBuildThinkingPromptDisabled(t *testing.T) {
 	}
 }
 
-func TestClaudeThinkingPromptUsesMinimalBudgetWhenToolIsRequired(t *testing.T) {
+func TestClaudeThinkingPromptKeepsAdaptiveModeWhenToolIsRequired(t *testing.T) {
 	req := &ClaudeRequest{
+		Model:          "claude-opus-4.8",
 		MaxTokens:      32000,
 		Thinking:       &ClaudeThinkingConfig{Type: "adaptive", Effort: "high"},
 		RequireToolUse: true,
 	}
 	prompt := claudeThinkingPrompt(req, true)
-	if !strings.Contains(prompt, "<max_thinking_length>1024</max_thinking_length>") {
+	if prompt != "<thinking_mode>adaptive</thinking_mode>\n<thinking_effort>high</thinking_effort>" {
 		t.Fatalf("unexpected required-tool thinking prompt: %q", prompt)
+	}
+}
+
+func TestClaudeLegacySuffixUsesMinimalBudgetWhenToolIsRequired(t *testing.T) {
+	req := &ClaudeRequest{
+		Model:          "claude-haiku-4.5",
+		MaxTokens:      32000,
+		RequireToolUse: true,
+	}
+	prompt := claudeThinkingPrompt(req, true)
+	if !strings.Contains(prompt, "<thinking_mode>enabled</thinking_mode>") ||
+		!strings.Contains(prompt, "<max_thinking_length>1024</max_thinking_length>") {
+		t.Fatalf("unexpected legacy required-tool prompt: %q", prompt)
 	}
 }

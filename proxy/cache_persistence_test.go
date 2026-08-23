@@ -83,6 +83,50 @@ func TestPromptCacheLoadDropsExpiredMalformedAndExcessEntries(t *testing.T) {
 	}
 }
 
+func TestPromptCacheHitPersistsRefreshedTTLAndAccess(t *testing.T) {
+	path := filepath.Join(t.TempDir(), promptCachePersistenceFile)
+	tracker := newPromptCacheTrackerWithSettings(time.Hour, 1)
+	var fingerprint [32]byte
+	fingerprint[0] = 9
+	profile := cachePersistenceProfile(fingerprint, 2048, 5*time.Minute)
+	tracker.Update("account-a", profile)
+
+	oldAccess := time.Now().Add(-time.Hour).Truncate(time.Second)
+	oldExpiry := time.Now().Add(time.Minute).Truncate(time.Second)
+	shard := tracker.shardFor("account-a")
+	shard.mu.Lock()
+	entry := shard.entriesByAccount["account-a"][fingerprint]
+	entry.LastAccess = oldAccess
+	entry.ExpiresAt = oldExpiry
+	shard.mu.Unlock()
+	tracker.markStateChanged()
+	if err := tracker.Flush(path); err != nil {
+		t.Fatalf("flush old cache state: %v", err)
+	}
+	persistedBeforeHit := tracker.persistedGeneration.Load()
+
+	if usage := tracker.Compute("account-a", profile); usage.CacheReadInputTokens == 0 {
+		t.Fatalf("expected cache hit: %+v", usage)
+	}
+	if tracker.stateGeneration.Load() <= persistedBeforeHit {
+		t.Fatal("cache hit did not advance persistence generation")
+	}
+	if err := tracker.Flush(path); err != nil {
+		t.Fatalf("flush refreshed cache state: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read refreshed cache state: %v", err)
+	}
+	var state persistedPromptCacheState
+	if err := json.Unmarshal(raw, &state); err != nil {
+		t.Fatalf("decode refreshed cache state: %v", err)
+	}
+	if len(state.Entries) != 1 || state.Entries[0].LastAccess <= oldAccess.Unix() || state.Entries[0].ExpiresAt <= oldExpiry.Unix() {
+		t.Fatalf("refreshed cache hit was not persisted: %+v", state.Entries)
+	}
+}
+
 func TestPromptCacheRemovePersisted(t *testing.T) {
 	path := filepath.Join(t.TempDir(), promptCachePersistenceFile)
 	tracker := newPromptCacheTrackerWithSettings(time.Hour, 1)

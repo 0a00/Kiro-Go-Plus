@@ -30,6 +30,24 @@ func TestAccountFailureClassifiers(t *testing.T) {
 	}
 }
 
+func TestAccountFailureClassifiersIgnoreStatusInsideIdentifiers(t *testing.T) {
+	tests := []struct {
+		name string
+		fn   func(string) bool
+		msg  string
+	}{
+		{name: "quota", fn: isQuotaErrorMessage, msg: "trace_4290f3"},
+		{name: "rate limit", fn: isRateLimitErrorMessage, msg: "trace_4290f3"},
+		{name: "overage", fn: isOverageErrorMessage, msg: "abc402xyz overage"},
+		{name: "auth", fn: isAuthErrorMessage, msg: "req_403abc"},
+	}
+	for _, tc := range tests {
+		if tc.fn(tc.msg) {
+			t.Errorf("%s classifier matched identifier %q", tc.name, tc.msg)
+		}
+	}
+}
+
 func TestAccountAttemptControllerKeepsFiniteLimit(t *testing.T) {
 	controller := newAccountAttemptController(context.Background(), nil, 3)
 	for attempt := 0; attempt < 3; attempt++ {

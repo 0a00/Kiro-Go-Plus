@@ -1,5 +1,5 @@
 {
-  "version": "1.2.37",
-  "changelog": "Harden stream completion and stop reasons, preserve ordered concurrent tool calls, recover API-key regions safely, and improve atomic account updates and helper credential imports.\n强化流完成与停止原因检测，保持并发工具调用顺序，安全恢复 API Key 地区，并改进账号原子更新及登录助手凭据导入。",
+  "version": "1.2.38",
+  "changelog": "Handle Kiro output-limit completion safely, harden token refresh and account state races, refresh prompt-cache TTL/LRU on hits, support adaptive Opus thinking, and prevent duplicate SSO starts.\n安全处理 Kiro 输出上限完成事件，强化 Token 刷新与账号状态并发保护，命中时刷新提示词缓存 TTL/LRU，支持 Opus 自适应思考，并防止 SSO 重复启动。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }
