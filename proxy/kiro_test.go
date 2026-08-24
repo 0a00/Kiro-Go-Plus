@@ -213,6 +213,95 @@ func TestParseEventStreamRejectsPendingToolUseWithoutArgumentsOnEOF(t *testing.T
 	}
 }
 
+func TestParseEventStreamRecoversSchemaDeclaredZeroArgumentToolOnEOF(t *testing.T) {
+	const toolName = "mcpMemoryReadGraphH123"
+	stream := bytes.NewReader(awsEventStreamFrame(t, "toolUseEvent", map[string]interface{}{
+		"toolUseId": "toolu_zero",
+		"name":      toolName,
+	}))
+	options := eventStreamParseOptionsForPayload(payloadWithTestTool(toolName, map[string]interface{}{
+		"type":       "object",
+		"properties": map[string]interface{}{},
+	}))
+
+	var toolUses []KiroToolUse
+	var stops int
+	err := parseEventStreamWithOptions(stream, &KiroStreamCallback{
+		OnToolUse:     func(toolUse KiroToolUse) { toolUses = append(toolUses, toolUse) },
+		OnToolUseStop: func(string) { stops++ },
+	}, options)
+	if err != nil {
+		t.Fatalf("recover zero-argument tool: %v", err)
+	}
+	if len(toolUses) != 1 || toolUses[0].Name != toolName || len(toolUses[0].Input) != 0 || stops != 1 {
+		t.Fatalf("unexpected recovered tool callbacks: uses=%#v stops=%d", toolUses, stops)
+	}
+}
+
+func TestParseEventStreamRecoversSchemaDeclaredZeroArgumentToolOnCompletion(t *testing.T) {
+	const toolName = "mcpFilesystemListAllowedDirectoriesH123"
+	stream := bytes.NewReader(bytes.Join([][]byte{
+		awsEventStreamFrame(t, "toolUseEvent", map[string]interface{}{
+			"toolUseId": "toolu_zero",
+			"name":      toolName,
+		}),
+		awsEventStreamFrame(t, "metadataEvent", map[string]interface{}{"stopReason": "tool_use"}),
+	}, nil))
+	options := eventStreamParseOptionsForPayload(payloadWithTestTool(toolName, map[string]interface{}{"type": "object"}))
+
+	var toolUses []KiroToolUse
+	err := parseEventStreamWithOptions(stream, &KiroStreamCallback{
+		OnToolUse: func(toolUse KiroToolUse) { toolUses = append(toolUses, toolUse) },
+	}, options)
+	if err != nil {
+		t.Fatalf("recover zero-argument tool on completion: %v", err)
+	}
+	if len(toolUses) != 1 || len(toolUses[0].Input) != 0 {
+		t.Fatalf("unexpected recovered tool use: %#v", toolUses)
+	}
+}
+
+func TestParseEventStreamDoesNotRecoverEmptyParameterizedTool(t *testing.T) {
+	const toolName = "read_file"
+	stream := bytes.NewReader(awsEventStreamFrame(t, "toolUseEvent", map[string]interface{}{
+		"toolUseId": "toolu_parameterized",
+		"name":      toolName,
+	}))
+	options := eventStreamParseOptionsForPayload(payloadWithTestTool(toolName, map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"path": map[string]interface{}{"type": "string"},
+		},
+		"required": []interface{}{"path"},
+	}))
+
+	err := parseEventStreamWithOptions(stream, &KiroStreamCallback{}, options)
+	var streamErr *EventStreamError
+	if !errors.As(err, &streamErr) || streamErr.Kind != EventStreamIncompleteToolUse {
+		t.Fatalf("expected parameterized tool to remain incomplete, got %#v", err)
+	}
+}
+
+func TestParseEventStreamReadsWrappedToolUseEvent(t *testing.T) {
+	stream := bytes.NewReader(awsEventStreamFrame(t, "toolUseEvent", map[string]interface{}{
+		"toolUseEvent": map[string]interface{}{
+			"toolUseId": "toolu_wrapped",
+			"name":      "lookup",
+			"input":     `{"query":"kiro"}`,
+			"stop":      true,
+		},
+	}))
+
+	var got KiroToolUse
+	err := parseEventStream(stream, &KiroStreamCallback{OnToolUse: func(toolUse KiroToolUse) { got = toolUse }})
+	if err != nil {
+		t.Fatalf("parse wrapped tool-use event: %v", err)
+	}
+	if got.ToolUseID != "toolu_wrapped" || got.Name != "lookup" || got.Input["query"] != "kiro" {
+		t.Fatalf("wrapped tool-use event was not preserved: %#v", got)
+	}
+}
+
 func TestParseEventStreamRecoversCompleteToolUseBeforeTruncatedFrame(t *testing.T) {
 	completeTool := awsEventStreamFrame(t, "toolUseEvent", map[string]interface{}{
 		"toolUseId": "toolu_1",
@@ -270,6 +359,28 @@ func TestParseEventStreamDoesNotMaskCorruptFrameAfterIncompleteToolUse(t *testin
 	var streamErr *EventStreamError
 	if !errors.As(err, &streamErr) || streamErr.Kind != EventStreamMessageCRCMismatch {
 		t.Fatalf("expected message CRC error, got %#v", err)
+	}
+}
+
+func TestParseEventStreamDoesNotMaskCorruptFrameAfterCompleteToolUse(t *testing.T) {
+	completeTool := awsEventStreamFrame(t, "toolUseEvent", map[string]interface{}{
+		"toolUseId": "toolu_complete",
+		"name":      "read_file",
+		"input":     `{"path":"README.md"}`,
+	})
+	corrupt := awsEventStreamFrame(t, "meteringEvent", map[string]interface{}{"usage": 1.0})
+	corrupt[len(corrupt)-1] ^= 0xff
+
+	var toolUses []KiroToolUse
+	err := parseEventStream(bytes.NewReader(append(completeTool, corrupt...)), &KiroStreamCallback{
+		OnToolUse: func(toolUse KiroToolUse) { toolUses = append(toolUses, toolUse) },
+	})
+	var streamErr *EventStreamError
+	if !errors.As(err, &streamErr) || streamErr.Kind != EventStreamMessageCRCMismatch {
+		t.Fatalf("expected message CRC error, got %#v", err)
+	}
+	if len(toolUses) != 0 {
+		t.Fatalf("corrupt trailing frame must not emit pending tool uses: %#v", toolUses)
 	}
 }
 

@@ -4,6 +4,7 @@
 *.exe
 *.test
 *.out
+/devcheck-report*.json
 
 # Runtime data
 /data/

@@ -22,6 +22,12 @@ jobs:
       - run: go test ./...
       - run: go vet ./...
       - run: go build ./...
+      - run: test -z "$(gofmt -l .)"
+      - run: bash -n scripts/*.sh
+      - run: node --check web/app.js
+      - run: node --check web/credential-import.js
+      - run: node scripts/credential-import.test.js
+      - run: docker compose config --quiet
 
   race:
     runs-on: ubuntu-latest

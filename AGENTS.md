@@ -24,6 +24,8 @@ go vet ./...                   # Run static checks
 node --check web/app.js        # Check UI JavaScript
 docker compose config --quiet  # Validate Compose
 docker compose up -d --build   # Build and start
+bash scripts/dev-test.sh quick # Run the standard offline quality gate
+bash scripts/dev-test.sh full  # Run release-level stability and race checks
 ```
 
 Run `gofmt -w` on every changed Go file before committing.

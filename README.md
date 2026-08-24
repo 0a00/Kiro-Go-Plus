@@ -204,6 +204,14 @@ go build -o kiro-go .
 
 The display name is Kiro-Go Plus. The Go module, binary, Compose service, and data format retain the `kiro-go` identifiers for compatibility with existing deployments and update scripts.
 
+## Development Testing
+
+Run `bash scripts/dev-test.sh quick` for deterministic offline checks or
+`bash scripts/dev-test.sh full` before deployment. An opt-in local API runner
+measures TTFT and total latency while checking streaming, thinking, function
+calls, MCP-shaped tools, Responses, cancellation, WebSearch, and bounded
+concurrency. See [Local Development Testing](docs/development-testing.md).
+
 ## Per-account IPv6 Egress
 
 Admin Settings can bind direct account traffic to addresses from a routed IPv6 prefix:

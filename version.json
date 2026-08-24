@@ -1,5 +1,5 @@
 {
-  "version": "1.2.44",
-  "changelog": "Add account-adaptive endpoint routing with persisted affinity and route-specific cooldowns, Management model discovery, and Runtime MCP fallback.\n新增账号自适应端点路由、持久化亲和与端点级冷却，并接入 Management 模型发现和 Runtime MCP 回退。",
+  "version": "1.2.45",
+  "changelog": "Fix schema-aware zero-argument MCP tool recovery and add offline/live development test suites.\n修复基于 schema 的零参数 MCP 工具恢复，并增加离线与本地实测开发测试集合。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }

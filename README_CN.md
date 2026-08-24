@@ -204,6 +204,14 @@ go build -o kiro-go .
 
 项目显示名称已改为 Kiro-Go Plus，但 Go module、二进制名、Compose 服务名和数据结构继续保留 `kiro-go`，用于兼容旧部署和更新脚本。
 
+## 开发测试
+
+日常开发执行 `bash scripts/dev-test.sh quick`，部署前执行
+`bash scripts/dev-test.sh full`。另有显式启用的本地 API 场景测试，可记录首字和
+总耗时，并检查流式、思考、函数调用、MCP 形态工具、Responses、取消恢复、
+WebSearch 和受控并发。完整用法与测试边界见
+[本地开发测试说明](docs/development-testing.md)。
+
 ## 每账号 IPv6 出口
 
 后台设置支持从服务器已路由的 IPv6 地址段为直连账号分配出口：

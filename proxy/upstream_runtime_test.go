@@ -398,6 +398,62 @@ func TestCallKiroAPIStopsToolStreamThatNeverCompletes(t *testing.T) {
 	}
 }
 
+func TestCallKiroAPIRecoversSchemaDeclaredZeroArgumentTool(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	retry := config.GetRetryConfig()
+	retry.MaxAccountAttempts = 1
+	retry.MaxUpstreamAttempts = 1
+	retry.MaxRetryDurationSeconds = 5
+	retry.FirstTokenTimeoutSeconds = 5
+	retry.StreamIdleTimeoutSeconds = 5
+	retry.ToolAssemblyTimeoutSeconds = 2
+	if err := config.UpdateRetryConfig(retry); err != nil {
+		t.Fatalf("update retry config: %v", err)
+	}
+	_ = config.UpdatePreferredEndpoint("runtime")
+	_ = config.UpdateEndpointFallback(false)
+
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(awsEventStreamFrame(t, "toolUseEvent", map[string]interface{}{
+			"toolUseId": "toolu_zero",
+			"name":      "mcpMemoryReadGraphH123",
+		}))
+	}))
+	defer server.Close()
+
+	oldEndpoints := kiroEndpoints
+	kiroEndpoints = []kiroEndpoint{{Key: "runtime", URL: server.URL, Name: "Kiro Runtime"}}
+	t.Cleanup(func() { kiroEndpoints = oldEndpoints })
+
+	payload := payloadWithTestTool("mcpMemoryReadGraphH123", map[string]interface{}{
+		"type":       "object",
+		"properties": map[string]interface{}{},
+	})
+	payload.requireActionableOutput = true
+	payload.requireToolUse = true
+	payload.deferTextUntilComplete = true
+	payload.ConversationState.CurrentMessage.UserInputMessage.ModelID = "claude-sonnet-4.6"
+
+	var toolUses []KiroToolUse
+	err := CallKiroAPI(&config.Account{ID: "zero-tool-account", AccessToken: "token"}, payload, &KiroStreamCallback{
+		OnToolUse: func(toolUse KiroToolUse) { toolUses = append(toolUses, toolUse) },
+	})
+	if err != nil {
+		t.Fatalf("zero-argument tool call failed: %v", err)
+	}
+	if requests.Load() != 1 {
+		t.Fatalf("zero-argument recovery retried upstream %d times", requests.Load())
+	}
+	if len(toolUses) != 1 || toolUses[0].Name != "mcpMemoryReadGraphH123" || len(toolUses[0].Input) != 0 {
+		t.Fatalf("unexpected recovered tool use: %#v", toolUses)
+	}
+}
+
 func TestCallKiroAPIRotatesEndpointAfterActionableOutputTimeout(t *testing.T) {
 	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatalf("init config: %v", err)

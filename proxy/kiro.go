@@ -1144,10 +1144,10 @@ endpointLoop:
 					defer actionableOutputTimer.Stop()
 				}
 				defer cancelRequest()
-				return parseAndCloseEventStream(resp.Body, idleTimeout, func() {
+				return parseAndCloseEventStreamWithOptions(resp.Body, idleTimeout, func() {
 					streamIdleTimedOut.Store(true)
 					cancelRequest()
-				}, wrappedCallback)
+				}, wrappedCallback, eventStreamParseOptionsForPayload(payload))
 			}()
 			if err == nil && meaningfulGate.hasInvalidCommittedToolUse() {
 				err = &EventStreamError{
@@ -1326,6 +1326,10 @@ func accountEmailForLog(account *config.Account) string {
 
 // parseEventStream decodes an AWS binary Event Stream response body.
 func parseEventStream(body io.Reader, callback *KiroStreamCallback) error {
+	return parseEventStreamWithOptions(body, callback, eventStreamParseOptions{})
+}
+
+func parseEventStreamWithOptions(body io.Reader, callback *KiroStreamCallback, options eventStreamParseOptions) error {
 	if callback == nil {
 		callback = &KiroStreamCallback{}
 	}
@@ -1354,14 +1358,16 @@ func parseEventStream(body io.Reader, callback *KiroStreamCallback) error {
 			break
 		}
 		if err != nil {
-			recovered := pendingToolUses.recoverCompletePrefix(callback, err)
-			if recovered > 0 && pendingToolUses.empty() {
-				recoveredToolUse = true
-				break
-			}
 			var streamErr *EventStreamError
-			if state := pendingToolUses.first(); state != nil && errors.As(err, &streamErr) && streamErr.Kind == EventStreamTruncated {
-				return incompleteToolUseStreamError(state, err)
+			if errors.As(err, &streamErr) && streamErr.Kind == EventStreamTruncated {
+				recovered := pendingToolUses.recoverCompletePrefix(callback, err, false, options)
+				if recovered > 0 && pendingToolUses.empty() {
+					recoveredToolUse = true
+					break
+				}
+				if state := pendingToolUses.first(); state != nil {
+					return incompleteToolUseStreamError(state, err)
+				}
 			}
 			return err
 		}
@@ -1384,7 +1390,7 @@ func parseEventStream(body io.Reader, callback *KiroStreamCallback) error {
 		lowerType := strings.ToLower(eventType)
 		if strings.EqualFold(strings.TrimSpace(eventType), "ContentLengthExceededException") {
 			sawCompletionSignal = true
-			if pendingToolUses.recoverCompletePrefix(callback, fmt.Errorf("%s completion signal", eventType)) > 0 {
+			if pendingToolUses.recoverCompletePrefix(callback, fmt.Errorf("%s completion signal", eventType), true, options) > 0 {
 				recoveredToolUse = true
 			}
 			if callback.OnStopReason != nil {
@@ -1420,7 +1426,8 @@ func parseEventStream(body io.Reader, callback *KiroStreamCallback) error {
 				Cause:   err,
 			}
 		}
-		toolEvent := isToolUseEventPayload(eventType, event, pendingToolUses.latest())
+		toolPayload, wrappedToolEvent := unwrapToolUseEventPayload(event)
+		toolEvent := wrappedToolEvent || isToolUseEventPayload(eventType, toolPayload, pendingToolUses.latest())
 		if eventType == "" && !toolEvent {
 			return &EventStreamError{Kind: EventStreamInvalidHeaders, Message: "missing :event-type header"}
 		}
@@ -1435,10 +1442,10 @@ func parseEventStream(body io.Reader, callback *KiroStreamCallback) error {
 		// and stop frames. Classify those frames by both header and payload.
 		if toolEvent {
 			if toolUseEventSignalsStop(eventType) {
-				event["stop"] = true
+				toolPayload["stop"] = true
 			}
 			sawOutput = true
-			if err = handleToolUseEvent(event, pendingToolUses, callback); err != nil {
+			if err = handleToolUseEvent(toolPayload, pendingToolUses, callback); err != nil {
 				return err
 			}
 			continue
@@ -1461,7 +1468,7 @@ func parseEventStream(body io.Reader, callback *KiroStreamCallback) error {
 			}
 		case "meteringEvent":
 			sawCompletionSignal = true
-			if pendingToolUses.recoverCompletePrefix(callback, fmt.Errorf("%s completion signal", eventType)) > 0 {
+			if pendingToolUses.recoverCompletePrefix(callback, fmt.Errorf("%s completion signal", eventType), true, options) > 0 {
 				recoveredToolUse = true
 			}
 			if usage, ok := event["usage"].(float64); ok {
@@ -1469,7 +1476,7 @@ func parseEventStream(body io.Reader, callback *KiroStreamCallback) error {
 			}
 		case "contextUsageEvent":
 			sawCompletionSignal = true
-			if pendingToolUses.recoverCompletePrefix(callback, fmt.Errorf("%s completion signal", eventType)) > 0 {
+			if pendingToolUses.recoverCompletePrefix(callback, fmt.Errorf("%s completion signal", eventType), true, options) > 0 {
 				recoveredToolUse = true
 			}
 			if pct, ok := event["contextUsagePercentage"].(float64); ok {
@@ -1480,7 +1487,7 @@ func parseEventStream(body io.Reader, callback *KiroStreamCallback) error {
 		case "metadataEvent":
 			if reason := firstStringField(event, "stopReason", "stop_reason"); reason != "" {
 				sawCompletionSignal = true
-				if pendingToolUses.recoverCompletePrefix(callback, fmt.Errorf("%s completion signal", eventType)) > 0 {
+				if pendingToolUses.recoverCompletePrefix(callback, fmt.Errorf("%s completion signal", eventType), true, options) > 0 {
 					recoveredToolUse = true
 				}
 				if callback.OnStopReason != nil {
@@ -1491,7 +1498,7 @@ func parseEventStream(body io.Reader, callback *KiroStreamCallback) error {
 	}
 
 	if state := pendingToolUses.first(); state != nil {
-		if pendingToolUses.recoverCompletePrefix(callback, io.EOF) > 0 {
+		if pendingToolUses.recoverCompletePrefix(callback, io.EOF, true, options) > 0 {
 			recoveredToolUse = true
 		}
 		if state = pendingToolUses.first(); state != nil {
@@ -1525,10 +1532,14 @@ func parseEventStream(body io.Reader, callback *KiroStreamCallback) error {
 // recover that panic, so leaking the body here would otherwise retain sockets
 // and file descriptors across repeated failed requests.
 func parseAndCloseEventStream(body io.ReadCloser, idleTimeout time.Duration, onIdle func(), callback *KiroStreamCallback) error {
+	return parseAndCloseEventStreamWithOptions(body, idleTimeout, onIdle, callback, eventStreamParseOptions{})
+}
+
+func parseAndCloseEventStreamWithOptions(body io.ReadCloser, idleTimeout time.Duration, onIdle func(), callback *KiroStreamCallback, options eventStreamParseOptions) error {
 	idleReader := newStreamIdleReader(body, idleTimeout, onIdle)
 	defer idleReader.Stop()
 	defer body.Close()
-	return parseEventStream(idleReader, callback)
+	return parseEventStreamWithOptions(idleReader, callback, options)
 }
 
 func updateTokensFromEvent(event map[string]interface{}, currentInputTokens, currentOutputTokens int) (int, int) {
@@ -1857,10 +1868,11 @@ func (p *pendingToolUseSet) flushStoppedPrefix(callback *KiroStreamCallback) err
 	return nil
 }
 
-func (p *pendingToolUseSet) recoverCompletePrefix(callback *KiroStreamCallback, cause error) int {
+func (p *pendingToolUseSet) recoverCompletePrefix(callback *KiroStreamCallback, cause error, allowEmpty bool, options eventStreamParseOptions) int {
 	recovered := 0
 	for state := p.first(); state != nil; state = p.first() {
-		if !state.Stopped && !toolUseArgumentsComplete(state) {
+		emptyInput := allowEmpty && state.InputBuffer.Len() == 0 && options.allowsEmptyToolInput(state.Name)
+		if !state.Stopped && !toolUseArgumentsComplete(state) && !emptyInput {
 			break
 		}
 		if err := finishToolUse(state, callback); err != nil {
@@ -1873,7 +1885,11 @@ func (p *pendingToolUseSet) recoverCompletePrefix(callback *KiroStreamCallback, 
 			if cause != nil && cause != io.EOF {
 				reason = cause.Error()
 			}
-			logger.Warnf("[KiroAPI] Recovered complete tool use %q without stop marker (%d argument bytes, %s)", state.Name, state.InputBuffer.Len(), reason)
+			if emptyInput {
+				logger.Warnf("[KiroAPI] Recovered schema-declared zero-argument tool use %q without input or stop marker (%s)", state.Name, reason)
+			} else {
+				logger.Warnf("[KiroAPI] Recovered complete tool use %q without stop marker (%d argument bytes, %s)", state.Name, state.InputBuffer.Len(), reason)
+			}
 		}
 	}
 	return recovered
@@ -1901,6 +1917,26 @@ func toolUseEventSignalsStop(eventType string) bool {
 	return strings.Contains(normalizedType, "toolusestop") ||
 		strings.Contains(normalizedType, "tooluseend") ||
 		strings.Contains(normalizedType, "toolusecomplete")
+}
+
+func unwrapToolUseEventPayload(event map[string]interface{}) (map[string]interface{}, bool) {
+	if event == nil {
+		return event, false
+	}
+	nested, ok := event["toolUseEvent"].(map[string]interface{})
+	if !ok || nested == nil {
+		return event, false
+	}
+	merged := make(map[string]interface{}, len(event)+len(nested)-1)
+	for key, value := range event {
+		if key != "toolUseEvent" {
+			merged[key] = value
+		}
+	}
+	for key, value := range nested {
+		merged[key] = value
+	}
+	return merged, true
 }
 
 func handleToolUseEvent(event map[string]interface{}, pending *pendingToolUseSet, callback *KiroStreamCallback) error {
