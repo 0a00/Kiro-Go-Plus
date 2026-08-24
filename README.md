@@ -207,10 +207,10 @@ The display name is Kiro-Go Plus. The Go module, binary, Compose service, and da
 ## Development Testing
 
 Run `bash scripts/dev-test.sh quick` for deterministic offline checks or
-`bash scripts/dev-test.sh full` before deployment. An opt-in local API runner
-measures TTFT and total latency while checking streaming, thinking, function
-calls, MCP-shaped tools, Responses, cancellation, WebSearch, and bounded
-concurrency. See [Local Development Testing](docs/development-testing.md).
+`bash scripts/dev-test.sh full` before deployment. Opt-in live modes provide a
+three-protocol model matrix, detailed stream timing, tool/MCP roundtrips,
+WebSearch, concurrency staircases, and bounded soak tests. See
+[Local Development Testing](docs/development-testing.md).
 
 ## Per-account IPv6 Egress
 

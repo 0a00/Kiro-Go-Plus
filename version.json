@@ -1,5 +1,5 @@
 {
-  "version": "1.2.47",
-  "changelog": "Preserve original tool-schema safety policies, reject telemetry-masked stream truncation, defer terminal tool recovery, and make cancellation checks wait for semantic output.\n保留原始工具 Schema 安全策略，识别被遥测掩盖的流截断，延后终止工具恢复，并让取消测试等待有效输出。",
+  "version": "1.2.48",
+  "changelog": "Add a comprehensive local development test system with protocol/model matrices, detailed stream timing, tool and MCP roundtrips, WebSearch scenarios, concurrency staircases, bounded soak checks, fault fixtures, fuzzing, benchmarks, and stronger CI gates.\n新增完整本地开发测试体系：协议/模型矩阵、细分流式时序、工具与 MCP 往返、WebSearch 场景、并发阶梯、有限额 soak、故障夹具、fuzz、基准及更严格的 CI 门禁。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }

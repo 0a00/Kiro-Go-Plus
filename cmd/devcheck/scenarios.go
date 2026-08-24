@@ -22,33 +22,92 @@ func (r *runner) runSuite(ctx context.Context) {
 	if r.thinking == "" {
 		r.thinking = strings.TrimSuffix(r.model, "-thinking") + "-thinking"
 	}
+	r.resolveSelectedModels()
 
 	switch r.opts.suite {
 	case "load":
 		r.runUnauthorized(ctx)
 		r.runLoad(ctx)
 		return
-	case "smoke", "full":
+	case "staircase":
+		r.runUnauthorized(ctx)
+		r.runStaircase(ctx)
+		return
+	case "soak":
+		r.runUnauthorized(ctx)
+		r.runSoak(ctx)
+		return
+	case "matrix":
+		r.runUnauthorized(ctx)
+		r.runProtocolMatrix(ctx)
+		return
+	case "smoke":
 		r.runUnauthorized(ctx)
 		r.runClaudeNonStream(ctx)
 		r.runClaudeStream(ctx)
-	}
-	if r.opts.suite != "full" {
 		return
+	case "full":
+		r.runUnauthorized(ctx)
 	}
-	r.runThinkingStream(ctx)
-	r.runSkillContext(ctx)
-	r.runAnthropicFunction(ctx)
-	r.runMCPZeroArgument(ctx)
-	r.runOpenAIFunction(ctx)
-	r.runResponses(ctx)
+	r.runIf("anthropic-non-stream", ctx, r.runClaudeNonStream)
+	r.runIf("anthropic-stream", ctx, r.runClaudeStream)
+	r.runIf("thinking-stream", ctx, r.runThinkingStream)
+	r.runIf("skill-context", ctx, r.runSkillContext)
+	r.runIf("anthropic-tool-roundtrip", ctx, r.runAnthropicFunction)
+	r.runIf("mcp-roundtrip", ctx, r.runMCPZeroArgument)
+	r.runIf("chat-tool-roundtrip", ctx, r.runOpenAIFunction)
+	r.runIf("chat-stream", ctx, r.runOpenAIStream)
+	r.runIf("responses-non-stream", ctx, r.runResponses)
+	r.runIf("responses-stream", ctx, r.runResponsesStream)
+	if len(r.opts.scenarioFilter) > 0 && r.scenarioEnabled("protocol-matrix") {
+		r.runProtocolMatrix(ctx)
+	}
 	if r.opts.webSearch {
-		r.runWebSearch(ctx)
+		r.runIf("websearch-non-stream", ctx, r.runWebSearch)
+		r.runIf("websearch-stream", ctx, r.runWebSearchStream)
+		r.runIf("websearch-multi", ctx, r.runWebSearchMulti)
+		r.runIf("websearch-mixed-tools", ctx, r.runWebSearchMixedTools)
 	} else {
-		r.add(scenarioResult{Name: "native-web-search", Status: statusSkip, Protocol: "anthropic", Detail: "network-dependent; enable with --web-search"})
+		for _, name := range []string{"websearch-non-stream", "websearch-stream", "websearch-multi", "websearch-mixed-tools"} {
+			if r.scenarioEnabled(name) {
+				r.add(scenarioResult{Name: name, Status: statusSkip, Protocol: "anthropic", Detail: "network-dependent; enable with --web-search"})
+			}
+		}
 	}
-	if r.opts.cancellation {
+	if r.opts.cancellation && r.scenarioEnabled("cancellation") {
 		r.runCancellation(ctx)
+	}
+}
+
+func (r *runner) runIf(name string, ctx context.Context, runScenario func(context.Context)) {
+	if r.scenarioEnabled(name) {
+		runScenario(ctx)
+	}
+}
+
+func (r *runner) scenarioEnabled(name string) bool {
+	if len(r.opts.scenarioFilter) == 0 {
+		return true
+	}
+	_, enabled := r.opts.scenarioFilter[name]
+	return enabled
+}
+
+func (r *runner) resolveSelectedModels() {
+	switch {
+	case r.opts.allModels:
+		for _, model := range r.models {
+			if strings.HasPrefix(strings.ToLower(model), "claude-") {
+				r.selected = append(r.selected, model)
+			}
+		}
+	case len(r.opts.models) > 0:
+		r.selected = append(r.selected, r.opts.models...)
+	default:
+		r.selected = append(r.selected, r.model)
+		if r.opts.suite == "matrix" && !strings.EqualFold(r.thinking, r.model) {
+			r.selected = append(r.selected, r.thinking)
+		}
 	}
 }
 
@@ -56,7 +115,7 @@ func (r *runner) runHealth(parent context.Context) {
 	ctx, cancel := r.scenarioContext(parent)
 	defer cancel()
 	response := r.get(ctx, "/health", false)
-	result := scenarioResult{Name: "health", Protocol: "http", HTTPStatus: response.statusCode, TotalMillis: response.total.Milliseconds()}
+	result := responseScenarioResult("health", "http", "", response, false)
 	if !validJSONResponse(response) || !strings.Contains(string(response.body), "\"status\":\"ok\"") {
 		result.Status = statusFail
 		result.Detail = responseErrorDetail(response)
@@ -71,7 +130,7 @@ func (r *runner) runModels(parent context.Context) {
 	ctx, cancel := r.scenarioContext(parent)
 	defer cancel()
 	response := r.get(ctx, "/v1/models", true)
-	result := scenarioResult{Name: "model-discovery", Protocol: "openai", HTTPStatus: response.statusCode, TotalMillis: response.total.Milliseconds()}
+	result := responseScenarioResult("model-discovery", "openai", "", response, false)
 	if !validJSONResponse(response) {
 		result.Status = statusFail
 		result.Detail = responseErrorDetail(response)
@@ -98,7 +157,7 @@ func (r *runner) runUnauthorized(parent context.Context) {
 	defer cancel()
 	payload := claudePayload(r.model, false, "Reply with OK.", 16)
 	response := r.post(ctx, "/v1/messages", payload, false, false)
-	result := scenarioResult{Name: "api-auth-rejection", Protocol: "security", HTTPStatus: response.statusCode, TotalMillis: response.total.Milliseconds()}
+	result := responseScenarioResult("api-auth-rejection", "security", r.model, response, false)
 	if response.err != nil {
 		result.Status = statusFail
 		result.Detail = response.err.Error()
@@ -134,7 +193,7 @@ func (r *runner) runClaudeNonStream(parent context.Context) {
 	ctx, cancel := r.scenarioContext(parent)
 	defer cancel()
 	response := r.post(ctx, "/v1/messages", claudePayload(r.model, false, "Reply with exactly KIRO_DEV_OK.", 64), true, false)
-	result := scenarioResult{Name: "claude-non-stream", Protocol: "anthropic", HTTPStatus: response.statusCode, TotalMillis: response.total.Milliseconds()}
+	result := responseScenarioResult("claude-non-stream", "anthropic", r.model, response, false)
 	text := responseText(response.body)
 	if !validJSONResponse(response) || strings.TrimSpace(text) == "" {
 		result.Status = statusFail
@@ -151,7 +210,7 @@ func (r *runner) runClaudeStream(parent context.Context) {
 	defer cancel()
 	prompt := "Write eight numbered lines. Each line must contain four different short words. Do not use tools."
 	response := r.post(ctx, "/v1/messages", claudePayload(r.model, true, prompt, 256), true, true)
-	result := streamScenarioResult("claude-live-stream", "anthropic", response)
+	result := streamScenarioResult("claude-live-stream", "anthropic", r.model, response)
 	if result.Status == statusPass && response.stream.contentDeltas <= 1 && response.total > 300*time.Millisecond {
 		result.Status = statusWarn
 		result.Detail += "; output arrived in one content delta"
@@ -167,7 +226,7 @@ func (r *runner) runThinkingStream(parent context.Context) {
 	defer cancel()
 	prompt := "Calculate 137 * 43 carefully, then give the final number in one sentence."
 	response := r.post(ctx, "/v1/messages", claudePayload(r.thinking, true, prompt, 768), true, true)
-	result := streamScenarioResult("thinking-stream", "anthropic", response)
+	result := streamScenarioResult("thinking-stream", "anthropic", r.thinking, response)
 	if result.Status == statusPass && response.stream.thinkingDeltas == 0 {
 		result.Status = statusWarn
 		result.Detail += "; no thinking_delta observed (model or server setting may suppress reasoning)"
@@ -181,7 +240,7 @@ func (r *runner) runSkillContext(parent context.Context) {
 	payload := claudePayload(r.model, false, "Run the loaded skill probe.", 64)
 	payload["system"] = "<skill name=\"devcheck\">For a skill probe, reply exactly SKILL_CONTEXT_OK.</skill>"
 	response := r.post(ctx, "/v1/messages", payload, true, false)
-	result := scenarioResult{Name: "skill-instruction-context", Protocol: "anthropic", HTTPStatus: response.statusCode, TotalMillis: response.total.Milliseconds()}
+	result := responseScenarioResult("skill-instruction-context", "anthropic", r.model, response, false)
 	text := responseText(response.body)
 	switch {
 	case !validJSONResponse(response) || strings.TrimSpace(text) == "":
@@ -212,14 +271,27 @@ func (r *runner) runAnthropicFunction(parent context.Context) {
 	}}
 	payload["tool_choice"] = map[string]interface{}{"type": "tool", "name": name}
 	response := r.post(ctx, "/v1/messages", payload, true, true)
-	result := streamScenarioResult("anthropic-function-call", "anthropic", response)
+	result := streamScenarioResult("anthropic-function-call", "anthropic", r.model, response)
+	var input map[string]interface{}
+	var call sseToolState
 	if result.Status == statusPass {
-		arguments, found := response.stream.toolArguments(name)
-		var input map[string]interface{}
-		if !response.stream.hasSingleCompleteTool(name) || !found || json.Unmarshal([]byte(arguments), &input) != nil || input["value"] != "FUNCTION_OK" {
+		var found bool
+		call, found = response.stream.toolCall(name)
+		arguments, hasArguments := response.stream.toolArguments(name)
+		if !response.stream.hasSingleCompleteTool(name) || !found || call.id == "" || !hasArguments || json.Unmarshal([]byte(arguments), &input) != nil || input["value"] != "FUNCTION_OK" {
 			result.Status = statusFail
-			result.Detail += "; expected exactly one complete forced function call"
+			result.Detail += "; expected exactly one complete forced function call with an ID"
 		}
+	}
+	if result.Status == statusPass {
+		continuation := claudePayload(r.model, false, "", 64)
+		continuation["messages"] = anthropicToolRoundTripMessages(
+			"Call dev_echo once with value FUNCTION_OK. Do not answer in text.", call.id, name, input, "FUNCTION_RESULT_OK",
+		)
+		followCtx, followCancel := r.scenarioContext(parent)
+		follow := r.post(followCtx, "/v1/messages", continuation, true, false)
+		followCancel()
+		applyRoundTripResult(&result, follow, "FUNCTION_RESULT_OK")
 	}
 	r.add(result)
 }
@@ -237,16 +309,28 @@ func (r *runner) runMCPZeroArgument(parent context.Context) {
 	}}
 	payload["tool_choice"] = map[string]interface{}{"type": "tool", "name": name}
 	response := r.post(ctx, "/v1/messages", payload, true, true)
-	result := streamScenarioResult("mcp-zero-argument-tool", "anthropic", response)
+	result := streamScenarioResult("mcp-zero-argument-tool", "anthropic", r.model, response)
+	var call sseToolState
 	if result.Status == statusPass {
 		arguments, found := response.stream.toolArguments(name)
 		var input map[string]interface{}
-		if !response.stream.hasSingleCompleteTool(name) || !found || json.Unmarshal([]byte(arguments), &input) != nil || len(input) != 0 {
+		call, _ = response.stream.toolCall(name)
+		if !response.stream.hasSingleCompleteTool(name) || !found || call.id == "" || json.Unmarshal([]byte(arguments), &input) != nil || len(input) != 0 {
 			result.Status = statusFail
-			result.Detail += "; expected one complete tool call with {} input"
+			result.Detail += "; expected one complete tool call with an ID and {} input"
 		} else {
 			result.Detail += "; empty input recovered safely"
 		}
+	}
+	if result.Status == statusPass {
+		continuation := claudePayload(r.model, false, "", 64)
+		continuation["messages"] = anthropicToolRoundTripMessages(
+			"Call the memory graph tool once. Do not answer in text.", call.id, name, map[string]interface{}{}, "MCP_RESULT_OK",
+		)
+		followCtx, followCancel := r.scenarioContext(parent)
+		follow := r.post(followCtx, "/v1/messages", continuation, true, false)
+		followCancel()
+		applyRoundTripResult(&result, follow, "MCP_RESULT_OK")
 	}
 	r.add(result)
 }
@@ -272,10 +356,10 @@ func (r *runner) runOpenAIFunction(parent context.Context) {
 		"tool_choice": map[string]interface{}{"type": "function", "function": map[string]interface{}{"name": name}},
 	}
 	response := r.post(ctx, "/v1/chat/completions", payload, true, false)
-	result := scenarioResult{Name: "openai-function-call", Protocol: "openai", HTTPStatus: response.statusCode, TotalMillis: response.total.Milliseconds()}
-	arguments, found := openAIToolArguments(response.body, name)
+	result := responseScenarioResult("openai-function-call", "openai", r.model, response, false)
+	callID, arguments, found := openAIToolCall(response.body, name)
 	var input map[string]interface{}
-	if !validJSONResponse(response) || !found || json.Unmarshal([]byte(arguments), &input) != nil {
+	if !validJSONResponse(response) || !found || callID == "" || json.Unmarshal([]byte(arguments), &input) != nil {
 		result.Status = statusFail
 		result.Detail = responseErrorDetail(response)
 	} else if number(input["a"]) != 7 || number(input["b"]) != 9 {
@@ -285,6 +369,37 @@ func (r *runner) runOpenAIFunction(parent context.Context) {
 		result.Status = statusPass
 		result.ToolCalls = 1
 		result.Detail = "forced OpenAI function arguments are valid"
+	}
+	if result.Status == statusPass {
+		followPayload := openAIChatPayload(r.model, false, "", 64)
+		followPayload["messages"] = []interface{}{
+			map[string]interface{}{"role": "user", "content": "Call dev_sum with a=7 and b=9. Do not answer in text."},
+			map[string]interface{}{
+				"role": "assistant", "content": nil,
+				"tool_calls": []interface{}{map[string]interface{}{
+					"id": callID, "type": "function", "function": map[string]interface{}{"name": name, "arguments": arguments},
+				}},
+			},
+			map[string]interface{}{"role": "tool", "tool_call_id": callID, "content": "OPENAI_RESULT_OK"},
+			map[string]interface{}{"role": "user", "content": "Reply with exactly OPENAI_RESULT_OK."},
+		}
+		followCtx, followCancel := r.scenarioContext(parent)
+		follow := r.post(followCtx, "/v1/chat/completions", followPayload, true, false)
+		followCancel()
+		applyRoundTripResult(&result, follow, "OPENAI_RESULT_OK")
+	}
+	r.add(result)
+}
+
+func (r *runner) runOpenAIStream(parent context.Context) {
+	ctx, cancel := r.scenarioContext(parent)
+	defer cancel()
+	payload := openAIChatPayload(r.model, true, "Write six short numbered lines without using tools.", 192)
+	response := r.post(ctx, "/v1/chat/completions", payload, true, true)
+	result := streamScenarioResult("openai-chat-stream", "openai", r.model, response)
+	if result.Status == statusPass && response.stream.contentDeltas <= 1 && response.total > 300*time.Millisecond {
+		result.Status = statusWarn
+		result.Detail += "; output arrived in one content delta"
 	}
 	r.add(result)
 }
@@ -296,7 +411,7 @@ func (r *runner) runResponses(parent context.Context) {
 		"model": r.model, "input": "Reply with exactly RESPONSES_OK.", "max_output_tokens": 64, "store": false,
 	}
 	response := r.post(ctx, "/v1/responses", payload, true, false)
-	result := scenarioResult{Name: "openai-responses", Protocol: "responses", HTTPStatus: response.statusCode, TotalMillis: response.total.Milliseconds()}
+	result := responseScenarioResult("openai-responses", "responses", r.model, response, false)
 	if !validJSONResponse(response) || !strings.Contains(string(response.body), "RESPONSES_OK") {
 		result.Status = statusFail
 		result.Detail = responseErrorDetail(response)
@@ -307,6 +422,69 @@ func (r *runner) runResponses(parent context.Context) {
 	r.add(result)
 }
 
+func (r *runner) runResponsesStream(parent context.Context) {
+	ctx, cancel := r.scenarioContext(parent)
+	defer cancel()
+	payload := responsesPayload(r.model, true, "Write six short numbered lines without using tools.", 192)
+	response := r.post(ctx, "/v1/responses", payload, true, true)
+	result := streamScenarioResult("openai-responses-stream", "responses", r.model, response)
+	if result.Status == statusPass && response.stream.contentDeltas <= 1 && response.total > 300*time.Millisecond {
+		result.Status = statusWarn
+		result.Detail += "; output arrived in one content delta"
+	}
+	r.add(result)
+}
+
+func (r *runner) runProtocolMatrix(parent context.Context) {
+	if len(r.selected) == 0 {
+		r.add(scenarioResult{Name: "protocol-matrix", Status: statusFail, Protocol: "matrix", Detail: "no Claude models selected"})
+		return
+	}
+	type matrixCase struct {
+		name     string
+		protocol string
+		path     string
+		stream   bool
+		payload  func(string, bool, string, int) map[string]interface{}
+	}
+	cases := []matrixCase{
+		{name: "matrix-anthropic-non-stream", protocol: "anthropic", path: "/v1/messages", payload: claudePayload},
+		{name: "matrix-anthropic-stream", protocol: "anthropic", path: "/v1/messages", stream: true, payload: claudePayload},
+		{name: "matrix-chat-non-stream", protocol: "openai", path: "/v1/chat/completions", payload: openAIChatPayload},
+		{name: "matrix-chat-stream", protocol: "openai", path: "/v1/chat/completions", stream: true, payload: openAIChatPayload},
+		{name: "matrix-responses-non-stream", protocol: "responses", path: "/v1/responses", payload: responsesPayload},
+		{name: "matrix-responses-stream", protocol: "responses", path: "/v1/responses", stream: true, payload: responsesPayload},
+	}
+	for _, model := range r.selected {
+		for _, matrix := range cases {
+			if err := parent.Err(); err != nil {
+				r.add(scenarioResult{Name: matrix.name, Model: model, Protocol: matrix.protocol, Stream: matrix.stream, Status: statusSkip, Detail: err.Error()})
+				continue
+			}
+			ctx, cancel := r.scenarioContext(parent)
+			maxTokens := 64
+			if strings.HasSuffix(strings.ToLower(model), "-thinking") {
+				maxTokens = 1024
+			}
+			response := r.post(ctx, matrix.path, matrix.payload(model, matrix.stream, "Reply with exactly MATRIX_OK.", maxTokens), true, matrix.stream)
+			cancel()
+			if matrix.stream {
+				r.add(streamScenarioResult(matrix.name, matrix.protocol, model, response))
+				continue
+			}
+			result := responseScenarioResult(matrix.name, matrix.protocol, model, response, false)
+			if !validJSONResponse(response) || strings.TrimSpace(responseText(response.body)) == "" {
+				result.Status = statusFail
+				result.Detail = responseErrorDetail(response)
+			} else {
+				result.Status = statusPass
+				result.Detail = fmt.Sprintf("text_chars=%d", len([]rune(responseText(response.body))))
+			}
+			r.add(result)
+		}
+	}
+}
+
 func (r *runner) runWebSearch(parent context.Context) {
 	ctx, cancel := r.scenarioContext(parent)
 	defer cancel()
@@ -315,7 +493,7 @@ func (r *runner) runWebSearch(parent context.Context) {
 		"type": "web_search_20250305", "name": "web_search", "max_uses": 1,
 	}}
 	response := r.post(ctx, "/v1/messages", payload, true, false)
-	result := scenarioResult{Name: "native-web-search", Protocol: "anthropic", HTTPStatus: response.statusCode, TotalMillis: response.total.Milliseconds()}
+	result := responseScenarioResult("native-web-search", "anthropic", r.model, response, false)
 	body := string(response.body)
 	if !validJSONResponse(response) || !strings.Contains(body, "\"server_tool_use\"") || !strings.Contains(body, "\"web_search_tool_result\"") {
 		result.Status = statusFail
@@ -325,6 +503,76 @@ func (r *runner) runWebSearch(parent context.Context) {
 		result.Detail = "server tool use and linked search result observed"
 	}
 	r.add(result)
+}
+
+func (r *runner) runWebSearchStream(parent context.Context) {
+	ctx, cancel := r.scenarioContext(parent)
+	defer cancel()
+	payload := claudePayload(r.model, true, "Search the web for the official Kiro IDE homepage and summarize it in one sentence.", 512)
+	payload["tools"] = []interface{}{webSearchTool(1)}
+	response := r.post(ctx, "/v1/messages", payload, true, true)
+	result := streamScenarioResult("native-web-search-stream", "anthropic", r.model, response)
+	if result.Status == statusPass && (response.stream.serverToolCalls == 0 || response.stream.webSearchResults == 0) {
+		result.Status = statusFail
+		result.Detail += "; linked server_tool_use and web_search_tool_result were not both observed"
+	} else if result.Status == statusPass {
+		result.Detail += fmt.Sprintf("; server_tools=%d search_results=%d", response.stream.serverToolCalls, response.stream.webSearchResults)
+	}
+	r.add(result)
+}
+
+func (r *runner) runWebSearchMulti(parent context.Context) {
+	ctx, cancel := r.scenarioContext(parent)
+	defer cancel()
+	prompt := "Search separately for the official Kiro IDE homepage and the official AWS Kiro documentation. Compare the two sources briefly."
+	payload := claudePayload(r.model, false, prompt, 768)
+	payload["tools"] = []interface{}{webSearchTool(2)}
+	response := r.post(ctx, "/v1/messages", payload, true, false)
+	result := responseScenarioResult("native-web-search-multi", "anthropic", r.model, response, false)
+	uses := strings.Count(string(response.body), `"type":"server_tool_use"`)
+	results := strings.Count(string(response.body), `"type":"web_search_tool_result"`)
+	switch {
+	case !validJSONResponse(response) || uses == 0 || results == 0:
+		result.Status = statusFail
+		result.Detail = responseErrorDetail(response)
+	case uses < 2 || results < 2:
+		result.Status = statusWarn
+		result.Detail = fmt.Sprintf("request succeeded but model used only %d search round(s)", min(uses, results))
+	default:
+		result.Status = statusPass
+		result.Detail = fmt.Sprintf("search_uses=%d search_results=%d", uses, results)
+	}
+	r.add(result)
+}
+
+func (r *runner) runWebSearchMixedTools(parent context.Context) {
+	ctx, cancel := r.scenarioContext(parent)
+	defer cancel()
+	payload := claudePayload(r.model, false, "Use web search to find the official Kiro IDE homepage, then summarize it. Do not call dev_note.", 512)
+	payload["tools"] = []interface{}{
+		webSearchTool(1),
+		map[string]interface{}{
+			"name": "dev_note", "description": "Store a development note only when explicitly requested.",
+			"input_schema": map[string]interface{}{
+				"type": "object", "properties": map[string]interface{}{"text": map[string]interface{}{"type": "string"}}, "required": []string{"text"},
+			},
+		},
+	}
+	response := r.post(ctx, "/v1/messages", payload, true, false)
+	result := responseScenarioResult("native-web-search-mixed-tools", "anthropic", r.model, response, false)
+	body := string(response.body)
+	if !validJSONResponse(response) || !strings.Contains(body, `"type":"server_tool_use"`) || !strings.Contains(body, `"type":"web_search_tool_result"`) {
+		result.Status = statusFail
+		result.Detail = responseErrorDetail(response)
+	} else {
+		result.Status = statusPass
+		result.Detail = "native search remained functional beside a client tool schema"
+	}
+	r.add(result)
+}
+
+func webSearchTool(maxUses int) map[string]interface{} {
+	return map[string]interface{}{"type": "web_search_20250305", "name": "web_search", "max_uses": maxUses}
 }
 
 func (r *runner) runCancellation(parent context.Context) {
@@ -341,7 +589,7 @@ func (r *runner) runCancellation(parent context.Context) {
 			cancelRequest()
 		})
 	})
-	result := scenarioResult{Name: "stream-cancellation-recovery", Protocol: "timeout", HTTPStatus: response.statusCode, TotalMillis: response.total.Milliseconds(), Events: response.stream.events}
+	result := streamScenarioResult("stream-cancellation-recovery", "timeout", r.model, response)
 	if !observedEvent {
 		result.Status = statusFail
 		result.Detail = "request ended before any valid SSE event was observed"
@@ -369,40 +617,77 @@ func (r *runner) runCancellation(parent context.Context) {
 }
 
 func (r *runner) runLoad(parent context.Context) {
-	waves := (r.opts.requests + r.opts.concurrency - 1) / r.opts.concurrency
-	ctx, cancel := context.WithTimeout(parent, time.Duration(waves)*r.opts.timeout)
-	defer cancel()
-	type sample struct {
-		duration int64
-		success  bool
-		stream   bool
+	samples := r.executeLoad(parent, r.opts.concurrency, r.opts.requests, 32)
+	r.add(buildLoadResult("concurrent-load", r.model, r.opts.concurrency, r.opts.requests, samples))
+}
+
+func (r *runner) runStaircase(parent context.Context) {
+	for _, concurrency := range r.opts.concurrencySteps {
+		requests := max(r.opts.requests, concurrency)
+		samples := r.executeLoad(parent, concurrency, requests, 32)
+		result := buildLoadResult(fmt.Sprintf("concurrency-staircase-%d", concurrency), r.model, concurrency, requests, samples)
+		result.Detail += "; level requests are max(--requests, concurrency)"
+		r.add(result)
+		if parent.Err() != nil {
+			return
+		}
 	}
+}
+
+func (r *runner) runSoak(parent context.Context) {
+	const maxTokensPerRequest = 32
+	target := min(r.opts.soakMaxRequests, r.opts.soakTokenBudget/maxTokensPerRequest)
+	samples, scheduled, durationReached := r.executeSoak(parent, r.opts.concurrency, target, maxTokensPerRequest, r.opts.soakDuration)
+	result := buildLoadResult("bounded-soak", r.model, r.opts.concurrency, scheduled, samples)
+	stopReason := "request/token cap"
+	if durationReached {
+		stopReason = "duration cap"
+	}
+	if parent.Err() != nil {
+		stopReason = "parent cancellation"
+	}
+	if scheduled == 0 {
+		result.Status = statusFail
+		result.Detail = "no soak requests were scheduled"
+	}
+	result.Detail += fmt.Sprintf("; stop=%s duration_cap=%s request_cap=%d token_budget=%d reserved_tokens=%d",
+		stopReason, r.opts.soakDuration, r.opts.soakMaxRequests, r.opts.soakTokenBudget, scheduled*maxTokensPerRequest)
+	r.add(result)
+}
+
+type loadSample struct {
+	duration int64
+	ttft     int64
+	stream   bool
+	success  bool
+	category string
+}
+
+func (r *runner) executeLoad(parent context.Context, concurrency, requests, maxTokens int) []loadSample {
+	waves := (requests + concurrency - 1) / concurrency
+	suiteTimeout := time.Duration(waves) * r.opts.timeout
+	ctx, cancel := context.WithTimeout(parent, suiteTimeout)
+	defer cancel()
 	jobs := make(chan int)
-	results := make(chan sample, r.opts.requests)
+	results := make(chan loadSample, requests)
 	var workers sync.WaitGroup
-	for worker := 0; worker < r.opts.concurrency; worker++ {
+	for worker := 0; worker < concurrency; worker++ {
 		workers.Add(1)
 		go func() {
 			defer workers.Done()
 			for index := range jobs {
 				stream := index%2 == 1
 				requestCtx, requestCancel := r.scenarioContext(ctx)
-				payload := claudePayload(r.model, stream, fmt.Sprintf("Reply with OK %d.", index), 32)
+				payload := claudePayload(r.model, stream, fmt.Sprintf("Reply with OK %d.", index), maxTokens)
 				response := r.post(requestCtx, "/v1/messages", payload, true, stream)
 				requestCancel()
-				success := response.err == nil && response.statusCode >= 200 && response.statusCode < 300
-				if stream {
-					success = success && response.stream.terminal && response.stream.errorEvent == "" && response.stream.semanticOutput
-				} else {
-					success = success && responseText(response.body) != ""
-				}
-				results <- sample{duration: response.total.Milliseconds(), success: success, stream: stream}
+				results <- classifyLoadSample(response, stream)
 			}
 		}()
 	}
 	go func() {
 		defer close(jobs)
-		for index := 0; index < r.opts.requests; index++ {
+		for index := 0; index < requests; index++ {
 			select {
 			case jobs <- index:
 			case <-ctx.Done():
@@ -412,14 +697,104 @@ func (r *runner) runLoad(parent context.Context) {
 	}()
 	workers.Wait()
 	close(results)
+	samples := make([]loadSample, 0, requests)
+	for sample := range results {
+		samples = append(samples, sample)
+	}
+	return samples
+}
 
-	durations := make([]int64, 0, r.opts.requests)
+func (r *runner) executeSoak(parent context.Context, concurrency, target, maxTokens int, duration time.Duration) ([]loadSample, int, bool) {
+	scheduleCtx, stopScheduling := context.WithTimeout(parent, duration)
+	defer stopScheduling()
+	jobs := make(chan int)
+	results := make(chan loadSample, target)
+	var workers sync.WaitGroup
+	for worker := 0; worker < concurrency; worker++ {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for index := range jobs {
+				stream := index%2 == 1
+				requestCtx, requestCancel := r.scenarioContext(parent)
+				response := r.post(requestCtx, "/v1/messages", claudePayload(r.model, stream, fmt.Sprintf("Reply with OK %d.", index), maxTokens), true, stream)
+				requestCancel()
+				results <- classifyLoadSample(response, stream)
+			}
+		}()
+	}
+	type scheduleResult struct {
+		count           int
+		durationReached bool
+	}
+	scheduledResult := make(chan scheduleResult, 1)
+	go func() {
+		defer close(jobs)
+		scheduled := 0
+		for index := 0; index < target; index++ {
+			select {
+			case jobs <- index:
+				scheduled++
+			case <-scheduleCtx.Done():
+				scheduledResult <- scheduleResult{count: scheduled, durationReached: errors.Is(scheduleCtx.Err(), context.DeadlineExceeded)}
+				return
+			}
+		}
+		scheduledResult <- scheduleResult{count: scheduled}
+	}()
+	workers.Wait()
+	close(results)
+	schedule := <-scheduledResult
+	samples := make([]loadSample, 0, schedule.count)
+	for sample := range results {
+		samples = append(samples, sample)
+	}
+	return samples, schedule.count, schedule.durationReached
+}
+
+func classifyLoadSample(response apiResponse, stream bool) loadSample {
+	sample := loadSample{duration: response.total.Milliseconds(), stream: stream}
+	if stream {
+		sample.ttft = response.stream.firstSemantic.Milliseconds()
+	}
+	switch {
+	case errors.Is(response.err, context.DeadlineExceeded):
+		sample.category = "timeout"
+	case errors.Is(response.err, context.Canceled):
+		sample.category = "canceled"
+	case response.err != nil:
+		sample.category = "transport"
+	case response.statusCode == http.StatusTooManyRequests:
+		sample.category = "http_429"
+	case response.statusCode >= 500:
+		sample.category = "http_5xx"
+	case response.statusCode < 200 || response.statusCode >= 300:
+		sample.category = "http_other"
+	case stream && response.stream.errorEvent != "":
+		sample.category = "sse_error"
+	case stream && (!response.stream.terminal || !response.stream.semanticOutput):
+		sample.category = "stream_protocol"
+	case !stream && responseText(response.body) == "":
+		sample.category = "empty_response"
+	default:
+		sample.success = true
+	}
+	return sample
+}
+
+func buildLoadResult(name, model string, concurrency, expected int, samples []loadSample) scenarioResult {
+	durations := make([]int64, 0, len(samples))
+	ttfts := make([]int64, 0, len(samples))
 	successes := 0
 	streamRequests := 0
 	streamSuccesses := 0
 	nonStreamSuccesses := 0
-	for sample := range results {
+	failures := make(map[string]int)
+	for _, sample := range samples {
 		durations = append(durations, sample.duration)
+		if sample.ttft > 0 {
+			ttfts = append(ttfts, sample.ttft)
+		}
 		if sample.stream {
 			streamRequests++
 		}
@@ -430,37 +805,64 @@ func (r *runner) runLoad(parent context.Context) {
 			} else {
 				nonStreamSuccesses++
 			}
+		} else {
+			failures[sample.category]++
 		}
 	}
-	result := scenarioResult{Name: "concurrent-load", Protocol: "load"}
-	if len(durations) > 0 {
-		result.TotalMillis = percentile(durations, 0.95)
+	if missing := expected - len(samples); missing > 0 {
+		failures["not_started_or_canceled"] += missing
 	}
+	result := scenarioResult{
+		Name: name, Protocol: "load", Model: model, Requests: expected, Successes: successes,
+		FailureCategories: failures, P50Millis: percentile(durations, 0.50), P95Millis: percentile(durations, 0.95), P99Millis: percentile(durations, 0.99),
+	}
+	result.TotalMillis = result.P95Millis
 	result.Detail = fmt.Sprintf(
-		"success=%d/%d stream=%d/%d nonstream=%d/%d concurrency=%d p50=%dms p95=%dms",
-		successes, r.opts.requests,
+		"success=%d/%d completed=%d stream=%d/%d nonstream=%d/%d concurrency=%d p50=%dms p95=%dms p99=%dms ttft_p95=%dms failures=%s",
+		successes, expected, len(samples),
 		streamSuccesses, streamRequests,
-		nonStreamSuccesses, r.opts.requests-streamRequests,
-		r.opts.concurrency, percentile(durations, 0.50), percentile(durations, 0.95),
+		nonStreamSuccesses, len(samples)-streamRequests,
+		concurrency, result.P50Millis, result.P95Millis, result.P99Millis, percentile(ttfts, 0.95), formatFailureCategories(failures),
 	)
-	if successes == r.opts.requests {
+	if successes == expected {
 		result.Status = statusPass
 	} else {
 		result.Status = statusFail
 	}
-	r.add(result)
+	if len(failures) == 0 {
+		result.FailureCategories = nil
+	}
+	return result
 }
 
-func streamScenarioResult(name, protocol string, response apiResponse) scenarioResult {
-	result := scenarioResult{
-		Name: name, Protocol: protocol, HTTPStatus: response.statusCode,
-		TotalMillis: response.total.Milliseconds(), Events: response.stream.events,
-		ContentDeltas: response.stream.contentDeltas, ThinkingDeltas: response.stream.thinkingDeltas,
-		ToolCalls: response.stream.toolCalls,
+func formatFailureCategories(categories map[string]int) string {
+	if len(categories) == 0 {
+		return "none"
 	}
-	if response.stream.firstSemantic > 0 {
-		result.TTFTMillis = response.stream.firstSemantic.Milliseconds()
+	names := make([]string, 0, len(categories))
+	for name := range categories {
+		names = append(names, name)
 	}
+	sort.Strings(names)
+	parts := make([]string, 0, len(names))
+	for _, name := range names {
+		parts = append(parts, fmt.Sprintf("%s:%d", name, categories[name]))
+	}
+	return strings.Join(parts, ",")
+}
+
+func streamScenarioResult(name, protocol, model string, response apiResponse) scenarioResult {
+	result := responseScenarioResult(name, protocol, model, response, true)
+	result.Events = response.stream.events
+	result.ContentDeltas = response.stream.contentDeltas
+	result.ThinkingDeltas = response.stream.thinkingDeltas
+	result.ToolCalls = response.stream.toolCalls
+	result.FirstEventMillis = response.stream.firstEvent.Milliseconds()
+	result.TTFTMillis = response.stream.firstSemantic.Milliseconds()
+	result.FirstTextMillis = response.stream.firstText.Milliseconds()
+	result.FirstThinkMillis = response.stream.firstThinking.Milliseconds()
+	result.FirstToolMillis = response.stream.firstTool.Milliseconds()
+	result.MaxStreamGapMS = response.stream.maxEventGap.Milliseconds()
 	switch {
 	case response.err != nil:
 		result.Status = statusFail
@@ -481,13 +883,37 @@ func streamScenarioResult(name, protocol string, response apiResponse) scenarioR
 		result.Status = statusPass
 		result.Detail = fmt.Sprintf("content=%d thinking=%d tools=%d", response.stream.contentChars, response.stream.thinkingChars, response.stream.toolCalls)
 	}
+	if result.Status == statusPass && response.stream.incomplete {
+		result.Status = statusWarn
+		result.Detail += "; output limit reached before a complete response"
+	}
 	return result
+}
+
+func responseScenarioResult(name, protocol, model string, response apiResponse, stream bool) scenarioResult {
+	return scenarioResult{
+		Name: name, Protocol: protocol, Model: model, Stream: stream,
+		HTTPStatus: response.statusCode, ResponseHeaderMS: response.headers.Milliseconds(), TotalMillis: response.total.Milliseconds(),
+	}
 }
 
 func claudePayload(model string, stream bool, prompt string, maxTokens int) map[string]interface{} {
 	return map[string]interface{}{
 		"model": model, "stream": stream, "max_tokens": maxTokens,
 		"messages": []interface{}{map[string]interface{}{"role": "user", "content": prompt}},
+	}
+}
+
+func openAIChatPayload(model string, stream bool, prompt string, maxTokens int) map[string]interface{} {
+	return map[string]interface{}{
+		"model": model, "stream": stream, "max_tokens": maxTokens,
+		"messages": []interface{}{map[string]interface{}{"role": "user", "content": prompt}},
+	}
+}
+
+func responsesPayload(model string, stream bool, prompt string, maxTokens int) map[string]interface{} {
+	return map[string]interface{}{
+		"model": model, "stream": stream, "input": prompt, "max_output_tokens": maxTokens, "store": false,
 	}
 }
 
@@ -570,11 +996,50 @@ func collectResponseText(value interface{}, texts *[]string) {
 	}
 }
 
-func openAIToolArguments(data []byte, name string) (string, bool) {
+func anthropicToolRoundTripMessages(prompt, callID, name string, input map[string]interface{}, result string) []interface{} {
+	return []interface{}{
+		map[string]interface{}{"role": "user", "content": prompt},
+		map[string]interface{}{
+			"role": "assistant",
+			"content": []interface{}{map[string]interface{}{
+				"type": "tool_use", "id": callID, "name": name, "input": input,
+			}},
+		},
+		map[string]interface{}{
+			"role": "user",
+			"content": []interface{}{
+				map[string]interface{}{"type": "tool_result", "tool_use_id": callID, "content": result},
+				map[string]interface{}{"type": "text", "text": "Reply with exactly " + result + "."},
+			},
+		},
+	}
+}
+
+func applyRoundTripResult(result *scenarioResult, response apiResponse, marker string) {
+	if result == nil {
+		return
+	}
+	result.TotalMillis += response.total.Milliseconds()
+	text := responseText(response.body)
+	switch {
+	case !validJSONResponse(response) || strings.TrimSpace(text) == "":
+		result.Status = statusFail
+		result.HTTPStatus = response.statusCode
+		result.Detail += "; tool_result continuation failed: " + responseErrorDetail(response)
+	case !strings.Contains(text, marker):
+		result.Status = statusWarn
+		result.Detail += "; continuation succeeded but did not repeat the deterministic marker"
+	default:
+		result.Detail += "; tool_result continuation succeeded"
+	}
+}
+
+func openAIToolCall(data []byte, name string) (string, string, bool) {
 	var response struct {
 		Choices []struct {
 			Message struct {
 				ToolCalls []struct {
+					ID       string `json:"id"`
 					Function struct {
 						Name      string `json:"name"`
 						Arguments string `json:"arguments"`
@@ -584,16 +1049,21 @@ func openAIToolArguments(data []byte, name string) (string, bool) {
 		} `json:"choices"`
 	}
 	if json.Unmarshal(data, &response) != nil {
-		return "", false
+		return "", "", false
 	}
 	for _, choice := range response.Choices {
 		for _, tool := range choice.Message.ToolCalls {
 			if tool.Function.Name == name {
-				return tool.Function.Arguments, true
+				return tool.ID, tool.Function.Arguments, true
 			}
 		}
 	}
-	return "", false
+	return "", "", false
+}
+
+func openAIToolArguments(data []byte, name string) (string, bool) {
+	_, arguments, found := openAIToolCall(data, name)
+	return arguments, found
 }
 
 func number(value interface{}) int {

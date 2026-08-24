@@ -207,9 +207,8 @@ go build -o kiro-go .
 ## 开发测试
 
 日常开发执行 `bash scripts/dev-test.sh quick`，部署前执行
-`bash scripts/dev-test.sh full`。另有显式启用的本地 API 场景测试，可记录首字和
-总耗时，并检查流式、思考、函数调用、MCP 形态工具、Responses、取消恢复、
-WebSearch 和受控并发。完整用法与测试边界见
+`bash scripts/dev-test.sh full`。显式启用的在线模式提供三协议模型矩阵、细分流式
+时序、工具/MCP 往返、WebSearch、并发阶梯和有限额的 soak 测试。完整用法与测试边界见
 [本地开发测试说明](docs/development-testing.md)。
 
 ## 每账号 IPv6 出口

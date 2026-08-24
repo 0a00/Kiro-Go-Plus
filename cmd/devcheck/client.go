@@ -24,11 +24,13 @@ type apiResponse struct {
 	statusCode int
 	body       []byte
 	stream     sseStats
+	headers    time.Duration
 	total      time.Duration
 	err        error
 }
 
 type sseToolState struct {
+	id           string
 	name         string
 	initialInput string
 	deltas       strings.Builder
@@ -36,17 +38,30 @@ type sseToolState struct {
 }
 
 type sseStats struct {
-	events         int
-	contentDeltas  int
-	thinkingDeltas int
-	toolCalls      int
-	contentChars   int
-	thinkingChars  int
-	firstSemantic  time.Duration
-	semanticOutput bool
-	terminal       bool
-	errorEvent     string
-	tools          map[int]*sseToolState
+	events           int
+	contentDeltas    int
+	thinkingDeltas   int
+	toolCalls        int
+	serverToolCalls  int
+	webSearchResults int
+	contentChars     int
+	thinkingChars    int
+	firstEvent       time.Duration
+	firstSemantic    time.Duration
+	firstText        time.Duration
+	firstThinking    time.Duration
+	firstTool        time.Duration
+	lastEvent        time.Duration
+	maxEventGap      time.Duration
+	semanticOutput   bool
+	textOutput       bool
+	thinkingOutput   bool
+	toolOutput       bool
+	terminal         bool
+	terminalType     string
+	incomplete       bool
+	errorEvent       string
+	tools            map[int]*sseToolState
 }
 
 func (r *runner) get(ctx context.Context, path string, authenticated bool) apiResponse {
@@ -96,7 +111,7 @@ func (r *runner) doWithSSEObserver(ctx context.Context, method, path string, bod
 		return apiResponse{total: time.Since(startedAt), err: err}
 	}
 	defer resp.Body.Close()
-	result := apiResponse{statusCode: resp.StatusCode}
+	result := apiResponse{statusCode: resp.StatusCode, headers: time.Since(startedAt)}
 	if stream && resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		result.stream, result.err = consumeSSEWithObserver(resp.Body, startedAt, onEvent)
 		result.total = time.Since(startedAt)
@@ -179,7 +194,7 @@ func consumeSSEWithObserver(reader io.Reader, startedAt time.Time, onEvent func(
 
 func (s *sseStats) record(eventName, data string, elapsed time.Duration) error {
 	if strings.TrimSpace(data) == "[DONE]" {
-		s.events++
+		s.noteEvent(elapsed)
 		s.terminal = true
 		return nil
 	}
@@ -190,7 +205,7 @@ func (s *sseStats) record(eventName, data string, elapsed time.Duration) error {
 	if event == nil {
 		return fmt.Errorf("SSE event %q was not a JSON object", eventName)
 	}
-	s.events++
+	s.noteEvent(elapsed)
 	eventType := stringField(event, "type")
 	if eventType == "" {
 		eventType = eventName
@@ -199,7 +214,8 @@ func (s *sseStats) record(eventName, data string, elapsed time.Duration) error {
 	case "content_block_start":
 		index := intField(event, "index")
 		block := mapField(event, "content_block")
-		if stringField(block, "type") == "tool_use" {
+		switch stringField(block, "type") {
+		case "tool_use":
 			if _, exists := s.tools[index]; exists {
 				return fmt.Errorf("tool content block %d started more than once", index)
 			}
@@ -207,7 +223,7 @@ func (s *sseStats) record(eventName, data string, elapsed time.Duration) error {
 			if name == "" {
 				return fmt.Errorf("tool content block %d is missing a name", index)
 			}
-			tool := &sseToolState{name: name}
+			tool := &sseToolState{id: stringField(block, "id"), name: name}
 			if input, ok := block["input"]; ok {
 				if encoded, err := json.Marshal(input); err == nil {
 					tool.initialInput = string(encoded)
@@ -215,6 +231,12 @@ func (s *sseStats) record(eventName, data string, elapsed time.Duration) error {
 			}
 			s.tools[index] = tool
 			s.toolCalls++
+			s.markTool(elapsed)
+		case "server_tool_use":
+			s.serverToolCalls++
+			s.markTool(elapsed)
+		case "web_search_tool_result":
+			s.webSearchResults++
 			s.markSemantic(elapsed)
 		}
 	case "content_block_delta":
@@ -226,14 +248,14 @@ func (s *sseStats) record(eventName, data string, elapsed time.Duration) error {
 			s.contentDeltas++
 			s.contentChars += len([]rune(text))
 			if text != "" {
-				s.markSemantic(elapsed)
+				s.markText(elapsed)
 			}
 		case "thinking_delta":
 			text := stringField(delta, "thinking")
 			s.thinkingDeltas++
 			s.thinkingChars += len([]rune(text))
 			if text != "" {
-				s.markSemantic(elapsed)
+				s.markThinking(elapsed)
 			}
 		case "input_json_delta":
 			partial := stringField(delta, "partial_json")
@@ -246,7 +268,7 @@ func (s *sseStats) record(eventName, data string, elapsed time.Duration) error {
 			}
 			tool.deltas.WriteString(partial)
 			if partial != "" {
-				s.markSemantic(elapsed)
+				s.markTool(elapsed)
 			}
 		}
 	case "content_block_stop":
@@ -257,10 +279,76 @@ func (s *sseStats) record(eventName, data string, elapsed time.Duration) error {
 			}
 			tool.stopped = true
 		}
-	case "message_stop", "response.completed", "response.done":
-		s.terminal = true
+	case "message_stop", "response.completed", "response.done", "response.incomplete":
+		if eventType == "response.incomplete" {
+			s.incomplete = true
+		}
+		if err := s.markTerminal(eventType); err != nil {
+			return err
+		}
+	case "message_delta":
+		delta := mapField(event, "delta")
+		if reason := strings.ToLower(stringField(delta, "stop_reason")); reason == "max_tokens" || reason == "length" {
+			s.incomplete = true
+		}
+	case "response.output_text.delta":
+		text := stringField(event, "delta")
+		s.contentDeltas++
+		s.contentChars += len([]rune(text))
+		if text != "" {
+			s.markText(elapsed)
+		}
+	case "response.reasoning_summary_text.delta":
+		text := stringField(event, "delta")
+		s.thinkingDeltas++
+		s.thinkingChars += len([]rune(text))
+		if text != "" {
+			s.markThinking(elapsed)
+		}
+	case "response.output_item.added":
+		index := intField(event, "output_index")
+		item := mapField(event, "item")
+		kind := stringField(item, "type")
+		if kind == "function_call" || kind == "custom_tool_call" {
+			if _, exists := s.tools[index]; !exists {
+				s.tools[index] = &sseToolState{id: firstNonEmpty(stringField(item, "call_id"), stringField(item, "id")), name: stringField(item, "name")}
+				s.toolCalls++
+			}
+			s.markTool(elapsed)
+		}
+	case "response.function_call_arguments.delta", "response.custom_tool_call_input.delta":
+		index := intField(event, "output_index")
+		tool := s.tools[index]
+		if tool == nil {
+			return fmt.Errorf("response tool item %d received input before start", index)
+		}
+		partial := stringField(event, "delta")
+		tool.deltas.WriteString(partial)
+		if partial != "" {
+			s.markTool(elapsed)
+		}
+	case "response.output_item.done":
+		index := intField(event, "output_index")
+		if tool := s.tools[index]; tool != nil {
+			item := mapField(event, "item")
+			if tool.name == "" {
+				tool.name = stringField(item, "name")
+			}
+			if tool.id == "" {
+				tool.id = firstNonEmpty(stringField(item, "call_id"), stringField(item, "id"))
+			}
+			if tool.deltas.Len() == 0 {
+				tool.initialInput = firstNonEmpty(stringField(item, "arguments"), stringField(item, "input"))
+			}
+			tool.stopped = true
+		}
 	case "error", "response.failed":
 		s.errorEvent = compactDetail(data)
+		if eventType == "response.failed" {
+			if err := s.markTerminal(eventType); err != nil {
+				return err
+			}
+		}
 	}
 	if choices, ok := event["choices"].([]interface{}); ok && len(choices) > 0 {
 		choice, _ := choices[0].(map[string]interface{})
@@ -268,12 +356,68 @@ func (s *sseStats) record(eventName, data string, elapsed time.Duration) error {
 		if content := stringField(delta, "content"); content != "" {
 			s.contentDeltas++
 			s.contentChars += len([]rune(content))
-			s.markSemantic(elapsed)
+			s.markText(elapsed)
+		}
+		if reasoning := firstNonEmpty(stringField(delta, "reasoning_content"), stringField(delta, "reasoning")); reasoning != "" {
+			s.thinkingDeltas++
+			s.thinkingChars += len([]rune(reasoning))
+			s.markThinking(elapsed)
+		}
+		if calls, ok := delta["tool_calls"].([]interface{}); ok {
+			for _, rawCall := range calls {
+				call, _ := rawCall.(map[string]interface{})
+				index := intField(call, "index")
+				tool := s.tools[index]
+				if tool == nil {
+					tool = &sseToolState{}
+					s.tools[index] = tool
+					s.toolCalls++
+				}
+				if id := stringField(call, "id"); id != "" {
+					tool.id = id
+				}
+				function := mapField(call, "function")
+				if name := stringField(function, "name"); name != "" {
+					tool.name += name
+				}
+				if arguments := stringField(function, "arguments"); arguments != "" {
+					tool.deltas.WriteString(arguments)
+				}
+				s.markTool(elapsed)
+			}
 		}
 		if finish, exists := choice["finish_reason"]; exists && finish != nil {
-			s.terminal = true
+			finishReason := fmt.Sprint(finish)
+			if strings.EqualFold(finishReason, "length") || strings.EqualFold(finishReason, "max_tokens") {
+				s.incomplete = true
+			}
+			for _, tool := range s.tools {
+				tool.stopped = true
+			}
+			if err := s.markTerminal("chat." + finishReason); err != nil {
+				return err
+			}
 		}
 	}
+	return nil
+}
+
+func (s *sseStats) noteEvent(elapsed time.Duration) {
+	if s.events == 0 {
+		s.firstEvent = elapsed
+	} else if gap := elapsed - s.lastEvent; gap > s.maxEventGap {
+		s.maxEventGap = gap
+	}
+	s.lastEvent = elapsed
+	s.events++
+}
+
+func (s *sseStats) markTerminal(kind string) error {
+	if s.terminalType != "" && s.terminalType != kind {
+		return fmt.Errorf("conflicting terminal SSE events %q and %q", s.terminalType, kind)
+	}
+	s.terminal = true
+	s.terminalType = kind
 	return nil
 }
 
@@ -282,6 +426,30 @@ func (s *sseStats) markSemantic(elapsed time.Duration) {
 		s.firstSemantic = elapsed
 		s.semanticOutput = true
 	}
+}
+
+func (s *sseStats) markText(elapsed time.Duration) {
+	if !s.textOutput {
+		s.firstText = elapsed
+		s.textOutput = true
+	}
+	s.markSemantic(elapsed)
+}
+
+func (s *sseStats) markThinking(elapsed time.Duration) {
+	if !s.thinkingOutput {
+		s.firstThinking = elapsed
+		s.thinkingOutput = true
+	}
+	s.markSemantic(elapsed)
+}
+
+func (s *sseStats) markTool(elapsed time.Duration) {
+	if !s.toolOutput {
+		s.firstTool = elapsed
+		s.toolOutput = true
+	}
+	s.markSemantic(elapsed)
 }
 
 func (s sseStats) toolArguments(name string) (string, bool) {
@@ -298,6 +466,15 @@ func (s sseStats) toolArguments(name string) (string, bool) {
 		return "", true
 	}
 	return "", false
+}
+
+func (s sseStats) toolCall(name string) (sseToolState, bool) {
+	for _, tool := range s.tools {
+		if tool != nil && tool.name == name {
+			return *tool, true
+		}
+	}
+	return sseToolState{}, false
 }
 
 func (s sseStats) hasSingleCompleteTool(name string) bool {
@@ -334,6 +511,15 @@ func intField(value map[string]interface{}, key string) int {
 	default:
 		return 0
 	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func validJSONResponse(response apiResponse) bool {

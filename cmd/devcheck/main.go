@@ -26,32 +26,57 @@ const (
 )
 
 type options struct {
-	baseURL       string
-	model         string
-	thinkingModel string
-	suite         string
-	timeout       time.Duration
-	concurrency   int
-	requests      int
-	webSearch     bool
-	cancellation  bool
-	reportPath    string
-	failOnWarning bool
-	allowRemote   bool
+	baseURL          string
+	model            string
+	thinkingModel    string
+	modelsCSV        string
+	models           []string
+	allModels        bool
+	suite            string
+	timeout          time.Duration
+	concurrency      int
+	requests         int
+	concurrencyCSV   string
+	concurrencySteps []int
+	soakDuration     time.Duration
+	soakMaxRequests  int
+	soakTokenBudget  int
+	webSearch        bool
+	cancellation     bool
+	scenariosCSV     string
+	scenarioFilter   map[string]struct{}
+	listScenarios    bool
+	reportPath       string
+	failOnWarning    bool
+	allowRemote      bool
 }
 
 type scenarioResult struct {
-	Name           string `json:"name"`
-	Status         string `json:"status"`
-	Protocol       string `json:"protocol,omitempty"`
-	HTTPStatus     int    `json:"httpStatus,omitempty"`
-	TTFTMillis     int64  `json:"ttftMillis,omitempty"`
-	TotalMillis    int64  `json:"totalMillis,omitempty"`
-	Events         int    `json:"events,omitempty"`
-	ContentDeltas  int    `json:"contentDeltas,omitempty"`
-	ThinkingDeltas int    `json:"thinkingDeltas,omitempty"`
-	ToolCalls      int    `json:"toolCalls,omitempty"`
-	Detail         string `json:"detail,omitempty"`
+	Name              string         `json:"name"`
+	Status            string         `json:"status"`
+	Protocol          string         `json:"protocol,omitempty"`
+	Model             string         `json:"model,omitempty"`
+	Stream            bool           `json:"stream,omitempty"`
+	HTTPStatus        int            `json:"httpStatus,omitempty"`
+	ResponseHeaderMS  int64          `json:"responseHeaderMillis,omitempty"`
+	FirstEventMillis  int64          `json:"firstEventMillis,omitempty"`
+	TTFTMillis        int64          `json:"ttftMillis,omitempty"`
+	FirstTextMillis   int64          `json:"firstTextMillis,omitempty"`
+	FirstThinkMillis  int64          `json:"firstThinkingMillis,omitempty"`
+	FirstToolMillis   int64          `json:"firstToolMillis,omitempty"`
+	MaxStreamGapMS    int64          `json:"maxStreamGapMillis,omitempty"`
+	TotalMillis       int64          `json:"totalMillis,omitempty"`
+	P50Millis         int64          `json:"p50Millis,omitempty"`
+	P95Millis         int64          `json:"p95Millis,omitempty"`
+	P99Millis         int64          `json:"p99Millis,omitempty"`
+	Events            int            `json:"events,omitempty"`
+	ContentDeltas     int            `json:"contentDeltas,omitempty"`
+	ThinkingDeltas    int            `json:"thinkingDeltas,omitempty"`
+	ToolCalls         int            `json:"toolCalls,omitempty"`
+	Requests          int            `json:"requests,omitempty"`
+	Successes         int            `json:"successes,omitempty"`
+	FailureCategories map[string]int `json:"failureCategories,omitempty"`
+	Detail            string         `json:"detail,omitempty"`
 }
 
 type devReport struct {
@@ -59,6 +84,7 @@ type devReport struct {
 	BaseURL     string           `json:"baseUrl"`
 	Suite       string           `json:"suite"`
 	Model       string           `json:"model,omitempty"`
+	Models      []string         `json:"models,omitempty"`
 	Results     []scenarioResult `json:"results"`
 	Summary     map[string]int   `json:"summary"`
 }
@@ -69,6 +95,7 @@ type runner struct {
 	client    *http.Client
 	results   []scenarioResult
 	models    []string
+	selected  []string
 	model     string
 	thinking  string
 	startedAt time.Time
@@ -87,6 +114,10 @@ func run(args []string) int {
 		}
 		fmt.Fprintln(os.Stderr, err)
 		return 2
+	}
+	if opts.listScenarios {
+		printScenarioCatalog()
+		return 0
 	}
 	apiKey := strings.TrimSpace(os.Getenv("KIRO_DEV_API_KEY"))
 	if apiKey == "" {
@@ -129,12 +160,20 @@ func parseOptions(args []string) (options, error) {
 	set.StringVar(&opts.baseURL, "base-url", envOr("KIRO_DEV_BASE_URL", "http://127.0.0.1:8080"), "local Kiro-Go-Plus base URL")
 	set.StringVar(&opts.model, "model", strings.TrimSpace(os.Getenv("KIRO_DEV_MODEL")), "model ID; auto-discovered when omitted")
 	set.StringVar(&opts.thinkingModel, "thinking-model", strings.TrimSpace(os.Getenv("KIRO_DEV_THINKING_MODEL")), "thinking model ID; defaults to <model>-thinking")
-	set.StringVar(&opts.suite, "suite", "smoke", "suite: smoke, full, or load")
+	set.StringVar(&opts.modelsCSV, "models", strings.TrimSpace(os.Getenv("KIRO_DEV_MODELS")), "comma-separated model IDs for the matrix suite")
+	set.BoolVar(&opts.allModels, "all-models", false, "test every discovered Claude model in the matrix suite")
+	set.StringVar(&opts.suite, "suite", "smoke", "suite: smoke, full, matrix, load, staircase, or soak")
 	set.DurationVar(&opts.timeout, "timeout", 150*time.Second, "timeout for each live scenario")
 	set.IntVar(&opts.concurrency, "concurrency", 5, "parallel requests for the load suite")
 	set.IntVar(&opts.requests, "requests", 10, "total requests for the load suite")
+	set.StringVar(&opts.concurrencyCSV, "concurrency-levels", "1,5,10,20,50,100", "comma-separated worker counts for the staircase suite")
+	set.DurationVar(&opts.soakDuration, "soak-duration", 5*time.Minute, "maximum duration of the soak suite")
+	set.IntVar(&opts.soakMaxRequests, "soak-max-requests", 100, "maximum requests in the soak suite")
+	set.IntVar(&opts.soakTokenBudget, "soak-token-budget", 3200, "maximum requested output tokens in the soak suite")
 	set.BoolVar(&opts.webSearch, "web-search", false, "run the network-dependent native WebSearch scenario")
 	set.BoolVar(&opts.cancellation, "cancellation", true, "run client cancellation and recovery in the full suite")
+	set.StringVar(&opts.scenariosCSV, "scenarios", "", "comma-separated full-suite scenario IDs to run")
+	set.BoolVar(&opts.listScenarios, "list-scenarios", false, "list selectable scenario IDs without sending requests")
 	set.StringVar(&opts.reportPath, "json-report", "", "write a machine-readable report with mode 0600")
 	set.BoolVar(&opts.failOnWarning, "fail-on-warning", false, "return non-zero when a scenario warns")
 	set.BoolVar(&opts.allowRemote, "allow-remote", false, "allow credentials to be sent to a non-loopback base URL")
@@ -151,8 +190,9 @@ func parseOptions(args []string) (options, error) {
 		return options{}, fmt.Errorf("refusing to send credentials to non-loopback host %q without --allow-remote", parsedURL.Hostname())
 	}
 	opts.suite = strings.ToLower(strings.TrimSpace(opts.suite))
-	if opts.suite != "smoke" && opts.suite != "full" && opts.suite != "load" {
-		return options{}, fmt.Errorf("invalid --suite %q: expected smoke, full, or load", opts.suite)
+	validSuites := map[string]bool{"smoke": true, "full": true, "matrix": true, "load": true, "staircase": true, "soak": true}
+	if !validSuites[opts.suite] {
+		return options{}, fmt.Errorf("invalid --suite %q: expected smoke, full, matrix, load, staircase, or soak", opts.suite)
 	}
 	if opts.timeout < time.Second {
 		return options{}, errors.New("--timeout must be at least 1s")
@@ -160,10 +200,119 @@ func parseOptions(args []string) (options, error) {
 	if opts.concurrency < 1 || opts.concurrency > 100 {
 		return options{}, errors.New("--concurrency must be between 1 and 100")
 	}
-	if opts.requests < 1 || opts.requests > 1000 {
-		return options{}, errors.New("--requests must be between 1 and 1000")
+	if opts.requests < 1 || opts.requests > 10000 {
+		return options{}, errors.New("--requests must be between 1 and 10000")
+	}
+	if opts.soakDuration < time.Second || opts.soakDuration > 24*time.Hour {
+		return options{}, errors.New("--soak-duration must be between 1s and 24h")
+	}
+	if opts.soakMaxRequests < 1 || opts.soakMaxRequests > 10000 {
+		return options{}, errors.New("--soak-max-requests must be between 1 and 10000")
+	}
+	if opts.soakTokenBudget < 32 || opts.soakTokenBudget > 1000000 {
+		return options{}, errors.New("--soak-token-budget must be between 32 and 1000000")
+	}
+	if opts.model != "" && opts.modelsCSV != "" {
+		return options{}, errors.New("--model and --models cannot be used together")
+	}
+	if opts.allModels && (opts.model != "" || opts.modelsCSV != "") {
+		return options{}, errors.New("--all-models cannot be combined with --model or --models")
+	}
+	var parseErr error
+	opts.models, parseErr = parseCSV(opts.modelsCSV, 50)
+	if parseErr != nil {
+		return options{}, fmt.Errorf("invalid --models: %w", parseErr)
+	}
+	opts.concurrencySteps, parseErr = parseConcurrencySteps(opts.concurrencyCSV)
+	if parseErr != nil {
+		return options{}, fmt.Errorf("invalid --concurrency-levels: %w", parseErr)
+	}
+	scenarios, parseErr := parseCSV(opts.scenariosCSV, len(scenarioCatalog))
+	if parseErr != nil {
+		return options{}, fmt.Errorf("invalid --scenarios: %w", parseErr)
+	}
+	if len(scenarios) > 0 {
+		opts.scenarioFilter = make(map[string]struct{}, len(scenarios))
+		for _, scenario := range scenarios {
+			if _, known := scenarioCatalog[scenario]; !known {
+				return options{}, fmt.Errorf("unknown scenario %q; use --list-scenarios", scenario)
+			}
+			opts.scenarioFilter[scenario] = struct{}{}
+		}
 	}
 	return opts, nil
+}
+
+var scenarioCatalog = map[string]string{
+	"anthropic-non-stream":     "Anthropic Messages JSON response",
+	"anthropic-stream":         "Anthropic Messages SSE and timing",
+	"thinking-stream":          "thinking/reasoning SSE visibility",
+	"skill-context":            "client-side Skill system instruction transport",
+	"anthropic-tool-roundtrip": "Anthropic forced tool call and tool_result continuation",
+	"mcp-roundtrip":            "MCP-shaped zero-argument call and tool_result continuation",
+	"chat-tool-roundtrip":      "Chat Completions function call and tool result continuation",
+	"chat-stream":              "Chat Completions SSE and timing",
+	"responses-non-stream":     "Responses API JSON response",
+	"responses-stream":         "Responses API SSE and timing",
+	"websearch-non-stream":     "native WebSearch JSON response",
+	"websearch-stream":         "native WebSearch SSE response",
+	"websearch-multi":          "bounded multi-search request",
+	"websearch-mixed-tools":    "native WebSearch alongside a client tool schema",
+	"cancellation":             "established stream cancellation and recovery",
+	"protocol-matrix":          "selected models across three protocols and stream modes",
+}
+
+func printScenarioCatalog() {
+	names := make([]string, 0, len(scenarioCatalog))
+	for name := range scenarioCatalog {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		fmt.Printf("%-28s %s\n", name, scenarioCatalog[name])
+	}
+}
+
+func parseCSV(raw string, limit int) ([]string, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	seen := make(map[string]struct{})
+	values := make([]string, 0)
+	for _, rawValue := range strings.Split(raw, ",") {
+		value := strings.TrimSpace(rawValue)
+		if value == "" {
+			return nil, errors.New("contains an empty value")
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		values = append(values, value)
+		if len(values) > limit {
+			return nil, fmt.Errorf("contains more than %d values", limit)
+		}
+	}
+	return values, nil
+}
+
+func parseConcurrencySteps(raw string) ([]int, error) {
+	values, err := parseCSV(raw, 20)
+	if err != nil {
+		return nil, err
+	}
+	steps := make([]int, 0, len(values))
+	for _, value := range values {
+		var parsed int
+		if _, err := fmt.Sscanf(value, "%d", &parsed); err != nil || fmt.Sprint(parsed) != value || parsed < 1 || parsed > 100 {
+			return nil, fmt.Errorf("%q is not an integer between 1 and 100", value)
+		}
+		steps = append(steps, parsed)
+	}
+	if len(steps) == 0 {
+		return nil, errors.New("at least one level is required")
+	}
+	return steps, nil
 }
 
 func envOr(name, fallback string) string {
@@ -184,28 +333,34 @@ func (r *runner) scenarioContext(parent context.Context) (context.Context, conte
 
 func (r *runner) printResults() {
 	w := tabwriter.NewWriter(os.Stdout, 2, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "STATUS\tSCENARIO\tHTTP\tTTFT\tTOTAL\tEVENTS\tDETAIL")
+	fmt.Fprintln(w, "STATUS\tSCENARIO\tMODEL\tHTTP\tHEAD\tEVENT\tSEMANTIC\tTEXT\tTHINK\tTOOL\tGAP\tTOTAL\tDETAIL")
 	for _, result := range r.results {
-		ttft := "-"
-		if result.TTFTMillis > 0 {
-			ttft = fmt.Sprintf("%dms", result.TTFTMillis)
-		}
-		total := "-"
-		if result.TotalMillis > 0 {
-			total = fmt.Sprintf("%dms", result.TotalMillis)
-		}
 		httpStatus := "-"
 		if result.HTTPStatus > 0 {
 			httpStatus = fmt.Sprint(result.HTTPStatus)
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%d\t%s\n",
-			result.Status, result.Name, httpStatus, ttft, total, result.Events, result.Detail)
+		model := result.Model
+		if model == "" {
+			model = "-"
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			result.Status, result.Name, model, httpStatus,
+			formatMillis(result.ResponseHeaderMS), formatMillis(result.FirstEventMillis), formatMillis(result.TTFTMillis),
+			formatMillis(result.FirstTextMillis), formatMillis(result.FirstThinkMillis), formatMillis(result.FirstToolMillis),
+			formatMillis(result.MaxStreamGapMS), formatMillis(result.TotalMillis), result.Detail)
 	}
 	_ = w.Flush()
 
 	summary := r.summary()
 	fmt.Printf("\nSummary: pass=%d warn=%d fail=%d skip=%d model=%s elapsed=%s\n",
 		summary[statusPass], summary[statusWarn], summary[statusFail], summary[statusSkip], r.model, time.Since(r.startedAt).Round(time.Millisecond))
+}
+
+func formatMillis(value int64) string {
+	if value <= 0 {
+		return "-"
+	}
+	return fmt.Sprintf("%dms", value)
 }
 
 func (r *runner) summary() map[string]int {
@@ -222,6 +377,7 @@ func (r *runner) writeReport(path string) error {
 		BaseURL:     r.opts.baseURL,
 		Suite:       r.opts.suite,
 		Model:       r.model,
+		Models:      append([]string(nil), r.selected...),
 		Results:     r.results,
 		Summary:     r.summary(),
 	}

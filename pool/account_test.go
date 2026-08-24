@@ -11,6 +11,7 @@ import (
 )
 
 func TestOverLimitAccountsAreSkippedByDefault(t *testing.T) {
+	initAccountSelectionConfig(t)
 	p := &AccountPool{}
 	normal := config.Account{ID: "normal"}
 	overLimit := config.Account{ID: "over", UsageCurrent: 10, UsageLimit: 10}
@@ -29,6 +30,7 @@ func TestOverLimitAccountsAreSkippedByDefault(t *testing.T) {
 }
 
 func TestOverLimitAccountsCanBeSelectedWhenUpstreamOverageEnabled(t *testing.T) {
+	initAccountSelectionConfig(t)
 	p := &AccountPool{}
 	overLimit := config.Account{
 		ID:            "over",
@@ -49,6 +51,7 @@ func TestOverLimitAccountsCanBeSelectedWhenUpstreamOverageEnabled(t *testing.T) 
 }
 
 func TestOverLimitAccountsRemainSkippedWhenUpstreamOverageDisabled(t *testing.T) {
+	initAccountSelectionConfig(t)
 	p := &AccountPool{}
 	overLimit := config.Account{
 		ID:            "over",
@@ -61,6 +64,13 @@ func TestOverLimitAccountsRemainSkippedWhenUpstreamOverageDisabled(t *testing.T)
 
 	if acc := p.GetNext(); acc != nil {
 		t.Fatalf("expected nil when upstream OverageStatus=DISABLED, got %q", acc.ID)
+	}
+}
+
+func initAccountSelectionConfig(t *testing.T) {
+	t.Helper()
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("config.Init: %v", err)
 	}
 }
 

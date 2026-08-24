@@ -1,81 +1,82 @@
 # Local Development Testing
 
-The test tooling has two layers. Offline checks are deterministic and never
-contact Kiro or consume account quota. Live checks are opt-in and exercise a
-running local Kiro-Go Plus instance with real configured accounts.
+The test tooling separates deterministic offline checks from opt-in live checks.
+Offline modes never contact Kiro. Live modes use configured accounts and consume
+quota, so use a dedicated API key and start with small limits.
 
 ## Offline Quality Gates
 
-Run the normal development gate:
-
 ```bash
-bash scripts/dev-test.sh quick
+bash scripts/dev-test.sh quick   # module verification, shuffled tests, vet, builds, UI/shell/Compose checks
+bash scripts/dev-test.sh fault   # delay, empty/truncated/corrupt stream, 429/5xx, retry, and cancellation fixtures
+bash scripts/dev-test.sh full    # quick + race + repeated regressions + updater + pinned govulncheck
+bash scripts/dev-test.sh bench   # parser, translation, tool schema, cache, routing, and logging benchmarks
+KIRO_DEV_FUZZ_TIME=30s bash scripts/dev-test.sh fuzz
 ```
 
-Run the release-level gate before deployment:
+Fuzz targets cover AWS EventStream, downstream SSE, Claude tool schemas, Claude
+request translation, and Responses input parsing. Inputs are bounded to prevent
+the test harness from creating unbounded allocations.
+
+## Live Functional Checks
+
+Start Kiro-Go Plus, then provide credentials only through the environment:
 
 ```bash
-bash scripts/dev-test.sh full
-bash scripts/dev-test.sh bench
-```
-
-`full` adds the race detector, repeated stream/tool regressions, updater tests,
-and `govulncheck` when installed. The script also validates JavaScript, shell
-syntax, Compose configuration, builds both binaries, and rejects tracked
-credential-like files.
-
-## Live Scenario Checks
-
-Start the service first, then provide a dedicated, low-quota test API key
-without placing it on the command line:
-
-```bash
-read -rsp 'Test API key: ' KIRO_DEV_API_KEY
-printf '\n'
-export KIRO_DEV_API_KEY
+read -rsp 'Test API key: ' KIRO_DEV_API_KEY; printf '\n'; export KIRO_DEV_API_KEY
 bash scripts/dev-test.sh live
 bash scripts/dev-test.sh live-full --json-report /tmp/kiro-devcheck.json
+go run ./cmd/devcheck --list-scenarios
 ```
 
-Use `KIRO_DEV_BASE_URL` when the local service is not on
-`http://127.0.0.1:8080`. Use `--model` and `--thinking-model` to override
-automatic model selection. The runner refuses non-loopback hosts by default;
-add `--allow-remote` only after verifying the destination. HTTP redirects are
-never followed with credentials.
+`smoke` checks health, models, authentication, Anthropic JSON, and SSE. `full`
+adds thinking, Skill instruction transport, Anthropic/Chat tool-result
+roundtrips, MCP-shaped zero-argument roundtrips, Chat and Responses streaming,
+cancellation recovery, and optional WebSearch. Select expensive cases with
+`--scenarios id,id`; enable search with `--web-search`.
 
-The smoke suite checks health, model discovery, authentication rejection,
-non-stream output, SSE termination, first semantic output, TTFT, and total
-latency. The full suite additionally checks:
+Each stream result separates response-header time, first valid SSE event, first
+semantic output (TTFT), first text, first thinking, first tool output, maximum
+event gap, and total duration. JSON reports use mode `0600` and never include the
+API key.
 
-- Thinking deltas; the first thinking delta counts as TTFT.
-- System instruction transport used by client-side Skills.
-- Anthropic and OpenAI forced function calls with complete JSON arguments.
-- MCP-shaped zero-argument tool calls, exact `{}` recovery, and complete block
-  lifecycle validation.
-- Responses API output, cancellation after the first valid SSE event, and
-  post-cancellation health.
-- Native WebSearch when explicitly enabled with `--web-search`.
-
-Run bounded concurrency separately:
+To validate actual client-side Skill discovery and MCP process execution, not
+just proxy protocol transport, run the isolated Claude Code harness:
 
 ```bash
-bash scripts/dev-test.sh load --concurrency 20 --requests 100 --timeout 5m
+bash scripts/dev-test.sh client-e2e
 ```
 
-The load suite alternates streaming and non-streaming requests. Each request
-gets its own timeout while the suite retains a bounded overall deadline. The
-report includes per-mode success counts and p50/p95 total latency. Start small:
-live checks consume quota and may trigger upstream rate limits.
+It builds `cmd/mcpfixture`, creates a disposable Skill and workspace, disables
+built-in tools, permits only the fixture tool, applies a small client budget,
+and deletes all temporary files. Set `KIRO_DEV_ALLOW_REMOTE=1` explicitly for a
+non-loopback `KIRO_DEV_BASE_URL`.
 
-## Interpretation and Boundaries
+## Model, Load, and Soak Checks
 
-`PASS` validates the observable proxy contract. `WARN` usually means a valid
-response was buffered into one burst, thinking was not exposed, or a
-probabilistic instruction marker was not followed. `FAIL` means a protocol,
-auth, malformed SSE/JSON, terminal-event, timeout, or tool-integrity assertion
-failed.
+```bash
+bash scripts/dev-test.sh matrix --models claude-sonnet-5,claude-sonnet-5-thinking
+bash scripts/dev-test.sh matrix --all-models
+bash scripts/dev-test.sh load --concurrency 20 --requests 100 --timeout 5m
+bash scripts/dev-test.sh staircase --concurrency-levels 1,5,10,20,50,100 --requests 10
+bash scripts/dev-test.sh soak --concurrency 10 --soak-duration 10m \
+  --soak-max-requests 500 --soak-token-budget 16000
+```
 
-Kiro-Go Plus transports tool definitions and calls; it does not launch client
-MCP servers or discover Skill files. Therefore the suite validates MCP/function
-protocol integrity and Skill instruction preservation. Test actual MCP server
-execution and Skill discovery separately in Claude Code or the relevant client.
+The matrix runs Anthropic Messages, Chat Completions, and Responses in stream
+and non-stream modes for every selected model. Staircase sends at least one
+request per worker at each level. Soak scheduling stops at the first duration,
+request, or requested-output-token cap and lets in-flight requests finish.
+Reports include p50/p95/p99 and failure categories such as `http_429`,
+`http_5xx`, `timeout`, `transport`, `empty_response`, and `stream_protocol`.
+
+## Security and Boundaries
+
+The runner rejects non-loopback targets unless `--allow-remote` is explicit and
+never follows redirects with credentials. Verify the remote URL before opting
+in.
+
+Kiro-Go Plus transports Skills instructions and MCP/function protocol data; it
+does not discover Skill files or launch local MCP servers. `devcheck` validates
+schema, call ID, arguments, lifecycle, and second-turn tool results. The
+optional `client-e2e` harness validates the separate Claude Code responsibilities.
