@@ -102,14 +102,32 @@ func (r *runner) runUnauthorized(parent context.Context) {
 	if response.err != nil {
 		result.Status = statusFail
 		result.Detail = response.err.Error()
-	} else if response.statusCode == http.StatusUnauthorized || response.statusCode == http.StatusForbidden {
+	} else if isExpectedAuthenticationRejection(response) {
 		result.Status = statusPass
-		result.Detail = "missing API key rejected"
+		result.Detail = "missing API key rejected by the local authentication layer"
 	} else {
 		result.Status = statusFail
-		result.Detail = fmt.Sprintf("missing API key returned HTTP %d", response.statusCode)
+		result.Detail = "unexpected authentication response: " + responseErrorDetail(response)
 	}
 	r.add(result)
+}
+
+func isExpectedAuthenticationRejection(response apiResponse) bool {
+	if response.err != nil || response.statusCode != http.StatusUnauthorized {
+		return false
+	}
+	var payload struct {
+		Type  string `json:"type"`
+		Error struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(response.body, &payload) != nil {
+		return false
+	}
+	message := strings.ToLower(payload.Error.Message)
+	return payload.Type == "error" && payload.Error.Type == "authentication_error" && strings.Contains(message, "api key")
 }
 
 func (r *runner) runClaudeNonStream(parent context.Context) {
@@ -198,9 +216,9 @@ func (r *runner) runAnthropicFunction(parent context.Context) {
 	if result.Status == statusPass {
 		arguments, found := response.stream.toolArguments(name)
 		var input map[string]interface{}
-		if !found || json.Unmarshal([]byte(arguments), &input) != nil || input["value"] != "FUNCTION_OK" {
+		if !response.stream.hasSingleCompleteTool(name) || !found || json.Unmarshal([]byte(arguments), &input) != nil || input["value"] != "FUNCTION_OK" {
 			result.Status = statusFail
-			result.Detail += "; complete forced function arguments were not observed"
+			result.Detail += "; expected exactly one complete forced function call"
 		}
 	}
 	r.add(result)
@@ -223,7 +241,7 @@ func (r *runner) runMCPZeroArgument(parent context.Context) {
 	if result.Status == statusPass {
 		arguments, found := response.stream.toolArguments(name)
 		var input map[string]interface{}
-		if !found || json.Unmarshal([]byte(arguments), &input) != nil || len(input) != 0 {
+		if !response.stream.hasSingleCompleteTool(name) || !found || json.Unmarshal([]byte(arguments), &input) != nil || len(input) != 0 {
 			result.Status = statusFail
 			result.Detail += "; expected one complete tool call with {} input"
 		} else {
@@ -310,17 +328,29 @@ func (r *runner) runWebSearch(parent context.Context) {
 }
 
 func (r *runner) runCancellation(parent context.Context) {
-	ctx, cancel := context.WithTimeout(parent, 250*time.Millisecond)
-	defer cancel()
+	timeoutCtx, timeoutCancel := r.scenarioContext(parent)
+	defer timeoutCancel()
+	ctx, cancelRequest := context.WithCancel(timeoutCtx)
+	defer cancelRequest()
 	prompt := "Write a detailed 2000-word technical essay with many numbered sections. Begin immediately."
-	response := r.post(ctx, "/v1/messages", claudePayload(r.model, true, prompt, 4096), true, true)
+	observedEvent := false
+	var cancelOnce sync.Once
+	response := r.postWithSSEObserver(ctx, "/v1/messages", claudePayload(r.model, true, prompt, 4096), true, true, func() {
+		cancelOnce.Do(func() {
+			observedEvent = true
+			cancelRequest()
+		})
+	})
 	result := scenarioResult{Name: "stream-cancellation-recovery", Protocol: "timeout", HTTPStatus: response.statusCode, TotalMillis: response.total.Milliseconds(), Events: response.stream.events}
-	if response.err != nil && (errors.Is(response.err, context.DeadlineExceeded) || errors.Is(response.err, context.Canceled)) {
+	if !observedEvent {
+		result.Status = statusFail
+		result.Detail = "request ended before any valid SSE event was observed"
+	} else if response.err != nil && (errors.Is(response.err, context.DeadlineExceeded) || errors.Is(response.err, context.Canceled)) {
 		result.Status = statusPass
-		result.Detail = "client deadline canceled the in-flight stream"
+		result.Detail = fmt.Sprintf("client canceled the established stream after %d event(s)", response.stream.events)
 	} else if response.err == nil && response.stream.terminal {
 		result.Status = statusWarn
-		result.Detail = "request completed before the 250ms cancellation deadline"
+		result.Detail = "stream completed from buffered data before cancellation reached the transport"
 	} else {
 		result.Status = statusFail
 		result.Detail = responseErrorDetail(response)
@@ -339,13 +369,13 @@ func (r *runner) runCancellation(parent context.Context) {
 }
 
 func (r *runner) runLoad(parent context.Context) {
-	ctx, cancel := r.scenarioContext(parent)
+	waves := (r.opts.requests + r.opts.concurrency - 1) / r.opts.concurrency
+	ctx, cancel := context.WithTimeout(parent, time.Duration(waves)*r.opts.timeout)
 	defer cancel()
 	type sample struct {
 		duration int64
-		err      error
-		status   int
-		hasText  bool
+		success  bool
+		stream   bool
 	}
 	jobs := make(chan int)
 	results := make(chan sample, r.opts.requests)
@@ -355,9 +385,18 @@ func (r *runner) runLoad(parent context.Context) {
 		go func() {
 			defer workers.Done()
 			for index := range jobs {
-				payload := claudePayload(r.model, false, fmt.Sprintf("Reply with OK %d.", index), 32)
-				response := r.post(ctx, "/v1/messages", payload, true, false)
-				results <- sample{duration: response.total.Milliseconds(), err: response.err, status: response.statusCode, hasText: responseText(response.body) != ""}
+				stream := index%2 == 1
+				requestCtx, requestCancel := r.scenarioContext(ctx)
+				payload := claudePayload(r.model, stream, fmt.Sprintf("Reply with OK %d.", index), 32)
+				response := r.post(requestCtx, "/v1/messages", payload, true, stream)
+				requestCancel()
+				success := response.err == nil && response.statusCode >= 200 && response.statusCode < 300
+				if stream {
+					success = success && response.stream.terminal && response.stream.errorEvent == "" && response.stream.firstSemantic > 0
+				} else {
+					success = success && responseText(response.body) != ""
+				}
+				results <- sample{duration: response.total.Milliseconds(), success: success, stream: stream}
 			}
 		}()
 	}
@@ -376,17 +415,34 @@ func (r *runner) runLoad(parent context.Context) {
 
 	durations := make([]int64, 0, r.opts.requests)
 	successes := 0
+	streamRequests := 0
+	streamSuccesses := 0
+	nonStreamSuccesses := 0
 	for sample := range results {
 		durations = append(durations, sample.duration)
-		if sample.err == nil && sample.status >= 200 && sample.status < 300 && sample.hasText {
+		if sample.stream {
+			streamRequests++
+		}
+		if sample.success {
 			successes++
+			if sample.stream {
+				streamSuccesses++
+			} else {
+				nonStreamSuccesses++
+			}
 		}
 	}
 	result := scenarioResult{Name: "concurrent-load", Protocol: "load"}
 	if len(durations) > 0 {
 		result.TotalMillis = percentile(durations, 0.95)
 	}
-	result.Detail = fmt.Sprintf("success=%d/%d concurrency=%d p50=%dms p95=%dms", successes, r.opts.requests, r.opts.concurrency, percentile(durations, 0.50), percentile(durations, 0.95))
+	result.Detail = fmt.Sprintf(
+		"success=%d/%d stream=%d/%d nonstream=%d/%d concurrency=%d p50=%dms p95=%dms",
+		successes, r.opts.requests,
+		streamSuccesses, streamRequests,
+		nonStreamSuccesses, r.opts.requests-streamRequests,
+		r.opts.concurrency, percentile(durations, 0.50), percentile(durations, 0.95),
+	)
 	if successes == r.opts.requests {
 		result.Status = statusPass
 	} else {

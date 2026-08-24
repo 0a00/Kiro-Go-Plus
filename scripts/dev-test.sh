@@ -13,7 +13,7 @@ Modes:
   bench       Run local event-stream parser benchmarks.
   live        Run the smoke suite against a local service.
   live-full   Run reasoning, Skills context, functions, MCP, Responses, and cancellation.
-  load        Run bounded concurrent requests (default: 5 workers, 10 requests).
+  load        Run bounded mixed stream/non-stream requests (default: 5 workers, 10 requests).
   all         Run full offline checks followed by the live-full suite.
 
 Live modes require KIRO_DEV_API_KEY in the environment. Optional variables:
@@ -104,7 +104,7 @@ run_full() {
   info "running race detector"
   go test -race ./...
   info "repeating stream and tool regressions"
-  go test ./proxy -count=20 -run 'Test(ParseEventStream|CallKiroAPIRecoversSchemaDeclaredZeroArgumentTool|MeaningfulStream|ToolAssembly)'
+  go test ./proxy -count=20 -run 'Test(ParseEventStream|CallKiroAPIRecoversSchemaDeclaredZeroArgumentTool|ClaudeMessagesRecoversZeroArgumentTool|MeaningfulStream|ToolAssembly)'
   info "testing the sudo updater with fake Docker"
   bash scripts/update-sudo_test.sh
   if command -v govulncheck >/dev/null 2>&1; then

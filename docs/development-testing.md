@@ -50,8 +50,10 @@ latency. The full suite additionally checks:
 - Thinking deltas; the first thinking delta counts as TTFT.
 - System instruction transport used by client-side Skills.
 - Anthropic and OpenAI forced function calls with complete JSON arguments.
-- MCP-shaped zero-argument tool calls and `{}` recovery.
-- Responses API output, stream cancellation, and post-cancellation health.
+- MCP-shaped zero-argument tool calls, exact `{}` recovery, and complete block
+  lifecycle validation.
+- Responses API output, cancellation after the first valid SSE event, and
+  post-cancellation health.
 - Native WebSearch when explicitly enabled with `--web-search`.
 
 Run bounded concurrency separately:
@@ -60,7 +62,9 @@ Run bounded concurrency separately:
 bash scripts/dev-test.sh load --concurrency 20 --requests 100 --timeout 5m
 ```
 
-The load report includes success count and p50/p95 total latency. Start small:
+The load suite alternates streaming and non-streaming requests. Each request
+gets its own timeout while the suite retains a bounded overall deadline. The
+report includes per-mode success counts and p50/p95 total latency. Start small:
 live checks consume quota and may trigger upstream rate limits.
 
 ## Interpretation and Boundaries
@@ -68,7 +72,8 @@ live checks consume quota and may trigger upstream rate limits.
 `PASS` validates the observable proxy contract. `WARN` usually means a valid
 response was buffered into one burst, thinking was not exposed, or a
 probabilistic instruction marker was not followed. `FAIL` means a protocol,
-auth, JSON, terminal-event, timeout, or tool-integrity assertion failed.
+auth, malformed SSE/JSON, terminal-event, timeout, or tool-integrity assertion
+failed.
 
 Kiro-Go Plus transports tool definitions and calls; it does not launch client
 MCP servers or discover Skill files. Therefore the suite validates MCP/function

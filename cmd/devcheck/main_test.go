@@ -3,11 +3,13 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -58,12 +60,156 @@ func TestConsumeSSEPreservesZeroArgumentToolInput(t *testing.T) {
 		t.Fatalf("consume SSE: %v", err)
 	}
 	arguments, found := stats.toolArguments("mcp__memory__read_graph")
-	if !found {
-		t.Fatal("tool call was not recorded")
+	if !found || !stats.hasSingleCompleteTool("mcp__memory__read_graph") {
+		t.Fatal("one complete tool call was not recorded")
 	}
 	var input map[string]interface{}
 	if err := json.Unmarshal([]byte(arguments), &input); err != nil || len(input) != 0 {
 		t.Fatalf("unexpected zero-argument input %q: %v", arguments, err)
+	}
+}
+
+func TestConsumeSSERejectsMalformedJSONAndToolLifecycle(t *testing.T) {
+	tests := []struct {
+		name   string
+		stream string
+		match  string
+	}{
+		{
+			name: "malformed JSON",
+			stream: strings.Join([]string{
+				"event: content_block_delta",
+				`data: {"type":"content_block_delta"`,
+				"",
+			}, "\n"),
+			match: "invalid JSON",
+		},
+		{
+			name: "tool delta before start",
+			stream: strings.Join([]string{
+				"event: content_block_delta",
+				`data: {"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{}"}}`,
+				"",
+			}, "\n"),
+			match: "before start",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := consumeSSE(strings.NewReader(tc.stream), time.Now())
+			if err == nil || !strings.Contains(err.Error(), tc.match) {
+				t.Fatalf("consumeSSE() error = %v, want %q", err, tc.match)
+			}
+		})
+	}
+}
+
+func TestConsumeSSEObserverRunsOnlyForValidEvents(t *testing.T) {
+	stream := strings.Join([]string{
+		"event: message_start",
+		`data: {"type":"message_start"}`,
+		"",
+		"event: message_stop",
+		`data: {"type":"message_stop"}`,
+		"",
+	}, "\n")
+	events := 0
+	stats, err := consumeSSEWithObserver(strings.NewReader(stream), time.Now(), func() { events++ })
+	if err != nil {
+		t.Fatalf("consume SSE: %v", err)
+	}
+	if events != 2 || stats.events != 2 || !stats.terminal {
+		t.Fatalf("unexpected observer result: callbacks=%d stats=%+v", events, stats)
+	}
+}
+
+func TestRunnerCancelsEstablishedStreamAfterObservedEvent(t *testing.T) {
+	serverCanceled := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("event: message_start\ndata: {\"type\":\"message_start\"}\n\n"))
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		<-req.Context().Done()
+		close(serverCanceled)
+	}))
+	defer server.Close()
+
+	r := &runner{
+		opts:      options{baseURL: server.URL},
+		apiKey:    "dev-secret",
+		client:    server.Client(),
+		userAgent: "devcheck-test",
+	}
+	timeoutCtx, timeoutCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer timeoutCancel()
+	ctx, cancelRequest := context.WithCancel(timeoutCtx)
+	response := r.postWithSSEObserver(ctx, "/v1/messages", map[string]interface{}{"stream": true}, true, true, cancelRequest)
+	if !errors.Is(response.err, context.Canceled) || response.stream.events != 1 {
+		t.Fatalf("stream cancellation result = err=%v stats=%+v", response.err, response.stream)
+	}
+	select {
+	case <-serverCanceled:
+	case <-time.After(time.Second):
+		t.Fatal("client cancellation did not reach the server request context")
+	}
+}
+
+func TestRunLoadMixesStreamAndNonStreamRequests(t *testing.T) {
+	var streamRequests atomic.Int32
+	var nonStreamRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		var payload map[string]interface{}
+		if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+		if streaming, _ := payload["stream"].(bool); streaming {
+			streamRequests.Add(1)
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"OK\"}}\n\n"))
+			_, _ = w.Write([]byte("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"))
+			return
+		}
+		nonStreamRequests.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"content":[{"type":"text","text":"OK"}]}`))
+	}))
+	defer server.Close()
+
+	r := &runner{
+		opts: options{
+			baseURL: server.URL, timeout: time.Second, concurrency: 2, requests: 4,
+		},
+		apiKey: "dev-secret", client: server.Client(), model: "claude-sonnet-4.6", userAgent: "devcheck-test",
+	}
+	r.runLoad(context.Background())
+	if len(r.results) != 1 || r.results[0].Status != statusPass {
+		t.Fatalf("unexpected load result: %+v", r.results)
+	}
+	if streamRequests.Load() != 2 || nonStreamRequests.Load() != 2 {
+		t.Fatalf("load mix = stream %d, non-stream %d", streamRequests.Load(), nonStreamRequests.Load())
+	}
+}
+
+func TestExpectedAuthenticationRejectionIsStrict(t *testing.T) {
+	valid := apiResponse{
+		statusCode: http.StatusUnauthorized,
+		body:       []byte(`{"type":"error","error":{"type":"authentication_error","message":"Invalid or missing API key"}}`),
+	}
+	if !isExpectedAuthenticationRejection(valid) {
+		t.Fatal("canonical local API-key rejection was not recognized")
+	}
+	for _, response := range []apiResponse{
+		{statusCode: http.StatusForbidden, body: valid.body},
+		{statusCode: http.StatusUnauthorized, body: []byte(`{"error":{"type":"account_suspended","message":"account suspended"}}`)},
+		{statusCode: http.StatusUnauthorized, body: []byte(`not-json`)},
+	} {
+		if isExpectedAuthenticationRejection(response) {
+			t.Fatalf("unexpected response was accepted as local authentication rejection: %+v", response)
+		}
 	}
 }
 

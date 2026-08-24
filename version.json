@@ -1,5 +1,5 @@
 {
-  "version": "1.2.45",
-  "changelog": "Fix schema-aware zero-argument MCP tool recovery and add offline/live development test suites.\n修复基于 schema 的零参数 MCP 工具恢复，并增加离线与本地实测开发测试集合。",
+  "version": "1.2.46",
+  "changelog": "Harden zero-argument MCP recovery boundaries and schema validation; strengthen live SSE, cancellation, authentication, and mixed-load checks.\n收紧零参数 MCP 恢复边界与 Schema 验证，并强化 SSE、取消、鉴权和混合负载实测。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }

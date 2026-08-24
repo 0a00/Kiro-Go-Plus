@@ -20,10 +20,25 @@ func eventStreamParseOptionsForPayload(payload *KiroPayload) eventStreamParseOpt
 	if context == nil {
 		return options
 	}
+	const (
+		toolSchemaZeroArguments uint8 = 1 << iota
+		toolSchemaOther
+	)
+	shapes := make(map[string]uint8, len(context.Tools))
 	for _, wrapper := range context.Tools {
 		tool := wrapper.ToolSpecification
 		name := strings.TrimSpace(tool.Name)
-		if name == "" || !schemaDefinesZeroArguments(tool.InputSchema.JSON) {
+		if name == "" {
+			continue
+		}
+		if schemaDefinesZeroArguments(tool.InputSchema.JSON) {
+			shapes[name] |= toolSchemaZeroArguments
+		} else {
+			shapes[name] |= toolSchemaOther
+		}
+	}
+	for name, shape := range shapes {
+		if shape != toolSchemaZeroArguments {
 			continue
 		}
 		if options.emptyInputTools == nil {
@@ -39,37 +54,50 @@ func (o eventStreamParseOptions) allowsEmptyToolInput(name string) bool {
 	return ok
 }
 
-// schemaDefinesZeroArguments deliberately recognizes only schemas that define
-// no properties. A schema with optional properties may technically accept {},
-// but treating a missing upstream argument stream as intentional could execute
-// a tool without parameters the model meant to provide.
+// schemaDefinesZeroArguments deliberately recognizes only explicit object
+// schemas with an empty properties map. Open, dynamic, or composed schemas may
+// accept {}, but treating a missing upstream argument stream as intentional
+// could execute a tool without parameters the model meant to provide.
 func schemaDefinesZeroArguments(schema interface{}) bool {
 	object, ok := schema.(map[string]interface{})
 	if !ok || object == nil {
 		return false
 	}
-	if schemaType, exists := object["type"]; exists {
-		value, ok := schemaType.(string)
-		if !ok || !strings.EqualFold(strings.TrimSpace(value), "object") {
-			return false
-		}
+	schemaType, exists := object["type"]
+	value, ok := schemaType.(string)
+	if !exists || !ok || !strings.EqualFold(strings.TrimSpace(value), "object") {
+		return false
 	}
-	if properties, exists := object["properties"]; exists {
-		propertyMap, ok := properties.(map[string]interface{})
-		if !ok || len(propertyMap) != 0 {
-			return false
-		}
+	properties, exists := object["properties"]
+	propertyMap, ok := properties.(map[string]interface{})
+	if !exists || !ok || len(propertyMap) != 0 {
+		return false
 	}
 	if required, exists := object["required"]; exists && !emptySchemaStringArray(required) {
 		return false
 	}
 	if minimum, exists := object["minProperties"]; exists {
 		value, ok := schemaInteger(minimum)
-		if !ok || value > 0 {
+		if !ok || value != 0 {
 			return false
 		}
 	}
-	for _, keyword := range []string{"$ref", "allOf", "anyOf", "oneOf", "not", "if", "then", "else", "const", "enum"} {
+	if maximum, exists := object["maxProperties"]; exists {
+		value, ok := schemaInteger(maximum)
+		if !ok || value != 0 {
+			return false
+		}
+	}
+	if additional, exists := object["additionalProperties"]; exists {
+		allowed, ok := additional.(bool)
+		if !ok || allowed {
+			return false
+		}
+	}
+	for _, keyword := range []string{
+		"$ref", "allOf", "anyOf", "oneOf", "not", "if", "then", "else", "const", "enum",
+		"patternProperties", "propertyNames", "dependentSchemas", "dependentRequired", "dependencies", "unevaluatedProperties",
+	} {
 		if _, exists := object[keyword]; exists {
 			return false
 		}

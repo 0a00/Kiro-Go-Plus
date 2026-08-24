@@ -32,6 +32,7 @@ type sseToolState struct {
 	name         string
 	initialInput string
 	deltas       strings.Builder
+	stopped      bool
 }
 
 type sseStats struct {
@@ -52,14 +53,22 @@ func (r *runner) get(ctx context.Context, path string, authenticated bool) apiRe
 }
 
 func (r *runner) post(ctx context.Context, path string, payload interface{}, authenticated, stream bool) apiResponse {
+	return r.postWithSSEObserver(ctx, path, payload, authenticated, stream, nil)
+}
+
+func (r *runner) postWithSSEObserver(ctx context.Context, path string, payload interface{}, authenticated, stream bool, onEvent func()) apiResponse {
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return apiResponse{err: err}
 	}
-	return r.do(ctx, http.MethodPost, path, data, authenticated, stream)
+	return r.doWithSSEObserver(ctx, http.MethodPost, path, data, authenticated, stream, onEvent)
 }
 
 func (r *runner) do(ctx context.Context, method, path string, body []byte, authenticated, stream bool) apiResponse {
+	return r.doWithSSEObserver(ctx, method, path, body, authenticated, stream, nil)
+}
+
+func (r *runner) doWithSSEObserver(ctx context.Context, method, path string, body []byte, authenticated, stream bool, onEvent func()) apiResponse {
 	startedAt := time.Now()
 	var reader io.Reader
 	if body != nil {
@@ -88,7 +97,7 @@ func (r *runner) do(ctx context.Context, method, path string, body []byte, authe
 	defer resp.Body.Close()
 	result := apiResponse{statusCode: resp.StatusCode}
 	if stream && resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		result.stream, result.err = consumeSSE(resp.Body, startedAt)
+		result.stream, result.err = consumeSSEWithObserver(resp.Body, startedAt, onEvent)
 		result.total = time.Since(startedAt)
 		return result
 	}
@@ -109,25 +118,38 @@ func readBounded(reader io.Reader, limit int64) ([]byte, error) {
 }
 
 func consumeSSE(reader io.Reader, startedAt time.Time) (sseStats, error) {
+	return consumeSSEWithObserver(reader, startedAt, nil)
+}
+
+func consumeSSEWithObserver(reader io.Reader, startedAt time.Time, onEvent func()) (sseStats, error) {
 	stats := sseStats{tools: make(map[int]*sseToolState)}
-	scanner := bufio.NewScanner(io.LimitReader(reader, maxDiagnosticResponseBytes+1))
+	limited := &io.LimitedReader{R: reader, N: maxDiagnosticResponseBytes + 1}
+	scanner := bufio.NewScanner(limited)
 	scanner.Buffer(make([]byte, 64<<10), 4<<20)
 	eventName := ""
 	dataLines := make([]string, 0, 1)
-	flush := func() {
+	flush := func() error {
 		if len(dataLines) == 0 {
 			eventName = ""
-			return
+			return nil
 		}
 		data := strings.Join(dataLines, "\n")
-		stats.record(eventName, data, time.Since(startedAt))
+		if err := stats.record(eventName, data, time.Since(startedAt)); err != nil {
+			return err
+		}
+		if onEvent != nil {
+			onEvent()
+		}
 		eventName = ""
 		dataLines = dataLines[:0]
+		return nil
 	}
 	for scanner.Scan() {
 		line := scanner.Text()
 		if line == "" {
-			flush()
+			if err := flush(); err != nil {
+				return stats, err
+			}
 			continue
 		}
 		if strings.HasPrefix(line, ":") {
@@ -141,22 +163,30 @@ func consumeSSE(reader io.Reader, startedAt time.Time) (sseStats, error) {
 			dataLines = append(dataLines, strings.TrimSpace(strings.TrimPrefix(line, "data:")))
 		}
 	}
-	flush()
+	if err := flush(); err != nil {
+		return stats, err
+	}
 	if err := scanner.Err(); err != nil {
 		return stats, err
+	}
+	if limited.N == 0 {
+		return stats, fmt.Errorf("stream response exceeded %d bytes", maxDiagnosticResponseBytes)
 	}
 	return stats, nil
 }
 
-func (s *sseStats) record(eventName, data string, elapsed time.Duration) {
+func (s *sseStats) record(eventName, data string, elapsed time.Duration) error {
 	if strings.TrimSpace(data) == "[DONE]" {
 		s.events++
 		s.terminal = true
-		return
+		return nil
 	}
 	var event map[string]interface{}
 	if err := json.Unmarshal([]byte(data), &event); err != nil {
-		return
+		return fmt.Errorf("SSE event %q contained invalid JSON: %w", eventName, err)
+	}
+	if event == nil {
+		return fmt.Errorf("SSE event %q was not a JSON object", eventName)
 	}
 	s.events++
 	eventType := stringField(event, "type")
@@ -168,7 +198,14 @@ func (s *sseStats) record(eventName, data string, elapsed time.Duration) {
 		index := intField(event, "index")
 		block := mapField(event, "content_block")
 		if stringField(block, "type") == "tool_use" {
-			tool := &sseToolState{name: stringField(block, "name")}
+			if _, exists := s.tools[index]; exists {
+				return fmt.Errorf("tool content block %d started more than once", index)
+			}
+			name := stringField(block, "name")
+			if name == "" {
+				return fmt.Errorf("tool content block %d is missing a name", index)
+			}
+			tool := &sseToolState{name: name}
 			if input, ok := block["input"]; ok {
 				if encoded, err := json.Marshal(input); err == nil {
 					tool.initialInput = string(encoded)
@@ -200,13 +237,23 @@ func (s *sseStats) record(eventName, data string, elapsed time.Duration) {
 			partial := stringField(delta, "partial_json")
 			tool := s.tools[index]
 			if tool == nil {
-				tool = &sseToolState{}
-				s.tools[index] = tool
+				return fmt.Errorf("tool content block %d received input before start", index)
+			}
+			if tool.stopped {
+				return fmt.Errorf("tool content block %d received input after stop", index)
 			}
 			tool.deltas.WriteString(partial)
 			if partial != "" {
 				s.markSemantic(elapsed)
 			}
+		}
+	case "content_block_stop":
+		index := intField(event, "index")
+		if tool := s.tools[index]; tool != nil {
+			if tool.stopped {
+				return fmt.Errorf("tool content block %d stopped more than once", index)
+			}
+			tool.stopped = true
 		}
 	case "message_stop", "response.completed", "response.done":
 		s.terminal = true
@@ -225,6 +272,7 @@ func (s *sseStats) record(eventName, data string, elapsed time.Duration) {
 			s.terminal = true
 		}
 	}
+	return nil
 }
 
 func (s *sseStats) markSemantic(elapsed time.Duration) {
@@ -247,6 +295,18 @@ func (s sseStats) toolArguments(name string) (string, bool) {
 		return "", true
 	}
 	return "", false
+}
+
+func (s sseStats) hasSingleCompleteTool(name string) bool {
+	if s.toolCalls != 1 {
+		return false
+	}
+	for _, tool := range s.tools {
+		if tool.name == name {
+			return tool.stopped
+		}
+	}
+	return false
 }
 
 func mapField(value map[string]interface{}, key string) map[string]interface{} {

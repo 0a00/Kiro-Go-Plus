@@ -1342,6 +1342,8 @@ func parseEventStreamWithOptions(body io.Reader, callback *KiroStreamCallback, o
 	var sawCompletionSignal bool
 	var recoveredToolUse bool
 	var sawToolUse bool
+	var terminalToolBoundary toolUseRecoveryBoundary
+	var terminalToolCause error
 	originalOnToolUse := callback.OnToolUse
 	trackedCallback := *callback
 	trackedCallback.OnToolUse = func(toolUse KiroToolUse) {
@@ -1360,7 +1362,7 @@ func parseEventStreamWithOptions(body io.Reader, callback *KiroStreamCallback, o
 		if err != nil {
 			var streamErr *EventStreamError
 			if errors.As(err, &streamErr) && streamErr.Kind == EventStreamTruncated {
-				recovered := pendingToolUses.recoverCompletePrefix(callback, err, false, options)
+				recovered := pendingToolUses.recoverCompletePrefix(callback, toolUseRecoveryTruncatedFrame, err, options)
 				if recovered > 0 && pendingToolUses.empty() {
 					recoveredToolUse = true
 					break
@@ -1390,7 +1392,11 @@ func parseEventStreamWithOptions(body io.Reader, callback *KiroStreamCallback, o
 		lowerType := strings.ToLower(eventType)
 		if strings.EqualFold(strings.TrimSpace(eventType), "ContentLengthExceededException") {
 			sawCompletionSignal = true
-			if pendingToolUses.recoverCompletePrefix(callback, fmt.Errorf("%s completion signal", eventType), true, options) > 0 {
+			terminalToolBoundary, terminalToolCause = mergeToolUseRecoveryState(
+				terminalToolBoundary, terminalToolCause,
+				toolUseRecoveryOutputLimit, fmt.Errorf("%s completion signal", eventType),
+			)
+			if pendingToolUses.recoverCompletePrefix(callback, terminalToolBoundary, terminalToolCause, options) > 0 {
 				recoveredToolUse = true
 			}
 			if callback.OnStopReason != nil {
@@ -1468,17 +1474,11 @@ func parseEventStreamWithOptions(body io.Reader, callback *KiroStreamCallback, o
 			}
 		case "meteringEvent":
 			sawCompletionSignal = true
-			if pendingToolUses.recoverCompletePrefix(callback, fmt.Errorf("%s completion signal", eventType), true, options) > 0 {
-				recoveredToolUse = true
-			}
 			if usage, ok := event["usage"].(float64); ok {
 				totalCredits += usage
 			}
 		case "contextUsageEvent":
 			sawCompletionSignal = true
-			if pendingToolUses.recoverCompletePrefix(callback, fmt.Errorf("%s completion signal", eventType), true, options) > 0 {
-				recoveredToolUse = true
-			}
 			if pct, ok := event["contextUsagePercentage"].(float64); ok {
 				if callback.OnContextUsage != nil {
 					callback.OnContextUsage(pct)
@@ -1487,7 +1487,12 @@ func parseEventStreamWithOptions(body io.Reader, callback *KiroStreamCallback, o
 		case "metadataEvent":
 			if reason := firstStringField(event, "stopReason", "stop_reason"); reason != "" {
 				sawCompletionSignal = true
-				if pendingToolUses.recoverCompletePrefix(callback, fmt.Errorf("%s completion signal", eventType), true, options) > 0 {
+				boundary := toolUseRecoveryBoundaryForStopReason(reason)
+				terminalToolBoundary, terminalToolCause = mergeToolUseRecoveryState(
+					terminalToolBoundary, terminalToolCause,
+					boundary, fmt.Errorf("%s stop reason %q", eventType, reason),
+				)
+				if pendingToolUses.recoverCompletePrefix(callback, terminalToolBoundary, terminalToolCause, options) > 0 {
 					recoveredToolUse = true
 				}
 				if callback.OnStopReason != nil {
@@ -1498,11 +1503,17 @@ func parseEventStreamWithOptions(body io.Reader, callback *KiroStreamCallback, o
 	}
 
 	if state := pendingToolUses.first(); state != nil {
-		if pendingToolUses.recoverCompletePrefix(callback, io.EOF, true, options) > 0 {
+		boundary := terminalToolBoundary
+		cause := terminalToolCause
+		if boundary == toolUseRecoveryNone {
+			boundary = toolUseRecoveryCleanEOF
+			cause = io.EOF
+		}
+		if pendingToolUses.recoverCompletePrefix(callback, boundary, cause, options) > 0 {
 			recoveredToolUse = true
 		}
 		if state = pendingToolUses.first(); state != nil {
-			return incompleteToolUseStreamError(state, io.EOF)
+			return incompleteToolUseStreamError(state, cause)
 		}
 	}
 
@@ -1786,6 +1797,80 @@ type pendingToolUseSet struct {
 	lastID string
 }
 
+type toolUseRecoveryBoundary uint8
+
+const (
+	toolUseRecoveryNone toolUseRecoveryBoundary = iota
+	toolUseRecoveryTruncatedFrame
+	toolUseRecoveryCleanEOF
+	toolUseRecoveryExplicitToolUse
+	toolUseRecoveryOutputLimit
+	toolUseRecoveryConflictingStop
+)
+
+func toolUseRecoveryBoundaryForStopReason(reason string) toolUseRecoveryBoundary {
+	normalized := strings.ToLower(strings.TrimSpace(reason))
+	switch normalized {
+	case "tool_use", "tooluse":
+		return toolUseRecoveryExplicitToolUse
+	case "max_tokens", "max_token", "max_output_tokens", "length":
+		return toolUseRecoveryOutputLimit
+	default:
+		return toolUseRecoveryConflictingStop
+	}
+}
+
+func mergeToolUseRecoveryBoundary(current, next toolUseRecoveryBoundary) toolUseRecoveryBoundary {
+	if current == toolUseRecoveryConflictingStop || next == toolUseRecoveryConflictingStop {
+		return toolUseRecoveryConflictingStop
+	}
+	if current == toolUseRecoveryOutputLimit || next == toolUseRecoveryOutputLimit {
+		return toolUseRecoveryOutputLimit
+	}
+	if next != toolUseRecoveryNone {
+		return next
+	}
+	return current
+}
+
+func mergeToolUseRecoveryState(current toolUseRecoveryBoundary, currentCause error, next toolUseRecoveryBoundary, nextCause error) (toolUseRecoveryBoundary, error) {
+	merged := mergeToolUseRecoveryBoundary(current, next)
+	if currentCause == nil || merged != current || merged == next {
+		return merged, nextCause
+	}
+	return merged, currentCause
+}
+
+func (b toolUseRecoveryBoundary) allowsCompleteArguments() bool {
+	switch b {
+	case toolUseRecoveryTruncatedFrame, toolUseRecoveryCleanEOF, toolUseRecoveryExplicitToolUse, toolUseRecoveryOutputLimit:
+		return true
+	default:
+		return false
+	}
+}
+
+func (b toolUseRecoveryBoundary) allowsEmptyArguments() bool {
+	return b == toolUseRecoveryCleanEOF || b == toolUseRecoveryExplicitToolUse
+}
+
+func (b toolUseRecoveryBoundary) description() string {
+	switch b {
+	case toolUseRecoveryTruncatedFrame:
+		return "truncated frame"
+	case toolUseRecoveryCleanEOF:
+		return "clean EOF"
+	case toolUseRecoveryExplicitToolUse:
+		return "explicit tool_use stop"
+	case toolUseRecoveryOutputLimit:
+		return "output limit"
+	case toolUseRecoveryConflictingStop:
+		return "conflicting stop reason"
+	default:
+		return "unknown boundary"
+	}
+}
+
 func (p *pendingToolUseSet) empty() bool {
 	return p == nil || len(p.order) == 0
 }
@@ -1868,11 +1953,12 @@ func (p *pendingToolUseSet) flushStoppedPrefix(callback *KiroStreamCallback) err
 	return nil
 }
 
-func (p *pendingToolUseSet) recoverCompletePrefix(callback *KiroStreamCallback, cause error, allowEmpty bool, options eventStreamParseOptions) int {
+func (p *pendingToolUseSet) recoverCompletePrefix(callback *KiroStreamCallback, boundary toolUseRecoveryBoundary, cause error, options eventStreamParseOptions) int {
 	recovered := 0
 	for state := p.first(); state != nil; state = p.first() {
-		emptyInput := allowEmpty && state.InputBuffer.Len() == 0 && options.allowsEmptyToolInput(state.Name)
-		if !state.Stopped && !toolUseArgumentsComplete(state) && !emptyInput {
+		completeInput := boundary.allowsCompleteArguments() && toolUseArgumentsComplete(state)
+		emptyInput := boundary.allowsEmptyArguments() && state.InputBuffer.Len() == 0 && options.allowsEmptyToolInput(state.Name)
+		if !state.Stopped && !completeInput && !emptyInput {
 			break
 		}
 		if err := finishToolUse(state, callback); err != nil {
@@ -1881,8 +1967,8 @@ func (p *pendingToolUseSet) recoverCompletePrefix(callback *KiroStreamCallback, 
 		p.removeFirst()
 		recovered++
 		if !state.Stopped {
-			reason := "clean EOF"
-			if cause != nil && cause != io.EOF {
+			reason := boundary.description()
+			if cause != nil && cause != io.EOF && boundary != toolUseRecoveryCleanEOF {
 				reason = cause.Error()
 			}
 			if emptyInput {

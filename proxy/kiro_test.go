@@ -157,7 +157,7 @@ func TestParseEventStreamWaitsForRealToolIDBeforeStreaming(t *testing.T) {
 	}
 }
 
-func TestParseEventStreamRecoversCompleteToolOnCompletionSignal(t *testing.T) {
+func TestParseEventStreamRecoversCompleteToolAtCleanEOFAfterTelemetry(t *testing.T) {
 	stream := bytes.NewReader(bytes.Join([][]byte{
 		awsEventStreamFrame(t, "toolUseEvent", map[string]interface{}{
 			"toolUseId": "toolu_completion",
@@ -171,7 +171,7 @@ func TestParseEventStreamRecoversCompleteToolOnCompletionSignal(t *testing.T) {
 	if err := parseEventStream(stream, &KiroStreamCallback{
 		OnToolUse: func(toolUse KiroToolUse) { toolUses = append(toolUses, toolUse) },
 	}); err != nil {
-		t.Fatalf("recover tool on completion signal: %v", err)
+		t.Fatalf("recover complete tool at clean EOF: %v", err)
 	}
 	if len(toolUses) != 1 || toolUses[0].ToolUseID != "toolu_completion" {
 		t.Fatalf("unexpected recovered tool use: %#v", toolUses)
@@ -247,7 +247,10 @@ func TestParseEventStreamRecoversSchemaDeclaredZeroArgumentToolOnCompletion(t *t
 		}),
 		awsEventStreamFrame(t, "metadataEvent", map[string]interface{}{"stopReason": "tool_use"}),
 	}, nil))
-	options := eventStreamParseOptionsForPayload(payloadWithTestTool(toolName, map[string]interface{}{"type": "object"}))
+	options := eventStreamParseOptionsForPayload(payloadWithTestTool(toolName, map[string]interface{}{
+		"type":       "object",
+		"properties": map[string]interface{}{},
+	}))
 
 	var toolUses []KiroToolUse
 	err := parseEventStreamWithOptions(stream, &KiroStreamCallback{
@@ -258,6 +261,89 @@ func TestParseEventStreamRecoversSchemaDeclaredZeroArgumentToolOnCompletion(t *t
 	}
 	if len(toolUses) != 1 || len(toolUses[0].Input) != 0 {
 		t.Fatalf("unexpected recovered tool use: %#v", toolUses)
+	}
+}
+
+func TestParseEventStreamDoesNotRecoverZeroArgumentToolAtIncompatibleTerminalBoundary(t *testing.T) {
+	const toolName = "mcpMemoryReadGraphH123"
+	toolFrame := awsEventStreamFrame(t, "toolUseEvent", map[string]interface{}{
+		"toolUseId": "toolu_zero",
+		"name":      toolName,
+	})
+	options := eventStreamParseOptionsForPayload(payloadWithTestTool(toolName, map[string]interface{}{
+		"type":       "object",
+		"properties": map[string]interface{}{},
+	}))
+
+	tests := []struct {
+		name     string
+		terminal []byte
+	}{
+		{name: "end turn", terminal: awsEventStreamFrame(t, "metadataEvent", map[string]interface{}{"stopReason": "end_turn"})},
+		{name: "max tokens metadata", terminal: awsEventStreamFrame(t, "metadataEvent", map[string]interface{}{"stopReason": "max_tokens"})},
+		{name: "max output tokens metadata", terminal: awsEventStreamFrame(t, "metadataEvent", map[string]interface{}{"stopReason": "max_output_tokens"})},
+		{name: "content length exception", terminal: awsEventStreamExceptionFrame(t, "ContentLengthExceededException", map[string]interface{}{"message": "limit"})},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var toolUses []KiroToolUse
+			err := parseEventStreamWithOptions(bytes.NewReader(bytes.Join([][]byte{toolFrame, tc.terminal}, nil)), &KiroStreamCallback{
+				OnToolUse: func(toolUse KiroToolUse) { toolUses = append(toolUses, toolUse) },
+			}, options)
+			var streamErr *EventStreamError
+			if !errors.As(err, &streamErr) || streamErr.Kind != EventStreamIncompleteToolUse {
+				t.Fatalf("expected incomplete zero-argument tool, got %#v", err)
+			}
+			if len(toolUses) != 0 {
+				t.Fatalf("incompatible terminal boundary emitted tool use: %#v", toolUses)
+			}
+		})
+	}
+}
+
+func TestParseEventStreamTelemetryDoesNotFinalizePendingZeroArgumentTool(t *testing.T) {
+	const toolName = "mcpMemoryReadGraphH123"
+	toolFrame := awsEventStreamFrame(t, "toolUseEvent", map[string]interface{}{
+		"toolUseId": "toolu_zero",
+		"name":      toolName,
+	})
+	telemetry := awsEventStreamFrame(t, "meteringEvent", map[string]interface{}{"usage": 1.0})
+	corrupt := awsEventStreamFrame(t, "contextUsageEvent", map[string]interface{}{"contextUsagePercentage": 1.0})
+	corrupt[len(corrupt)-1] ^= 0xff
+	options := eventStreamParseOptionsForPayload(payloadWithTestTool(toolName, map[string]interface{}{
+		"type":       "object",
+		"properties": map[string]interface{}{},
+	}))
+
+	var toolUses []KiroToolUse
+	err := parseEventStreamWithOptions(bytes.NewReader(bytes.Join([][]byte{toolFrame, telemetry, corrupt}, nil)), &KiroStreamCallback{
+		OnToolUse: func(toolUse KiroToolUse) { toolUses = append(toolUses, toolUse) },
+	}, options)
+	var streamErr *EventStreamError
+	if !errors.As(err, &streamErr) || streamErr.Kind != EventStreamMessageCRCMismatch {
+		t.Fatalf("expected trailing CRC failure, got %#v", err)
+	}
+	if len(toolUses) != 0 {
+		t.Fatalf("telemetry finalized a pending zero-argument tool: %#v", toolUses)
+	}
+}
+
+func TestMergeToolUseRecoveryStateKeepsDominantCause(t *testing.T) {
+	outputLimitCause := errors.New("output limit")
+	toolUseCause := errors.New("tool use")
+	boundary, cause := mergeToolUseRecoveryState(
+		toolUseRecoveryOutputLimit, outputLimitCause,
+		toolUseRecoveryExplicitToolUse, toolUseCause,
+	)
+	if boundary != toolUseRecoveryOutputLimit || !errors.Is(cause, outputLimitCause) {
+		t.Fatalf("dominant recovery state was replaced: boundary=%v cause=%v", boundary, cause)
+	}
+
+	conflictCause := errors.New("conflicting stop")
+	boundary, cause = mergeToolUseRecoveryState(boundary, cause, toolUseRecoveryConflictingStop, conflictCause)
+	if boundary != toolUseRecoveryConflictingStop || !errors.Is(cause, conflictCause) {
+		t.Fatalf("stronger recovery state was not applied: boundary=%v cause=%v", boundary, cause)
 	}
 }
 
