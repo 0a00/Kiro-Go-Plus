@@ -1,5 +1,5 @@
 {
-  "version": "1.2.48",
-  "changelog": "Add a comprehensive local development test system with protocol/model matrices, detailed stream timing, tool and MCP roundtrips, WebSearch scenarios, concurrency staircases, bounded soak checks, fault fixtures, fuzzing, benchmarks, and stronger CI gates.\n新增完整本地开发测试体系：协议/模型矩阵、细分流式时序、工具与 MCP 往返、WebSearch 场景、并发阶梯、有限额 soak、故障夹具、fuzz、基准及更严格的 CI 门禁。",
+  "version": "1.2.49",
+  "changelog": "Expand development verification with Responses tool roundtrips, cache and multimodal accounting, cross-protocol thinking and output-limit checks, long-stream diagnostics, mixed-protocol load tests, deterministic authentication flows, richer reports, Docker smoke tests, and weekly fuzzing.\n扩展开发验证体系：增加 Responses 工具往返、缓存与多模态计费、跨协议思考与输出上限、长流诊断、混合协议负载、确定性认证流程、增强报告、Docker 冒烟测试及每周 fuzz。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }

@@ -208,8 +208,9 @@ The display name is Kiro-Go Plus. The Go module, binary, Compose service, and da
 
 Run `bash scripts/dev-test.sh quick` for deterministic offline checks or
 `bash scripts/dev-test.sh full` before deployment. Opt-in live modes provide a
-three-protocol model matrix, detailed stream timing, tool/MCP roundtrips,
-WebSearch, concurrency staircases, and bounded soak tests. See
+three-protocol model matrix, detailed stream and heartbeat timing,
+tool/MCP/Responses roundtrips, cache and multimodal accounting, WebSearch,
+mixed-protocol concurrency staircases, and bounded soak tests. See
 [Local Development Testing](docs/development-testing.md).
 
 ## Per-account IPv6 Egress

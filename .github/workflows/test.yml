@@ -17,10 +17,17 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
         with:
-          go-version: '1.23.x'
+          go-version: '1.26.7'
           cache: true
       - run: go mod verify
-      - run: go test -shuffle=on -timeout=10m ./...
+      - run: go test -shuffle=on -timeout=10m -covermode=atomic -coverprofile=coverage.out ./...
+      - run: go tool cover -func=coverage.out
+      - uses: actions/upload-artifact@v6
+        with:
+          name: go-coverage
+          path: coverage.out
+          if-no-files-found: error
+          retention-days: 14
       - run: go vet ./...
       - run: go build ./...
       - run: test -z "$(gofmt -l .)"
@@ -36,7 +43,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
         with:
-          go-version: '1.23.x'
+          go-version: '1.26.7'
           cache: true
       - run: go test -race -shuffle=on -timeout=20m ./...
 
@@ -46,7 +53,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
         with:
-          go-version: '1.23.x'
+          go-version: '1.26.7'
           cache: true
       - run: GOARCH=386 go test -shuffle=on -timeout=10m ./proxy ./config ./pool ./internal/httpbody
 
@@ -56,7 +63,35 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
         with:
-          go-version: '1.23.x'
+          go-version: '1.26.7'
           cache: true
       - run: go mod verify
-      - run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
+      - run: go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
+
+  docker-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build image
+        run: docker build --tag kiro-go-plus:ci .
+      - name: Start container and verify health
+        run: |
+          set -euo pipefail
+          master_key="$(openssl rand -base64 32)"
+          cleanup() {
+            docker logs kiro-go-plus-ci 2>/dev/null || true
+            docker rm -f kiro-go-plus-ci >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          docker run --detach --name kiro-go-plus-ci \
+            --env ADMIN_PASSWORD=ci-admin-password \
+            --env KIRO_MASTER_KEY="${master_key}" \
+            --env KIRO_LISTEN_HOST=0.0.0.0 \
+            kiro-go-plus:ci
+          for attempt in $(seq 1 30); do
+            if docker exec kiro-go-plus-ci wget -q -O - http://127.0.0.1:8080/health | grep -q '"status":"ok"'; then
+              exit 0
+            fi
+            sleep 1
+          done
+          exit 1

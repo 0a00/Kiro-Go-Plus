@@ -30,15 +30,22 @@ go run ./cmd/devcheck --list-scenarios
 ```
 
 `smoke` checks health, models, authentication, Anthropic JSON, and SSE. `full`
-adds thinking, Skill instruction transport, Anthropic/Chat tool-result
-roundtrips, MCP-shaped zero-argument roundtrips, Chat and Responses streaming,
+adds thinking on all three protocols, Skill instruction transport,
+Anthropic/Chat/Responses tool-result roundtrips, Responses custom tools,
+MCP-shaped zero-argument roundtrips, prompt-cache cold/create/read behavior,
+same-dimension image accounting, output-limit semantics, a bounded long stream,
 cancellation recovery, and optional WebSearch. Select expensive cases with
-`--scenarios id,id`; enable search with `--web-search`.
+`--scenarios id,id`; enable search with `--web-search`. Cache and reasoning
+checks warn instead of failing when the selected upstream accounting mode or
+model intentionally hides those fields.
 
 Each stream result separates response-header time, first valid SSE event, first
 semantic output (TTFT), first text, first thinking, first tool output, maximum
-event gap, and total duration. JSON reports use mode `0600` and never include the
-API key.
+protocol-event gap, maximum wire-activity gap, SSE heartbeat count, and total
+duration. Results also expose the downstream request ID, stop reason, and
+available input/output/reasoning/cache token fields. JSON reports use mode
+`0600`, include the service version and a credential-free test-settings
+fingerprint, and never include the API key, request body, image, or tool arguments.
 
 To validate actual client-side Skill discovery and MCP process execution, not
 just proxy protocol transport, run the isolated Claude Code harness:
@@ -64,11 +71,20 @@ bash scripts/dev-test.sh soak --concurrency 10 --soak-duration 10m \
 ```
 
 The matrix runs Anthropic Messages, Chat Completions, and Responses in stream
-and non-stream modes for every selected model. Staircase sends at least one
-request per worker at each level. Soak scheduling stops at the first duration,
-request, or requested-output-token cap and lets in-flight requests finish.
-Reports include p50/p95/p99 and failure categories such as `http_429`,
-`http_5xx`, `timeout`, `transport`, `empty_response`, and `stream_protocol`.
+and non-stream modes for every selected model. Load, staircase, and soak probes
+rotate across all three protocols and both transfer modes. Staircase sends at
+least one request per worker at each level. Soak scheduling stops at the first
+duration, request, or requested-output-token cap and lets in-flight requests
+finish. Reports include distinct request-ID counts, p50/p95/p99, per-protocol
+successes, and categorized failures such as `anthropic_http_429`,
+`openai_timeout`, `responses_empty_response`, and `responses_stream_protocol`.
+
+## Continuous Integration
+
+Pull requests run shuffled tests, race detection, Go 386 compatibility,
+`govulncheck`, a Docker health smoke test, and upload a 14-day coverage artifact.
+A weekly workflow runs every bounded fuzz target for 20 seconds. CI never runs
+live Kiro checks because they consume quota and depend on external availability.
 
 ## Security and Boundaries
 

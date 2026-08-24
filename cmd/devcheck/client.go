@@ -26,7 +26,28 @@ type apiResponse struct {
 	stream     sseStats
 	headers    time.Duration
 	total      time.Duration
+	requestID  string
 	err        error
+}
+
+type tokenUsage struct {
+	inputTokens         int
+	outputTokens        int
+	reasoningTokens     int
+	cacheReadTokens     int
+	cacheCreationTokens int
+}
+
+func (u *tokenUsage) merge(other tokenUsage) {
+	u.inputTokens = max(u.inputTokens, other.inputTokens)
+	u.outputTokens = max(u.outputTokens, other.outputTokens)
+	u.reasoningTokens = max(u.reasoningTokens, other.reasoningTokens)
+	u.cacheReadTokens = max(u.cacheReadTokens, other.cacheReadTokens)
+	u.cacheCreationTokens = max(u.cacheCreationTokens, other.cacheCreationTokens)
+}
+
+func (u tokenUsage) anthropicInputTotal() int {
+	return u.inputTokens + u.cacheReadTokens + u.cacheCreationTokens
 }
 
 type sseToolState struct {
@@ -44,6 +65,7 @@ type sseStats struct {
 	toolCalls        int
 	serverToolCalls  int
 	webSearchResults int
+	heartbeats       int
 	contentChars     int
 	thinkingChars    int
 	firstEvent       time.Duration
@@ -53,6 +75,9 @@ type sseStats struct {
 	firstTool        time.Duration
 	lastEvent        time.Duration
 	maxEventGap      time.Duration
+	lastActivity     time.Duration
+	maxActivityGap   time.Duration
+	activities       int
 	semanticOutput   bool
 	textOutput       bool
 	thinkingOutput   bool
@@ -61,6 +86,8 @@ type sseStats struct {
 	terminalType     string
 	incomplete       bool
 	errorEvent       string
+	stopReason       string
+	usage            tokenUsage
 	tools            map[int]*sseToolState
 }
 
@@ -111,7 +138,11 @@ func (r *runner) doWithSSEObserver(ctx context.Context, method, path string, bod
 		return apiResponse{total: time.Since(startedAt), err: err}
 	}
 	defer resp.Body.Close()
-	result := apiResponse{statusCode: resp.StatusCode, headers: time.Since(startedAt)}
+	result := apiResponse{
+		statusCode: resp.StatusCode,
+		headers:    time.Since(startedAt),
+		requestID:  strings.TrimSpace(resp.Header.Get("X-Request-Id")),
+	}
 	if stream && resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		result.stream, result.err = consumeSSEWithObserver(resp.Body, startedAt, onEvent)
 		result.total = time.Since(startedAt)
@@ -170,6 +201,7 @@ func consumeSSEWithObserver(reader io.Reader, startedAt time.Time, onEvent func(
 			continue
 		}
 		if strings.HasPrefix(line, ":") {
+			stats.noteHeartbeat(time.Since(startedAt))
 			continue
 		}
 		if strings.HasPrefix(line, "event:") {
@@ -205,6 +237,7 @@ func (s *sseStats) record(eventName, data string, elapsed time.Duration) error {
 	if event == nil {
 		return fmt.Errorf("SSE event %q was not a JSON object", eventName)
 	}
+	s.usage.merge(extractTokenUsage(event))
 	s.noteEvent(elapsed)
 	eventType := stringField(event, "type")
 	if eventType == "" {
@@ -282,14 +315,20 @@ func (s *sseStats) record(eventName, data string, elapsed time.Duration) error {
 	case "message_stop", "response.completed", "response.done", "response.incomplete":
 		if eventType == "response.incomplete" {
 			s.incomplete = true
+			response := mapField(event, "response")
+			details := mapField(response, "incomplete_details")
+			s.stopReason = firstNonEmpty(stringField(details, "reason"), "incomplete")
 		}
 		if err := s.markTerminal(eventType); err != nil {
 			return err
 		}
 	case "message_delta":
 		delta := mapField(event, "delta")
-		if reason := strings.ToLower(stringField(delta, "stop_reason")); reason == "max_tokens" || reason == "length" {
-			s.incomplete = true
+		if reason := strings.ToLower(stringField(delta, "stop_reason")); reason != "" {
+			s.stopReason = reason
+			if reason == "max_tokens" || reason == "length" {
+				s.incomplete = true
+			}
 		}
 	case "response.output_text.delta":
 		text := stringField(event, "delta")
@@ -388,6 +427,7 @@ func (s *sseStats) record(eventName, data string, elapsed time.Duration) error {
 		}
 		if finish, exists := choice["finish_reason"]; exists && finish != nil {
 			finishReason := fmt.Sprint(finish)
+			s.stopReason = finishReason
 			if strings.EqualFold(finishReason, "length") || strings.EqualFold(finishReason, "max_tokens") {
 				s.incomplete = true
 			}
@@ -402,7 +442,50 @@ func (s *sseStats) record(eventName, data string, elapsed time.Duration) error {
 	return nil
 }
 
+func extractTokenUsage(value interface{}) tokenUsage {
+	var result tokenUsage
+	collectTokenUsage(value, &result)
+	return result
+}
+
+func collectTokenUsage(value interface{}, result *tokenUsage) {
+	switch typed := value.(type) {
+	case map[string]interface{}:
+		if rawUsage, ok := typed["usage"].(map[string]interface{}); ok {
+			result.merge(tokenUsageFromMap(rawUsage))
+		}
+		for key, child := range typed {
+			if key != "usage" {
+				collectTokenUsage(child, result)
+			}
+		}
+	case []interface{}:
+		for _, child := range typed {
+			collectTokenUsage(child, result)
+		}
+	}
+}
+
+func tokenUsageFromMap(usage map[string]interface{}) tokenUsage {
+	result := tokenUsage{
+		inputTokens:         max(intField(usage, "input_tokens"), intField(usage, "prompt_tokens")),
+		outputTokens:        max(intField(usage, "output_tokens"), intField(usage, "completion_tokens")),
+		cacheReadTokens:     intField(usage, "cache_read_input_tokens"),
+		cacheCreationTokens: intField(usage, "cache_creation_input_tokens"),
+	}
+	for _, key := range []string{"input_tokens_details", "prompt_tokens_details"} {
+		details := mapField(usage, key)
+		result.cacheReadTokens = max(result.cacheReadTokens, intField(details, "cached_tokens"))
+		result.cacheCreationTokens = max(result.cacheCreationTokens, intField(details, "cache_creation_tokens"))
+	}
+	for _, key := range []string{"output_tokens_details", "completion_tokens_details"} {
+		result.reasoningTokens = max(result.reasoningTokens, intField(mapField(usage, key), "reasoning_tokens"))
+	}
+	return result
+}
+
 func (s *sseStats) noteEvent(elapsed time.Duration) {
+	s.noteActivity(elapsed)
 	if s.events == 0 {
 		s.firstEvent = elapsed
 	} else if gap := elapsed - s.lastEvent; gap > s.maxEventGap {
@@ -410,6 +493,21 @@ func (s *sseStats) noteEvent(elapsed time.Duration) {
 	}
 	s.lastEvent = elapsed
 	s.events++
+}
+
+func (s *sseStats) noteHeartbeat(elapsed time.Duration) {
+	s.noteActivity(elapsed)
+	s.heartbeats++
+}
+
+func (s *sseStats) noteActivity(elapsed time.Duration) {
+	if s.activities > 0 {
+		if gap := elapsed - s.lastActivity; gap > s.maxActivityGap {
+			s.maxActivityGap = gap
+		}
+	}
+	s.lastActivity = elapsed
+	s.activities++
 }
 
 func (s *sseStats) markTerminal(kind string) error {

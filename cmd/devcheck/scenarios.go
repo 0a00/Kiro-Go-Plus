@@ -52,13 +52,20 @@ func (r *runner) runSuite(ctx context.Context) {
 	r.runIf("anthropic-non-stream", ctx, r.runClaudeNonStream)
 	r.runIf("anthropic-stream", ctx, r.runClaudeStream)
 	r.runIf("thinking-stream", ctx, r.runThinkingStream)
+	r.runIf("thinking-protocols", ctx, r.runThinkingProtocols)
 	r.runIf("skill-context", ctx, r.runSkillContext)
 	r.runIf("anthropic-tool-roundtrip", ctx, r.runAnthropicFunction)
 	r.runIf("mcp-roundtrip", ctx, r.runMCPZeroArgument)
 	r.runIf("chat-tool-roundtrip", ctx, r.runOpenAIFunction)
+	r.runIf("responses-tool-roundtrip", ctx, r.runResponsesFunction)
+	r.runIf("responses-custom-tool", ctx, r.runResponsesCustomTool)
 	r.runIf("chat-stream", ctx, r.runOpenAIStream)
 	r.runIf("responses-non-stream", ctx, r.runResponses)
 	r.runIf("responses-stream", ctx, r.runResponsesStream)
+	r.runIf("cache-reuse", ctx, r.runPromptCacheReuse)
+	r.runIf("multimodal-accounting", ctx, r.runMultimodalAccounting)
+	r.runIf("output-limit", ctx, r.runOutputLimit)
+	r.runIf("long-stream", ctx, r.runLongStream)
 	if len(r.opts.scenarioFilter) > 0 && r.scenarioEnabled("protocol-matrix") {
 		r.runProtocolMatrix(ctx)
 	}
@@ -116,12 +123,20 @@ func (r *runner) runHealth(parent context.Context) {
 	defer cancel()
 	response := r.get(ctx, "/health", false)
 	result := responseScenarioResult("health", "http", "", response, false)
-	if !validJSONResponse(response) || !strings.Contains(string(response.body), "\"status\":\"ok\"") {
+	var health struct {
+		Status  string `json:"status"`
+		Version string `json:"version"`
+	}
+	if !validJSONResponse(response) || json.Unmarshal(response.body, &health) != nil || health.Status != "ok" {
 		result.Status = statusFail
 		result.Detail = responseErrorDetail(response)
 	} else {
 		result.Status = statusPass
+		r.serverVersion = strings.TrimSpace(health.Version)
 		result.Detail = "service is ready"
+		if r.serverVersion != "" {
+			result.Detail += "; version=" + r.serverVersion
+		}
 	}
 	r.add(result)
 }
@@ -656,11 +671,13 @@ func (r *runner) runSoak(parent context.Context) {
 }
 
 type loadSample struct {
-	duration int64
-	ttft     int64
-	stream   bool
-	success  bool
-	category string
+	duration  int64
+	ttft      int64
+	stream    bool
+	protocol  string
+	requestID string
+	success   bool
+	category  string
 }
 
 func (r *runner) executeLoad(parent context.Context, concurrency, requests, maxTokens int) []loadSample {
@@ -676,12 +693,11 @@ func (r *runner) executeLoad(parent context.Context, concurrency, requests, maxT
 		go func() {
 			defer workers.Done()
 			for index := range jobs {
-				stream := index%2 == 1
+				probe := buildLoadProbe(r.model, index, maxTokens)
 				requestCtx, requestCancel := r.scenarioContext(ctx)
-				payload := claudePayload(r.model, stream, fmt.Sprintf("Reply with OK %d.", index), maxTokens)
-				response := r.post(requestCtx, "/v1/messages", payload, true, stream)
+				response := r.post(requestCtx, probe.path, probe.payload, true, probe.stream)
 				requestCancel()
-				results <- classifyLoadSample(response, stream)
+				results <- classifyLoadSample(response, probe.stream, probe.protocol)
 			}
 		}()
 	}
@@ -715,11 +731,11 @@ func (r *runner) executeSoak(parent context.Context, concurrency, target, maxTok
 		go func() {
 			defer workers.Done()
 			for index := range jobs {
-				stream := index%2 == 1
+				probe := buildLoadProbe(r.model, index, maxTokens)
 				requestCtx, requestCancel := r.scenarioContext(parent)
-				response := r.post(requestCtx, "/v1/messages", claudePayload(r.model, stream, fmt.Sprintf("Reply with OK %d.", index), maxTokens), true, stream)
+				response := r.post(requestCtx, probe.path, probe.payload, true, probe.stream)
 				requestCancel()
-				results <- classifyLoadSample(response, stream)
+				results <- classifyLoadSample(response, probe.stream, probe.protocol)
 			}
 		}()
 	}
@@ -752,8 +768,12 @@ func (r *runner) executeSoak(parent context.Context, concurrency, target, maxTok
 	return samples, schedule.count, schedule.durationReached
 }
 
-func classifyLoadSample(response apiResponse, stream bool) loadSample {
-	sample := loadSample{duration: response.total.Milliseconds(), stream: stream}
+func classifyLoadSample(response apiResponse, stream bool, protocols ...string) loadSample {
+	protocol := "anthropic"
+	if len(protocols) > 0 && protocols[0] != "" {
+		protocol = protocols[0]
+	}
+	sample := loadSample{duration: response.total.Milliseconds(), stream: stream, protocol: protocol, requestID: response.requestID}
 	if stream {
 		sample.ttft = response.stream.firstSemantic.Milliseconds()
 	}
@@ -790,6 +810,8 @@ func buildLoadResult(name, model string, concurrency, expected int, samples []lo
 	streamSuccesses := 0
 	nonStreamSuccesses := 0
 	failures := make(map[string]int)
+	protocolSuccesses := make(map[string]int)
+	requestIDs := make(map[string]struct{})
 	for _, sample := range samples {
 		durations = append(durations, sample.duration)
 		if sample.ttft > 0 {
@@ -800,13 +822,21 @@ func buildLoadResult(name, model string, concurrency, expected int, samples []lo
 		}
 		if sample.success {
 			successes++
+			protocolSuccesses[sample.protocol]++
 			if sample.stream {
 				streamSuccesses++
 			} else {
 				nonStreamSuccesses++
 			}
 		} else {
-			failures[sample.category]++
+			category := sample.category
+			if sample.protocol != "" {
+				category = sample.protocol + "_" + category
+			}
+			failures[category]++
+		}
+		if sample.requestID != "" {
+			requestIDs[sample.requestID] = struct{}{}
 		}
 	}
 	if missing := expected - len(samples); missing > 0 {
@@ -814,7 +844,8 @@ func buildLoadResult(name, model string, concurrency, expected int, samples []lo
 	}
 	result := scenarioResult{
 		Name: name, Protocol: "load", Model: model, Requests: expected, Successes: successes,
-		FailureCategories: failures, P50Millis: percentile(durations, 0.50), P95Millis: percentile(durations, 0.95), P99Millis: percentile(durations, 0.99),
+		DistinctRequestIDs: len(requestIDs),
+		FailureCategories:  failures, P50Millis: percentile(durations, 0.50), P95Millis: percentile(durations, 0.95), P99Millis: percentile(durations, 0.99),
 	}
 	result.TotalMillis = result.P95Millis
 	result.Detail = fmt.Sprintf(
@@ -824,6 +855,7 @@ func buildLoadResult(name, model string, concurrency, expected int, samples []lo
 		nonStreamSuccesses, len(samples)-streamRequests,
 		concurrency, result.P50Millis, result.P95Millis, result.P99Millis, percentile(ttfts, 0.95), formatFailureCategories(failures),
 	)
+	result.Detail += "; protocols=" + formatFailureCategories(protocolSuccesses)
 	if successes == expected {
 		result.Status = statusPass
 	} else {
@@ -854,15 +886,23 @@ func formatFailureCategories(categories map[string]int) string {
 func streamScenarioResult(name, protocol, model string, response apiResponse) scenarioResult {
 	result := responseScenarioResult(name, protocol, model, response, true)
 	result.Events = response.stream.events
+	result.Heartbeats = response.stream.heartbeats
 	result.ContentDeltas = response.stream.contentDeltas
 	result.ThinkingDeltas = response.stream.thinkingDeltas
 	result.ToolCalls = response.stream.toolCalls
+	result.StopReason = response.stream.stopReason
+	result.InputTokens = response.stream.usage.inputTokens
+	result.OutputTokens = response.stream.usage.outputTokens
+	result.ReasoningTokens = response.stream.usage.reasoningTokens
+	result.CacheReadTokens = response.stream.usage.cacheReadTokens
+	result.CacheCreateTokens = response.stream.usage.cacheCreationTokens
 	result.FirstEventMillis = response.stream.firstEvent.Milliseconds()
 	result.TTFTMillis = response.stream.firstSemantic.Milliseconds()
 	result.FirstTextMillis = response.stream.firstText.Milliseconds()
 	result.FirstThinkMillis = response.stream.firstThinking.Milliseconds()
 	result.FirstToolMillis = response.stream.firstTool.Milliseconds()
 	result.MaxStreamGapMS = response.stream.maxEventGap.Milliseconds()
+	result.MaxWireGapMS = response.stream.maxActivityGap.Milliseconds()
 	switch {
 	case response.err != nil:
 		result.Status = statusFail
@@ -891,10 +931,26 @@ func streamScenarioResult(name, protocol, model string, response apiResponse) sc
 }
 
 func responseScenarioResult(name, protocol, model string, response apiResponse, stream bool) scenarioResult {
-	return scenarioResult{
+	usage := extractTokenUsageFromBody(response.body)
+	result := scenarioResult{
 		Name: name, Protocol: protocol, Model: model, Stream: stream,
-		HTTPStatus: response.statusCode, ResponseHeaderMS: response.headers.Milliseconds(), TotalMillis: response.total.Milliseconds(),
+		HTTPStatus: response.statusCode, RequestID: response.requestID,
+		ResponseHeaderMS: response.headers.Milliseconds(), TotalMillis: response.total.Milliseconds(),
+		InputTokens: usage.inputTokens, OutputTokens: usage.outputTokens, ReasoningTokens: usage.reasoningTokens,
+		CacheReadTokens: usage.cacheReadTokens, CacheCreateTokens: usage.cacheCreationTokens,
 	}
+	if response.requestID != "" {
+		result.RequestIDs = []string{response.requestID}
+	}
+	return result
+}
+
+func extractTokenUsageFromBody(body []byte) tokenUsage {
+	var value interface{}
+	if len(body) == 0 || json.Unmarshal(body, &value) != nil {
+		return tokenUsage{}
+	}
+	return extractTokenUsage(value)
 }
 
 func claudePayload(model string, stream bool, prompt string, maxTokens int) map[string]interface{} {
@@ -1020,6 +1076,7 @@ func applyRoundTripResult(result *scenarioResult, response apiResponse, marker s
 		return
 	}
 	result.TotalMillis += response.total.Milliseconds()
+	result.RequestIDs = append(result.RequestIDs, response.requestID)
 	text := responseText(response.body)
 	switch {
 	case !validJSONResponse(response) || strings.TrimSpace(text) == "":

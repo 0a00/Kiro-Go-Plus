@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -52,54 +53,68 @@ type options struct {
 }
 
 type scenarioResult struct {
-	Name              string         `json:"name"`
-	Status            string         `json:"status"`
-	Protocol          string         `json:"protocol,omitempty"`
-	Model             string         `json:"model,omitempty"`
-	Stream            bool           `json:"stream,omitempty"`
-	HTTPStatus        int            `json:"httpStatus,omitempty"`
-	ResponseHeaderMS  int64          `json:"responseHeaderMillis,omitempty"`
-	FirstEventMillis  int64          `json:"firstEventMillis,omitempty"`
-	TTFTMillis        int64          `json:"ttftMillis,omitempty"`
-	FirstTextMillis   int64          `json:"firstTextMillis,omitempty"`
-	FirstThinkMillis  int64          `json:"firstThinkingMillis,omitempty"`
-	FirstToolMillis   int64          `json:"firstToolMillis,omitempty"`
-	MaxStreamGapMS    int64          `json:"maxStreamGapMillis,omitempty"`
-	TotalMillis       int64          `json:"totalMillis,omitempty"`
-	P50Millis         int64          `json:"p50Millis,omitempty"`
-	P95Millis         int64          `json:"p95Millis,omitempty"`
-	P99Millis         int64          `json:"p99Millis,omitempty"`
-	Events            int            `json:"events,omitempty"`
-	ContentDeltas     int            `json:"contentDeltas,omitempty"`
-	ThinkingDeltas    int            `json:"thinkingDeltas,omitempty"`
-	ToolCalls         int            `json:"toolCalls,omitempty"`
-	Requests          int            `json:"requests,omitempty"`
-	Successes         int            `json:"successes,omitempty"`
-	FailureCategories map[string]int `json:"failureCategories,omitempty"`
-	Detail            string         `json:"detail,omitempty"`
+	Name               string         `json:"name"`
+	Status             string         `json:"status"`
+	Protocol           string         `json:"protocol,omitempty"`
+	Model              string         `json:"model,omitempty"`
+	Stream             bool           `json:"stream,omitempty"`
+	HTTPStatus         int            `json:"httpStatus,omitempty"`
+	RequestID          string         `json:"requestId,omitempty"`
+	RequestIDs         []string       `json:"requestIds,omitempty"`
+	StopReason         string         `json:"stopReason,omitempty"`
+	ResponseHeaderMS   int64          `json:"responseHeaderMillis,omitempty"`
+	FirstEventMillis   int64          `json:"firstEventMillis,omitempty"`
+	TTFTMillis         int64          `json:"ttftMillis,omitempty"`
+	FirstTextMillis    int64          `json:"firstTextMillis,omitempty"`
+	FirstThinkMillis   int64          `json:"firstThinkingMillis,omitempty"`
+	FirstToolMillis    int64          `json:"firstToolMillis,omitempty"`
+	MaxStreamGapMS     int64          `json:"maxStreamGapMillis,omitempty"`
+	MaxWireGapMS       int64          `json:"maxWireGapMillis,omitempty"`
+	TotalMillis        int64          `json:"totalMillis,omitempty"`
+	P50Millis          int64          `json:"p50Millis,omitempty"`
+	P95Millis          int64          `json:"p95Millis,omitempty"`
+	P99Millis          int64          `json:"p99Millis,omitempty"`
+	Events             int            `json:"events,omitempty"`
+	Heartbeats         int            `json:"heartbeats,omitempty"`
+	ContentDeltas      int            `json:"contentDeltas,omitempty"`
+	ThinkingDeltas     int            `json:"thinkingDeltas,omitempty"`
+	ToolCalls          int            `json:"toolCalls,omitempty"`
+	InputTokens        int            `json:"inputTokens,omitempty"`
+	OutputTokens       int            `json:"outputTokens,omitempty"`
+	ReasoningTokens    int            `json:"reasoningTokens,omitempty"`
+	CacheReadTokens    int            `json:"cacheReadTokens,omitempty"`
+	CacheCreateTokens  int            `json:"cacheCreationTokens,omitempty"`
+	DistinctRequestIDs int            `json:"distinctRequestIds,omitempty"`
+	Requests           int            `json:"requests,omitempty"`
+	Successes          int            `json:"successes,omitempty"`
+	FailureCategories  map[string]int `json:"failureCategories,omitempty"`
+	Detail             string         `json:"detail,omitempty"`
 }
 
 type devReport struct {
-	GeneratedAt string           `json:"generatedAt"`
-	BaseURL     string           `json:"baseUrl"`
-	Suite       string           `json:"suite"`
-	Model       string           `json:"model,omitempty"`
-	Models      []string         `json:"models,omitempty"`
-	Results     []scenarioResult `json:"results"`
-	Summary     map[string]int   `json:"summary"`
+	GeneratedAt              string           `json:"generatedAt"`
+	BaseURL                  string           `json:"baseUrl"`
+	ServerVersion            string           `json:"serverVersion,omitempty"`
+	ConfigurationFingerprint string           `json:"configurationFingerprint"`
+	Suite                    string           `json:"suite"`
+	Model                    string           `json:"model,omitempty"`
+	Models                   []string         `json:"models,omitempty"`
+	Results                  []scenarioResult `json:"results"`
+	Summary                  map[string]int   `json:"summary"`
 }
 
 type runner struct {
-	opts      options
-	apiKey    string
-	client    *http.Client
-	results   []scenarioResult
-	models    []string
-	selected  []string
-	model     string
-	thinking  string
-	startedAt time.Time
-	userAgent string
+	opts          options
+	apiKey        string
+	client        *http.Client
+	results       []scenarioResult
+	models        []string
+	selected      []string
+	model         string
+	thinking      string
+	serverVersion string
+	startedAt     time.Time
+	userAgent     string
 }
 
 func main() {
@@ -247,13 +262,20 @@ var scenarioCatalog = map[string]string{
 	"anthropic-non-stream":     "Anthropic Messages JSON response",
 	"anthropic-stream":         "Anthropic Messages SSE and timing",
 	"thinking-stream":          "thinking/reasoning SSE visibility",
+	"thinking-protocols":       "Chat and Responses reasoning SSE visibility",
 	"skill-context":            "client-side Skill system instruction transport",
 	"anthropic-tool-roundtrip": "Anthropic forced tool call and tool_result continuation",
 	"mcp-roundtrip":            "MCP-shaped zero-argument call and tool_result continuation",
 	"chat-tool-roundtrip":      "Chat Completions function call and tool result continuation",
+	"responses-tool-roundtrip": "Responses function call and function output continuation",
+	"responses-custom-tool":    "Responses custom tool input and output continuation",
 	"chat-stream":              "Chat Completions SSE and timing",
 	"responses-non-stream":     "Responses API JSON response",
 	"responses-stream":         "Responses API SSE and timing",
+	"cache-reuse":              "cold/create/read prompt-cache usage over repeated requests",
+	"multimodal-accounting":    "same-dimension image accounting independent of base64 size",
+	"output-limit":             "three-protocol output-limit terminal semantics",
+	"long-stream":              "long Anthropic stream timing, gaps, and burst buffering",
 	"websearch-non-stream":     "native WebSearch JSON response",
 	"websearch-stream":         "native WebSearch SSE response",
 	"websearch-multi":          "bounded multi-search request",
@@ -323,8 +345,29 @@ func envOr(name, fallback string) string {
 }
 
 func (r *runner) add(result scenarioResult) {
+	result.RequestIDs = uniqueNonEmpty(result.RequestIDs)
 	result.Detail = compactDetail(result.Detail)
 	r.results = append(r.results, result)
+}
+
+func uniqueNonEmpty(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
 }
 
 func (r *runner) scenarioContext(parent context.Context) (context.Context, context.CancelFunc) {
@@ -333,7 +376,7 @@ func (r *runner) scenarioContext(parent context.Context) (context.Context, conte
 
 func (r *runner) printResults() {
 	w := tabwriter.NewWriter(os.Stdout, 2, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "STATUS\tSCENARIO\tMODEL\tHTTP\tHEAD\tEVENT\tSEMANTIC\tTEXT\tTHINK\tTOOL\tGAP\tTOTAL\tDETAIL")
+	fmt.Fprintln(w, "STATUS\tSCENARIO\tMODEL\tHTTP\tHEAD\tEVENT\tSEMANTIC\tTEXT\tTHINK\tTOOL\tGAP\tWIRE\tHEART\tTOTAL\tDETAIL")
 	for _, result := range r.results {
 		httpStatus := "-"
 		if result.HTTPStatus > 0 {
@@ -343,11 +386,12 @@ func (r *runner) printResults() {
 		if model == "" {
 			model = "-"
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\n",
 			result.Status, result.Name, model, httpStatus,
 			formatMillis(result.ResponseHeaderMS), formatMillis(result.FirstEventMillis), formatMillis(result.TTFTMillis),
 			formatMillis(result.FirstTextMillis), formatMillis(result.FirstThinkMillis), formatMillis(result.FirstToolMillis),
-			formatMillis(result.MaxStreamGapMS), formatMillis(result.TotalMillis), result.Detail)
+			formatMillis(result.MaxStreamGapMS), formatMillis(result.MaxWireGapMS), result.Heartbeats,
+			formatMillis(result.TotalMillis), result.Detail)
 	}
 	_ = w.Flush()
 
@@ -373,13 +417,15 @@ func (r *runner) summary() map[string]int {
 
 func (r *runner) writeReport(path string) error {
 	report := devReport{
-		GeneratedAt: time.Now().UTC().Format(time.RFC3339),
-		BaseURL:     r.opts.baseURL,
-		Suite:       r.opts.suite,
-		Model:       r.model,
-		Models:      append([]string(nil), r.selected...),
-		Results:     r.results,
-		Summary:     r.summary(),
+		GeneratedAt:              time.Now().UTC().Format(time.RFC3339),
+		BaseURL:                  r.opts.baseURL,
+		ServerVersion:            r.serverVersion,
+		ConfigurationFingerprint: configurationFingerprint(r.opts),
+		Suite:                    r.opts.suite,
+		Model:                    r.model,
+		Models:                   append([]string(nil), r.selected...),
+		Results:                  r.results,
+		Summary:                  r.summary(),
 	}
 	data, err := json.MarshalIndent(report, "", "  ")
 	if err != nil {
@@ -399,6 +445,38 @@ func (r *runner) writeReport(path string) error {
 		return err
 	}
 	return file.Close()
+}
+
+func configurationFingerprint(opts options) string {
+	scenarios := make([]string, 0, len(opts.scenarioFilter))
+	for scenario := range opts.scenarioFilter {
+		scenarios = append(scenarios, scenario)
+	}
+	sort.Strings(scenarios)
+	snapshot := struct {
+		BaseURL         string   `json:"baseUrl"`
+		Suite           string   `json:"suite"`
+		TimeoutMillis   int64    `json:"timeoutMillis"`
+		Concurrency     int      `json:"concurrency"`
+		Requests        int      `json:"requests"`
+		SoakMillis      int64    `json:"soakMillis"`
+		SoakMaxRequests int      `json:"soakMaxRequests"`
+		SoakTokenBudget int      `json:"soakTokenBudget"`
+		WebSearch       bool     `json:"webSearch"`
+		Cancellation    bool     `json:"cancellation"`
+		AllModels       bool     `json:"allModels"`
+		Models          []string `json:"models,omitempty"`
+		Scenarios       []string `json:"scenarios,omitempty"`
+	}{
+		BaseURL: opts.baseURL, Suite: opts.suite, TimeoutMillis: opts.timeout.Milliseconds(),
+		Concurrency: opts.concurrency, Requests: opts.requests, SoakMillis: opts.soakDuration.Milliseconds(),
+		SoakMaxRequests: opts.soakMaxRequests, SoakTokenBudget: opts.soakTokenBudget,
+		WebSearch: opts.webSearch, Cancellation: opts.cancellation, AllModels: opts.allModels,
+		Models: append([]string(nil), opts.models...), Scenarios: scenarios,
+	}
+	encoded, _ := json.Marshal(snapshot)
+	digest := sha256.Sum256(encoded)
+	return fmt.Sprintf("sha256:%x", digest[:12])
 }
 
 func isLoopbackHost(host string) bool {

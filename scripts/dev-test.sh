@@ -14,10 +14,10 @@ Modes:
   fuzz        Run bounded EventStream, SSE, schema, and request-parser fuzzing.
   bench       Run parser, translation, cache, routing, and logging benchmarks.
   live        Run the smoke suite against a local service.
-  live-full   Run reasoning, Skills context, functions, MCP, Responses, and cancellation.
+  live-full   Run reasoning, Skills, tools/MCP, cache, images, long streams, and cancellation.
   client-e2e  Use Claude Code to discover a disposable Skill and execute a local MCP fixture.
   matrix      Test selected models across Anthropic, Chat Completions, and Responses.
-  load        Run bounded mixed stream/non-stream requests (default: 5 workers, 10 requests).
+  load        Run bounded mixed-protocol stream/non-stream requests (default: 5 workers, 10 requests).
   staircase   Run concurrency levels 1,5,10,20,50,100 (explicitly quota-consuming).
   soak        Run a duration/request/token-budget bounded stability check.
   all         Run full offline checks followed by the live-full suite.
@@ -122,13 +122,13 @@ run_full() {
   go test ./proxy -count=20 -run 'Test(ParseEventStream|CallKiroAPIRecoversSchemaDeclaredZeroArgumentTool|ClaudeMessagesRecoversZeroArgumentTool|MeaningfulStream|ToolAssembly)'
   info "testing the sudo updater with fake Docker"
   bash scripts/update-sudo_test.sh
-  info "running govulncheck v1.1.4"
-  go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
+  info "running govulncheck v1.7.0"
+  go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
 }
 
 run_fault() {
   info "running deterministic downstream protocol fault fixtures"
-  go test ./cmd/devcheck -count=1 -run 'Test(FaultFixtures|RunnerSeparatesResponseHeaders|AnthropicAndMCPToolResultRoundTrips|BoundedSoak|BuildLoadResult)'
+  go test ./cmd/devcheck -count=1 -run 'Test(FaultFixtures|RunnerSeparatesResponseHeaders|AnthropicAndMCPToolResultRoundTrips|ResponsesFunctionAndCustomToolRoundTrips|PromptCacheReuse|MultimodalAccounting|ThinkingOutputLimitAndLongStream|BoundedSoak|BuildLoadResult)'
   info "running upstream EventStream and failover fault fixtures"
   go test ./proxy -count=1 -run 'Test(ParseEventStreamRejects|ParseEventStreamMarks|AccountFailover|AccountAttemptController|MeaningfulStream|ToolAssembly)'
 }

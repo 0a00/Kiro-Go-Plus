@@ -208,7 +208,8 @@ go build -o kiro-go .
 
 日常开发执行 `bash scripts/dev-test.sh quick`，部署前执行
 `bash scripts/dev-test.sh full`。显式启用的在线模式提供三协议模型矩阵、细分流式
-时序、工具/MCP 往返、WebSearch、并发阶梯和有限额的 soak 测试。完整用法与测试边界见
+时序与心跳、工具/MCP/Responses 往返、缓存与多模态计费、WebSearch、
+混合协议并发阶梯和有限额的 soak 测试。完整用法与测试边界见
 [本地开发测试说明](docs/development-testing.md)。
 
 ## 每账号 IPv6 出口

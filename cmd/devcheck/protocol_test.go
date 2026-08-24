@@ -32,6 +32,20 @@ func TestSSEMetricsDistinguishEventThinkingTextToolAndGap(t *testing.T) {
 	}
 }
 
+func TestSSEMetricsTrackHeartbeatWireActivitySeparately(t *testing.T) {
+	stats := sseStats{tools: make(map[int]*sseToolState)}
+	stats.noteEvent(10 * time.Millisecond)
+	stats.noteHeartbeat(30 * time.Millisecond)
+	stats.noteHeartbeat(50 * time.Millisecond)
+	stats.noteEvent(90 * time.Millisecond)
+	if stats.events != 2 || stats.heartbeats != 2 {
+		t.Fatalf("event and heartbeat counts collapsed: %+v", stats)
+	}
+	if stats.maxEventGap != 80*time.Millisecond || stats.maxActivityGap != 40*time.Millisecond {
+		t.Fatalf("event gap=%s wire gap=%s", stats.maxEventGap, stats.maxActivityGap)
+	}
+}
+
 func TestConsumeSSESupportsChatAndResponsesStreams(t *testing.T) {
 	tests := []struct {
 		name      string

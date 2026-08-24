@@ -303,10 +303,11 @@ func TestWriteReportUsesPrivatePermissionsAndOmitsAPIKey(t *testing.T) {
 		t.Fatalf("create broad report: %v", err)
 	}
 	r := &runner{
-		opts:    options{baseURL: "http://127.0.0.1:8080", suite: "smoke"},
-		apiKey:  "report-secret",
-		model:   "claude-sonnet-5",
-		results: []scenarioResult{{Name: "health", Status: statusPass}},
+		opts:          options{baseURL: "http://127.0.0.1:8080", suite: "smoke"},
+		apiKey:        "report-secret",
+		model:         "claude-sonnet-5",
+		serverVersion: "1.2.48",
+		results:       []scenarioResult{{Name: "health", Status: statusPass}},
 	}
 	if err := r.writeReport(path); err != nil {
 		t.Fatalf("write report: %v", err)
@@ -317,6 +318,13 @@ func TestWriteReportUsesPrivatePermissionsAndOmitsAPIKey(t *testing.T) {
 	}
 	if strings.Contains(string(data), r.apiKey) {
 		t.Fatal("API key leaked into report")
+	}
+	var report devReport
+	if err := json.Unmarshal(data, &report); err != nil {
+		t.Fatalf("decode report: %v", err)
+	}
+	if report.ServerVersion != "1.2.48" || !strings.HasPrefix(report.ConfigurationFingerprint, "sha256:") {
+		t.Fatalf("missing report correlation metadata: %+v", report)
 	}
 	info, err := os.Stat(path)
 	if err != nil {
