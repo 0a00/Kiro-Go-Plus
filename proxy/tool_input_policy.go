@@ -8,90 +8,69 @@ import (
 // eventStreamParseOptions carries request-scoped facts that cannot be inferred
 // from an upstream event stream alone.
 type eventStreamParseOptions struct {
-	emptyInputTools map[string]struct{}
+	toolInputPolicies map[string]toolInputPolicy
 }
+
+type toolInputPolicy uint8
+
+const (
+	toolInputPolicyNone toolInputPolicy = iota
+	toolInputPolicyDeclaredEmpty
+	toolInputPolicyClosedEmpty
+)
 
 func eventStreamParseOptionsForPayload(payload *KiroPayload) eventStreamParseOptions {
 	options := eventStreamParseOptions{}
-	if payload == nil {
+	if payload == nil || len(payload.toolInputPolicies) == 0 {
 		return options
 	}
-	context := payload.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext
-	if context == nil {
-		return options
-	}
-	const (
-		toolSchemaZeroArguments uint8 = 1 << iota
-		toolSchemaOther
-	)
-	shapes := make(map[string]uint8, len(context.Tools))
-	for _, wrapper := range context.Tools {
-		tool := wrapper.ToolSpecification
-		name := strings.TrimSpace(tool.Name)
-		if name == "" {
-			continue
-		}
-		if schemaDefinesZeroArguments(tool.InputSchema.JSON) {
-			shapes[name] |= toolSchemaZeroArguments
-		} else {
-			shapes[name] |= toolSchemaOther
-		}
-	}
-	for name, shape := range shapes {
-		if shape != toolSchemaZeroArguments {
-			continue
-		}
-		if options.emptyInputTools == nil {
-			options.emptyInputTools = make(map[string]struct{})
-		}
-		options.emptyInputTools[name] = struct{}{}
+	options.toolInputPolicies = make(map[string]toolInputPolicy, len(payload.toolInputPolicies))
+	for name, policy := range payload.toolInputPolicies {
+		options.toolInputPolicies[name] = policy
 	}
 	return options
 }
 
-func (o eventStreamParseOptions) allowsEmptyToolInput(name string) bool {
-	_, ok := o.emptyInputTools[strings.TrimSpace(name)]
-	return ok
+func (o eventStreamParseOptions) allowsEmptyToolInput(name string, boundary toolUseRecoveryBoundary) bool {
+	policy := o.toolInputPolicies[strings.TrimSpace(name)]
+	switch boundary {
+	case toolUseRecoveryExplicitToolUse:
+		return policy == toolInputPolicyDeclaredEmpty || policy == toolInputPolicyClosedEmpty
+	case toolUseRecoveryCleanEOF:
+		return policy == toolInputPolicyClosedEmpty
+	default:
+		return false
+	}
 }
 
-// schemaDefinesZeroArguments deliberately recognizes only explicit object
-// schemas with an empty properties map. Open, dynamic, or composed schemas may
-// accept {}, but treating a missing upstream argument stream as intentional
-// could execute a tool without parameters the model meant to provide.
-func schemaDefinesZeroArguments(schema interface{}) bool {
+func classifyToolInputPolicy(schema interface{}) toolInputPolicy {
 	object, ok := schema.(map[string]interface{})
 	if !ok || object == nil {
-		return false
+		return toolInputPolicyNone
 	}
 	schemaType, exists := object["type"]
 	value, ok := schemaType.(string)
-	if !exists || !ok || !strings.EqualFold(strings.TrimSpace(value), "object") {
-		return false
+	if !exists || !ok || value != "object" {
+		return toolInputPolicyNone
 	}
 	properties, exists := object["properties"]
 	propertyMap, ok := properties.(map[string]interface{})
 	if !exists || !ok || len(propertyMap) != 0 {
-		return false
+		return toolInputPolicyNone
 	}
 	if required, exists := object["required"]; exists && !emptySchemaStringArray(required) {
-		return false
+		return toolInputPolicyNone
 	}
 	if minimum, exists := object["minProperties"]; exists {
 		value, ok := schemaInteger(minimum)
 		if !ok || value != 0 {
-			return false
+			return toolInputPolicyNone
 		}
 	}
 	if maximum, exists := object["maxProperties"]; exists {
 		value, ok := schemaInteger(maximum)
 		if !ok || value != 0 {
-			return false
-		}
-	}
-	if additional, exists := object["additionalProperties"]; exists {
-		allowed, ok := additional.(bool)
-		if !ok || allowed {
-			return false
+			return toolInputPolicyNone
 		}
 	}
 	for _, keyword := range []string{
@@ -99,16 +78,37 @@ func schemaDefinesZeroArguments(schema interface{}) bool {
 		"patternProperties", "propertyNames", "dependentSchemas", "dependentRequired", "dependencies", "unevaluatedProperties",
 	} {
 		if _, exists := object[keyword]; exists {
-			return false
+			return toolInputPolicyNone
 		}
 	}
-	return true
+	additional, exists := object["additionalProperties"]
+	if !exists {
+		return toolInputPolicyDeclaredEmpty
+	}
+	allowed, ok := additional.(bool)
+	if ok && !allowed {
+		return toolInputPolicyClosedEmpty
+	}
+	return toolInputPolicyNone
+}
+
+func registerToolInputPolicy(policies map[string]toolInputPolicy, name string, policy toolInputPolicy) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return
+	}
+	existing, exists := policies[name]
+	if !exists {
+		policies[name] = policy
+		return
+	}
+	if existing != policy {
+		policies[name] = toolInputPolicyNone
+	}
 }
 
 func emptySchemaStringArray(value interface{}) bool {
 	switch items := value.(type) {
-	case nil:
-		return true
 	case []string:
 		return len(items) == 0
 	case []interface{}:

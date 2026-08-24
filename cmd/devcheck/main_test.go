@@ -105,10 +105,13 @@ func TestConsumeSSERejectsMalformedJSONAndToolLifecycle(t *testing.T) {
 	}
 }
 
-func TestConsumeSSEObserverRunsOnlyForValidEvents(t *testing.T) {
+func TestConsumeSSEObserverRunsOnlyAfterSemanticOutput(t *testing.T) {
 	stream := strings.Join([]string{
 		"event: message_start",
 		`data: {"type":"message_start"}`,
+		"",
+		"event: content_block_delta",
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"OK"}}`,
 		"",
 		"event: message_stop",
 		`data: {"type":"message_stop"}`,
@@ -119,16 +122,28 @@ func TestConsumeSSEObserverRunsOnlyForValidEvents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("consume SSE: %v", err)
 	}
-	if events != 2 || stats.events != 2 || !stats.terminal {
+	if events != 1 || stats.events != 3 || stats.contentChars != 2 || !stats.terminal {
 		t.Fatalf("unexpected observer result: callbacks=%d stats=%+v", events, stats)
 	}
 }
 
-func TestRunnerCancelsEstablishedStreamAfterObservedEvent(t *testing.T) {
+func TestRunnerCancelsEstablishedStreamAfterSemanticOutput(t *testing.T) {
 	serverCanceled := make(chan struct{})
+	prematureCancel := make(chan struct{}, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte("event: message_start\ndata: {\"type\":\"message_start\"}\n\n"))
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		select {
+		case <-req.Context().Done():
+			prematureCancel <- struct{}{}
+			close(serverCanceled)
+			return
+		case <-time.After(50 * time.Millisecond):
+		}
+		_, _ = w.Write([]byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"OK\"}}\n\n"))
 		if flusher, ok := w.(http.Flusher); ok {
 			flusher.Flush()
 		}
@@ -147,8 +162,13 @@ func TestRunnerCancelsEstablishedStreamAfterObservedEvent(t *testing.T) {
 	defer timeoutCancel()
 	ctx, cancelRequest := context.WithCancel(timeoutCtx)
 	response := r.postWithSSEObserver(ctx, "/v1/messages", map[string]interface{}{"stream": true}, true, true, cancelRequest)
-	if !errors.Is(response.err, context.Canceled) || response.stream.events != 1 {
+	if !errors.Is(response.err, context.Canceled) || response.stream.events != 2 {
 		t.Fatalf("stream cancellation result = err=%v stats=%+v", response.err, response.stream)
+	}
+	select {
+	case <-prematureCancel:
+		t.Fatal("message_start triggered cancellation before semantic output")
+	default:
 	}
 	select {
 	case <-serverCanceled:

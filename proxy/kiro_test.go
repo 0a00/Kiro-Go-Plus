@@ -220,8 +220,9 @@ func TestParseEventStreamRecoversSchemaDeclaredZeroArgumentToolOnEOF(t *testing.
 		"name":      toolName,
 	}))
 	options := eventStreamParseOptionsForPayload(payloadWithTestTool(toolName, map[string]interface{}{
-		"type":       "object",
-		"properties": map[string]interface{}{},
+		"type":                 "object",
+		"properties":           map[string]interface{}{},
+		"additionalProperties": false,
 	}))
 
 	var toolUses []KiroToolUse
@@ -235,6 +236,24 @@ func TestParseEventStreamRecoversSchemaDeclaredZeroArgumentToolOnEOF(t *testing.
 	}
 	if len(toolUses) != 1 || toolUses[0].Name != toolName || len(toolUses[0].Input) != 0 || stops != 1 {
 		t.Fatalf("unexpected recovered tool callbacks: uses=%#v stops=%d", toolUses, stops)
+	}
+}
+
+func TestParseEventStreamDoesNotRecoverDeclaredEmptyToolOnCleanEOF(t *testing.T) {
+	const toolName = "mcpMemoryReadGraphH123"
+	stream := bytes.NewReader(awsEventStreamFrame(t, "toolUseEvent", map[string]interface{}{
+		"toolUseId": "toolu_zero",
+		"name":      toolName,
+	}))
+	options := eventStreamParseOptionsForPayload(payloadWithTestTool(toolName, map[string]interface{}{
+		"type":       "object",
+		"properties": map[string]interface{}{},
+	}))
+
+	err := parseEventStreamWithOptions(stream, &KiroStreamCallback{}, options)
+	var streamErr *EventStreamError
+	if !errors.As(err, &streamErr) || streamErr.Kind != EventStreamIncompleteToolUse {
+		t.Fatalf("declared-empty schema recovered at clean EOF: %#v", err)
 	}
 }
 
@@ -326,6 +345,65 @@ func TestParseEventStreamTelemetryDoesNotFinalizePendingZeroArgumentTool(t *test
 	}
 	if len(toolUses) != 0 {
 		t.Fatalf("telemetry finalized a pending zero-argument tool: %#v", toolUses)
+	}
+}
+
+func TestParseEventStreamRejectsTextAfterTelemetryWithoutTerminalStop(t *testing.T) {
+	stream := bytes.NewReader(bytes.Join([][]byte{
+		awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "first"}),
+		awsEventStreamFrame(t, "contextUsageEvent", map[string]interface{}{"contextUsagePercentage": 1.0}),
+		awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "truncated tail"}),
+	}, nil))
+	err := parseEventStream(stream, &KiroStreamCallback{})
+	var streamErr *EventStreamError
+	if !errors.As(err, &streamErr) || streamErr.Kind != EventStreamIncompleteResponse {
+		t.Fatalf("telemetry masked a truncated response: %#v", err)
+	}
+}
+
+func TestParseEventStreamDefersEmptyToolRecoveryUntilTerminalStateIsKnown(t *testing.T) {
+	const toolName = "mcpMemoryReadGraphH123"
+	stream := bytes.NewReader(bytes.Join([][]byte{
+		awsEventStreamFrame(t, "toolUseEvent", map[string]interface{}{"toolUseId": "toolu_zero", "name": toolName}),
+		awsEventStreamFrame(t, "metadataEvent", map[string]interface{}{"stopReason": "tool_use"}),
+		awsEventStreamFrame(t, "metadataEvent", map[string]interface{}{"stopReason": "end_turn"}),
+	}, nil))
+	options := eventStreamParseOptionsForPayload(payloadWithTestTool(toolName, map[string]interface{}{
+		"type":                 "object",
+		"properties":           map[string]interface{}{},
+		"additionalProperties": false,
+	}))
+	var toolUses []KiroToolUse
+	err := parseEventStreamWithOptions(stream, &KiroStreamCallback{
+		OnToolUse: func(toolUse KiroToolUse) { toolUses = append(toolUses, toolUse) },
+	}, options)
+	var streamErr *EventStreamError
+	if !errors.As(err, &streamErr) || streamErr.Kind != EventStreamIncompleteToolUse {
+		t.Fatalf("conflicting terminal reasons did not reject empty tool: %#v", err)
+	}
+	if len(toolUses) != 0 {
+		t.Fatalf("tool was emitted before terminal state was known: %#v", toolUses)
+	}
+}
+
+func TestParseEventStreamDoesNotRecoverCompleteToolAfterConflictingStopAndTruncation(t *testing.T) {
+	streamBytes := bytes.Join([][]byte{
+		awsEventStreamFrame(t, "toolUseEvent", map[string]interface{}{
+			"toolUseId": "toolu_complete", "name": "Write", "input": `{"path":"README.md"}`,
+		}),
+		awsEventStreamFrame(t, "metadataEvent", map[string]interface{}{"stopReason": "end_turn"}),
+	}, nil)
+	streamBytes = append(streamBytes, []byte{0, 0, 0, 20}...)
+	var toolUses []KiroToolUse
+	err := parseEventStream(bytes.NewReader(streamBytes), &KiroStreamCallback{
+		OnToolUse: func(toolUse KiroToolUse) { toolUses = append(toolUses, toolUse) },
+	})
+	var streamErr *EventStreamError
+	if !errors.As(err, &streamErr) || streamErr.Kind != EventStreamIncompleteToolUse {
+		t.Fatalf("conflicting stop recovered a tool at truncated tail: %#v", err)
+	}
+	if len(toolUses) != 0 {
+		t.Fatalf("conflicting stop emitted a tool at truncated tail: %#v", toolUses)
 	}
 }
 

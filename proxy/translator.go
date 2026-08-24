@@ -374,12 +374,13 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 	finalContent = appendClaudeRequiredToolAction(finalContent, req)
 
 	// 转换工具
-	kiroTools := convertClaudeToolsWithRegistry(req.Tools, toolNames, req.AgentToolSteering)
+	kiroTools, toolInputPolicies := convertClaudeToolsWithRegistry(req.Tools, toolNames, req.AgentToolSteering)
 
 	// 构建 payload
 	payload := &KiroPayload{}
 	payload.hasSystemPriming = systemPrompt != ""
 	payload.ToolNameMap = toolNames.restoreMap()
+	payload.toolInputPolicies = toolInputPolicies
 	payload.ConversationState.ChatTriggerType = "MANUAL"
 	payload.ConversationState.AgentTaskType = "vibe"
 	payload.ConversationState.AgentContinuationId = uuid.New().String()
@@ -961,16 +962,17 @@ func extractClaudeAssistantContent(content interface{}) (string, []KiroToolUse) 
 
 func convertClaudeTools(tools []ClaudeTool) ([]KiroToolWrapper, map[string]string) {
 	registry := newToolNameRegistry(sanitizeToolName)
-	result := convertClaudeToolsWithRegistry(tools, registry, false)
+	result, _ := convertClaudeToolsWithRegistry(tools, registry, false)
 	return result, registry.restoreMap()
 }
 
-func convertClaudeToolsWithRegistry(tools []ClaudeTool, registry *toolNameRegistry, steer bool) []KiroToolWrapper {
+func convertClaudeToolsWithRegistry(tools []ClaudeTool, registry *toolNameRegistry, steer bool) ([]KiroToolWrapper, map[string]toolInputPolicy) {
 	if len(tools) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	result := make([]KiroToolWrapper, 0, len(tools))
+	policies := make(map[string]toolInputPolicy, len(tools))
 	for _, tool := range tools {
 		desc := tool.Description
 		if steer {
@@ -981,13 +983,14 @@ func convertClaudeToolsWithRegistry(tools []ClaudeTool, registry *toolNameRegist
 		if sanitized == "" {
 			continue
 		}
+		registerToolInputPolicy(policies, sanitized, classifyToolInputPolicy(tool.InputSchema))
 		w := KiroToolWrapper{}
 		w.ToolSpecification.Name = sanitized
 		w.ToolSpecification.Description = desc
 		w.ToolSpecification.InputSchema = InputSchema{JSON: ensureObjectSchema(tool.InputSchema)}
 		result = append(result, w)
 	}
-	return result
+	return result, policies
 }
 
 func truncateToolDescription(description string, maxBytes int) string {
@@ -1650,12 +1653,13 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 	}
 
 	// 转换工具
-	kiroTools := convertOpenAIToolsWithRegistry(req.Tools, toolNames)
+	kiroTools, toolInputPolicies := convertOpenAIToolsWithRegistry(req.Tools, toolNames)
 
 	// 构建 payload
 	payload := &KiroPayload{}
 	payload.hasSystemPriming = systemPrompt != ""
 	payload.ToolNameMap = toolNames.restoreMap()
+	payload.toolInputPolicies = toolInputPolicies
 	payload.ConversationState.ChatTriggerType = "MANUAL"
 	payload.ConversationState.ConversationID = buildConversationID(modelID, systemPrompt, firstOpenAIConversationAnchor(nonSystemMessages))
 	payload.ConversationState.CurrentMessage.UserInputMessage = KiroUserInputMessage{
@@ -2621,15 +2625,17 @@ func decodeBase64Payload(data string) ([]byte, error) {
 }
 
 func convertOpenAITools(tools []OpenAITool) []KiroToolWrapper {
-	return convertOpenAIToolsWithRegistry(tools, newToolNameRegistry(normalizeOpenAIToolName))
+	result, _ := convertOpenAIToolsWithRegistry(tools, newToolNameRegistry(normalizeOpenAIToolName))
+	return result
 }
 
-func convertOpenAIToolsWithRegistry(tools []OpenAITool, registry *toolNameRegistry) []KiroToolWrapper {
+func convertOpenAIToolsWithRegistry(tools []OpenAITool, registry *toolNameRegistry) ([]KiroToolWrapper, map[string]toolInputPolicy) {
 	if len(tools) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	result := make([]KiroToolWrapper, 0, len(tools))
+	policies := make(map[string]toolInputPolicy, len(tools))
 	for _, tool := range tools {
 		toolType := strings.ToLower(strings.TrimSpace(tool.Type))
 		if toolType != "function" && toolType != "custom" {
@@ -2644,6 +2650,11 @@ func convertOpenAIToolsWithRegistry(tools []OpenAITool, registry *toolNameRegist
 			// Kiro rejects tools with empty names; skip unusable specs.
 			continue
 		}
+		policy := classifyToolInputPolicy(tool.Function.Parameters)
+		if toolType == "custom" {
+			policy = toolInputPolicyNone
+		}
+		registerToolInputPolicy(policies, name, policy)
 		wrapper := KiroToolWrapper{}
 		wrapper.ToolSpecification.Name = name
 		wrapper.ToolSpecification.Description = normalizeToolDesc(desc, name)
@@ -2663,7 +2674,7 @@ func convertOpenAIToolsWithRegistry(tools []OpenAITool, registry *toolNameRegist
 		wrapper.ToolSpecification.InputSchema = InputSchema{JSON: ensureObjectSchema(parameters)}
 		result = append(result, wrapper)
 	}
-	return result
+	return result, policies
 }
 
 func normalizeOpenAIToolName(name string) string {

@@ -392,7 +392,7 @@ func (r *runner) runLoad(parent context.Context) {
 				requestCancel()
 				success := response.err == nil && response.statusCode >= 200 && response.statusCode < 300
 				if stream {
-					success = success && response.stream.terminal && response.stream.errorEvent == "" && response.stream.firstSemantic > 0
+					success = success && response.stream.terminal && response.stream.errorEvent == "" && response.stream.semanticOutput
 				} else {
 					success = success && responseText(response.body) != ""
 				}
@@ -474,7 +474,7 @@ func streamScenarioResult(name, protocol string, response apiResponse) scenarioR
 	case !response.stream.terminal:
 		result.Status = statusFail
 		result.Detail = "stream ended without a terminal event"
-	case response.stream.firstSemantic == 0:
+	case !response.stream.semanticOutput:
 		result.Status = statusFail
 		result.Detail = "stream contained no semantic output"
 	default:

@@ -1,5 +1,5 @@
 {
-  "version": "1.2.46",
-  "changelog": "Harden zero-argument MCP recovery boundaries and schema validation; strengthen live SSE, cancellation, authentication, and mixed-load checks.\n收紧零参数 MCP 恢复边界与 Schema 验证，并强化 SSE、取消、鉴权和混合负载实测。",
+  "version": "1.2.47",
+  "changelog": "Preserve original tool-schema safety policies, reject telemetry-masked stream truncation, defer terminal tool recovery, and make cancellation checks wait for semantic output.\n保留原始工具 Schema 安全策略，识别被遥测掩盖的流截断，延后终止工具恢复，并让取消测试等待有效输出。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }

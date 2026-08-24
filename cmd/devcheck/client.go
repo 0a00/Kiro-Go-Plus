@@ -43,6 +43,7 @@ type sseStats struct {
 	contentChars   int
 	thinkingChars  int
 	firstSemantic  time.Duration
+	semanticOutput bool
 	terminal       bool
 	errorEvent     string
 	tools          map[int]*sseToolState
@@ -134,10 +135,11 @@ func consumeSSEWithObserver(reader io.Reader, startedAt time.Time, onEvent func(
 			return nil
 		}
 		data := strings.Join(dataLines, "\n")
+		hadSemanticOutput := stats.semanticOutput
 		if err := stats.record(eventName, data, time.Since(startedAt)); err != nil {
 			return err
 		}
-		if onEvent != nil {
+		if onEvent != nil && !hadSemanticOutput && stats.semanticOutput {
 			onEvent()
 		}
 		eventName = ""
@@ -276,8 +278,9 @@ func (s *sseStats) record(eventName, data string, elapsed time.Duration) error {
 }
 
 func (s *sseStats) markSemantic(elapsed time.Duration) {
-	if s.firstSemantic == 0 {
+	if !s.semanticOutput {
 		s.firstSemantic = elapsed
+		s.semanticOutput = true
 	}
 }
 

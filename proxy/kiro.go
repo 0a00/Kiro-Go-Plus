@@ -294,6 +294,9 @@ type KiroPayload struct {
 	// in tool_use responses so the client can match them to its tool registry.
 	// Not serialized to the Kiro API request body.
 	ToolNameMap map[string]string `json:"-"`
+	// toolInputPolicies preserves safety-relevant facts from the original
+	// client schemas before Kiro compatibility sanitization removes them.
+	toolInputPolicies map[string]toolInputPolicy
 
 	requestContext          context.Context
 	attemptBudget           *upstreamAttemptBudget
@@ -1339,7 +1342,8 @@ func parseEventStreamWithOptions(body io.Reader, callback *KiroStreamCallback, o
 	var totalCredits float64
 	pendingToolUses := &pendingToolUseSet{}
 	var sawOutput bool
-	var sawCompletionSignal bool
+	var sawExplicitCompletion bool
+	var lastFrameWasTelemetry bool
 	var recoveredToolUse bool
 	var sawToolUse bool
 	var terminalToolBoundary toolUseRecoveryBoundary
@@ -1362,13 +1366,17 @@ func parseEventStreamWithOptions(body io.Reader, callback *KiroStreamCallback, o
 		if err != nil {
 			var streamErr *EventStreamError
 			if errors.As(err, &streamErr) && streamErr.Kind == EventStreamTruncated {
-				recovered := pendingToolUses.recoverCompletePrefix(callback, toolUseRecoveryTruncatedFrame, err, options)
+				boundary, cause := mergeToolUseRecoveryState(
+					terminalToolBoundary, terminalToolCause,
+					toolUseRecoveryTruncatedFrame, err,
+				)
+				recovered := pendingToolUses.recoverCompletePrefix(callback, boundary, cause, options)
 				if recovered > 0 && pendingToolUses.empty() {
 					recoveredToolUse = true
 					break
 				}
 				if state := pendingToolUses.first(); state != nil {
-					return incompleteToolUseStreamError(state, err)
+					return incompleteToolUseStreamError(state, cause)
 				}
 			}
 			return err
@@ -1390,15 +1398,13 @@ func parseEventStreamWithOptions(body io.Reader, callback *KiroStreamCallback, o
 
 		payloadBytes := frame.payload
 		lowerType := strings.ToLower(eventType)
+		lastFrameWasTelemetry = false
 		if strings.EqualFold(strings.TrimSpace(eventType), "ContentLengthExceededException") {
-			sawCompletionSignal = true
+			sawExplicitCompletion = true
 			terminalToolBoundary, terminalToolCause = mergeToolUseRecoveryState(
 				terminalToolBoundary, terminalToolCause,
 				toolUseRecoveryOutputLimit, fmt.Errorf("%s completion signal", eventType),
 			)
-			if pendingToolUses.recoverCompletePrefix(callback, terminalToolBoundary, terminalToolCause, options) > 0 {
-				recoveredToolUse = true
-			}
 			if callback.OnStopReason != nil {
 				callback.OnStopReason("max_tokens")
 			}
@@ -1473,12 +1479,12 @@ func parseEventStreamWithOptions(body io.Reader, callback *KiroStreamCallback, o
 				}
 			}
 		case "meteringEvent":
-			sawCompletionSignal = true
+			lastFrameWasTelemetry = true
 			if usage, ok := event["usage"].(float64); ok {
 				totalCredits += usage
 			}
 		case "contextUsageEvent":
-			sawCompletionSignal = true
+			lastFrameWasTelemetry = true
 			if pct, ok := event["contextUsagePercentage"].(float64); ok {
 				if callback.OnContextUsage != nil {
 					callback.OnContextUsage(pct)
@@ -1486,15 +1492,12 @@ func parseEventStreamWithOptions(body io.Reader, callback *KiroStreamCallback, o
 			}
 		case "metadataEvent":
 			if reason := firstStringField(event, "stopReason", "stop_reason"); reason != "" {
-				sawCompletionSignal = true
+				sawExplicitCompletion = true
 				boundary := toolUseRecoveryBoundaryForStopReason(reason)
 				terminalToolBoundary, terminalToolCause = mergeToolUseRecoveryState(
 					terminalToolBoundary, terminalToolCause,
 					boundary, fmt.Errorf("%s stop reason %q", eventType, reason),
 				)
-				if pendingToolUses.recoverCompletePrefix(callback, terminalToolBoundary, terminalToolCause, options) > 0 {
-					recoveredToolUse = true
-				}
 				if callback.OnStopReason != nil {
 					callback.OnStopReason(reason)
 				}
@@ -1517,7 +1520,8 @@ func parseEventStreamWithOptions(body io.Reader, callback *KiroStreamCallback, o
 		}
 	}
 
-	if sawOutput && !sawCompletionSignal && !recoveredToolUse && !sawToolUse {
+	legacyTelemetryCompletion := lastFrameWasTelemetry && !sawExplicitCompletion
+	if sawOutput && !sawExplicitCompletion && !legacyTelemetryCompletion && !recoveredToolUse && !sawToolUse {
 		const reason = "stream ended without a stop reason or completion event"
 		if callback.OnTruncated != nil {
 			callback.OnTruncated(reason)
@@ -1850,10 +1854,6 @@ func (b toolUseRecoveryBoundary) allowsCompleteArguments() bool {
 	}
 }
 
-func (b toolUseRecoveryBoundary) allowsEmptyArguments() bool {
-	return b == toolUseRecoveryCleanEOF || b == toolUseRecoveryExplicitToolUse
-}
-
 func (b toolUseRecoveryBoundary) description() string {
 	switch b {
 	case toolUseRecoveryTruncatedFrame:
@@ -1957,7 +1957,7 @@ func (p *pendingToolUseSet) recoverCompletePrefix(callback *KiroStreamCallback, 
 	recovered := 0
 	for state := p.first(); state != nil; state = p.first() {
 		completeInput := boundary.allowsCompleteArguments() && toolUseArgumentsComplete(state)
-		emptyInput := boundary.allowsEmptyArguments() && state.InputBuffer.Len() == 0 && options.allowsEmptyToolInput(state.Name)
+		emptyInput := state.InputBuffer.Len() == 0 && options.allowsEmptyToolInput(state.Name, boundary)
 		if !state.Stopped && !completeInput && !emptyInput {
 			break
 		}

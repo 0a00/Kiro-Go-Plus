@@ -431,8 +431,9 @@ func TestCallKiroAPIRecoversSchemaDeclaredZeroArgumentTool(t *testing.T) {
 	t.Cleanup(func() { kiroEndpoints = oldEndpoints })
 
 	payload := payloadWithTestTool("mcpMemoryReadGraphH123", map[string]interface{}{
-		"type":       "object",
-		"properties": map[string]interface{}{},
+		"type":                 "object",
+		"properties":           map[string]interface{}{},
+		"additionalProperties": false,
 	})
 	payload.requireActionableOutput = true
 	payload.requireToolUse = true
