@@ -75,6 +75,9 @@ func TestBuildLoadProbeCoversProtocolsAndTransferModes(t *testing.T) {
 		if stream, _ := probe.payload["stream"].(bool); stream != probe.stream {
 			t.Fatalf("probe %d stream payload = %v", index, stream)
 		}
+		if probe.expectedMarker != fmt.Sprintf("LOAD_OK_%d", index) {
+			t.Fatalf("probe %d marker = %q", index, probe.expectedMarker)
+		}
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"sort"
 	"strings"
@@ -632,28 +633,53 @@ func (r *runner) runCancellation(parent context.Context) {
 }
 
 func (r *runner) runLoad(parent context.Context) {
-	samples := r.executeLoad(parent, r.opts.concurrency, r.opts.requests, 32)
-	r.add(buildLoadResult("concurrent-load", r.model, r.opts.concurrency, r.opts.requests, samples))
+	if parent == nil {
+		parent = context.Background()
+	}
+	r.runLoadWarmup(parent)
+	execution := r.executeLoad(parent, r.opts.concurrency, r.opts.requests, r.effectiveLoadMaxTokens())
+	r.correlateLoadSamples(parent, execution.samples)
+	r.add(buildLoadExecutionResult("concurrent-load", r.model, r.opts.concurrency, r.opts.requests, execution))
+	r.runPostLoadRecovery(parent)
 }
 
 func (r *runner) runStaircase(parent context.Context) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	r.runLoadWarmup(parent)
 	for _, concurrency := range r.opts.concurrencySteps {
 		requests := max(r.opts.requests, concurrency)
-		samples := r.executeLoad(parent, concurrency, requests, 32)
-		result := buildLoadResult(fmt.Sprintf("concurrency-staircase-%d", concurrency), r.model, concurrency, requests, samples)
+		execution := r.executeLoadPattern(parent, concurrency, requests, r.effectiveLoadMaxTokens(), "closed", 0, 0, 0)
+		r.correlateLoadSamples(parent, execution.samples)
+		result := buildLoadExecutionResult(fmt.Sprintf("concurrency-staircase-%d", concurrency), r.model, concurrency, requests, execution)
 		result.Detail += "; level requests are max(--requests, concurrency)"
 		r.add(result)
 		if parent.Err() != nil {
 			return
 		}
 	}
+	r.runPostLoadRecovery(parent)
 }
 
 func (r *runner) runSoak(parent context.Context) {
-	const maxTokensPerRequest = 32
+	if parent == nil {
+		parent = context.Background()
+	}
+	r.runLoadWarmup(parent)
+	maxTokensPerRequest := r.effectiveLoadMaxTokens()
 	target := min(r.opts.soakMaxRequests, r.opts.soakTokenBudget/maxTokensPerRequest)
+	resourcesBefore := readLoadResourceSnapshot()
+	startedAt := time.Now()
 	samples, scheduled, durationReached := r.executeSoak(parent, r.opts.concurrency, target, maxTokensPerRequest, r.opts.soakDuration)
-	result := buildLoadResult("bounded-soak", r.model, r.opts.concurrency, scheduled, samples)
+	resourcesAfter := readLoadResourceSnapshot()
+	execution := loadExecution{
+		samples: samples, wall: time.Since(startedAt), scheduled: scheduled, pattern: "closed",
+		clientGoroutineDelta: resourcesAfter.goroutines - resourcesBefore.goroutines,
+		clientHeapDeltaBytes: signedUint64Delta(resourcesAfter.heapAlloc, resourcesBefore.heapAlloc),
+	}
+	r.correlateLoadSamples(parent, execution.samples)
+	result := buildLoadExecutionResult("bounded-soak", r.model, r.opts.concurrency, scheduled, execution)
 	stopReason := "request/token cap"
 	if durationReached {
 		stopReason = "duration cap"
@@ -668,59 +694,295 @@ func (r *runner) runSoak(parent context.Context) {
 	result.Detail += fmt.Sprintf("; stop=%s duration_cap=%s request_cap=%d token_budget=%d reserved_tokens=%d",
 		stopReason, r.opts.soakDuration, r.opts.soakMaxRequests, r.opts.soakTokenBudget, scheduled*maxTokensPerRequest)
 	r.add(result)
+	r.runPostLoadRecovery(parent)
+}
+
+func (r *runner) runLoadWarmup(parent context.Context) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	if r.opts.warmupRequests == 0 || parent.Err() != nil {
+		return
+	}
+	concurrency := min(r.opts.concurrency, r.opts.warmupRequests)
+	execution := r.executeLoadPattern(parent, concurrency, r.opts.warmupRequests, r.effectiveLoadMaxTokens(), "closed", 0, 0, 1_000_000)
+	result := buildLoadExecutionResult("load-warmup", r.model, concurrency, r.opts.warmupRequests, execution)
+	result.WarmupRequests = r.opts.warmupRequests
+	r.add(result)
+}
+
+func (r *runner) effectiveLoadMaxTokens() int {
+	if r.opts.loadMaxTokens > 0 {
+		return r.opts.loadMaxTokens
+	}
+	return 32
+}
+
+type loadExecution struct {
+	samples              []loadSample
+	wall                 time.Duration
+	scheduled            int
+	dropped              int
+	pattern              string
+	targetRPS            float64
+	clientGoroutineDelta int
+	clientHeapDeltaBytes int64
+}
+
+type loadJob struct {
+	index       int
+	scheduledAt time.Time
 }
 
 type loadSample struct {
-	duration  int64
-	ttft      int64
-	stream    bool
-	protocol  string
-	requestID string
-	success   bool
-	category  string
+	duration        int64
+	headers         int64
+	ttft            int64
+	maxStreamGap    int64
+	maxWireGap      int64
+	queueDelay      int64
+	stream          bool
+	protocol        string
+	workload        string
+	requestID       string
+	outputTokens    int
+	success         bool
+	category        string
+	endpoint        string
+	selectionMS     int64
+	accountAttempts int
+	affinityHit     bool
+	cacheStatus     string
+	toolUses        int
+	correlated      bool
 }
 
-func (r *runner) executeLoad(parent context.Context, concurrency, requests, maxTokens int) []loadSample {
-	waves := (requests + concurrency - 1) / concurrency
-	suiteTimeout := time.Duration(waves) * r.opts.timeout
+func (r *runner) executeLoad(parent context.Context, concurrency, requests, maxTokens int) loadExecution {
+	return r.executeLoadPattern(parent, concurrency, requests, maxTokens, r.opts.loadPattern, r.opts.targetRPS, r.opts.rampDuration, 0)
+}
+
+func (r *runner) executeLoadPattern(parent context.Context, concurrency, requests, maxTokens int, pattern string, targetRPS float64, rampDuration time.Duration, indexOffset int) loadExecution {
+	pattern = normalizeLoadPattern(pattern)
+	if pattern != "closed" && (!finitePositive(targetRPS)) {
+		pattern = "closed"
+		targetRPS = 0
+		rampDuration = 0
+	}
+	if pattern == "closed" {
+		targetRPS = 0
+		rampDuration = 0
+	}
+	if concurrency < 1 || requests < 1 {
+		return loadExecution{pattern: pattern, targetRPS: targetRPS}
+	}
+	if maxTokens < 1 {
+		maxTokens = 1
+	}
+	if parent == nil {
+		parent = context.Background()
+	}
+	suiteTimeout := loadSuiteTimeout(pattern, concurrency, requests, targetRPS, r.opts.timeout, rampDuration)
 	ctx, cancel := context.WithTimeout(parent, suiteTimeout)
 	defer cancel()
-	jobs := make(chan int)
+	queueCapacity := 0
+	if pattern != "closed" {
+		queueCapacity = concurrency
+	}
+	jobs := make(chan loadJob, queueCapacity)
 	results := make(chan loadSample, requests)
 	var workers sync.WaitGroup
+	startedAt := time.Now()
+	resourcesBefore := readLoadResourceSnapshot()
 	for worker := 0; worker < concurrency; worker++ {
 		workers.Add(1)
 		go func() {
 			defer workers.Done()
-			for index := range jobs {
-				probe := buildLoadProbe(r.model, index, maxTokens)
+			for job := range jobs {
+				requestStartedAt := time.Now()
+				probe := r.buildConfiguredLoadProbe(job.index, maxTokens)
 				requestCtx, requestCancel := r.scenarioContext(ctx)
 				response := r.post(requestCtx, probe.path, probe.payload, true, probe.stream)
 				requestCancel()
-				results <- classifyLoadSample(response, probe.stream, probe.protocol)
+				sample := classifyLoadSample(response, probe)
+				if !job.scheduledAt.IsZero() {
+					sample.queueDelay = max(requestStartedAt.Sub(job.scheduledAt).Milliseconds(), 0)
+				}
+				results <- sample
 			}
 		}()
 	}
-	go func() {
-		defer close(jobs)
-		for index := 0; index < requests; index++ {
+
+	scheduled := 0
+	dropped := 0
+	scheduleStartedAt := time.Now()
+	nextArrival := scheduleStartedAt
+	for requestIndex := 0; requestIndex < requests; requestIndex++ {
+		index := indexOffset + requestIndex
+		if pattern == "closed" {
 			select {
-			case jobs <- index:
+			case jobs <- loadJob{index: index, scheduledAt: time.Now()}:
+				scheduled++
 			case <-ctx.Done():
-				return
+				requestIndex = requests
 			}
+			continue
 		}
-	}()
+
+		if !waitUntil(ctx, nextArrival) {
+			break
+		}
+		scheduled++
+		job := loadJob{index: index, scheduledAt: nextArrival}
+		select {
+		case jobs <- job:
+		default:
+			probe := r.buildConfiguredLoadProbe(index, maxTokens)
+			results <- loadSample{
+				protocol: probe.protocol, workload: probe.workload, stream: probe.stream,
+				queueDelay: max(time.Since(nextArrival).Milliseconds(), 0), category: "client_overload",
+			}
+			dropped++
+		}
+		nextArrival = nextArrival.Add(loadArrivalInterval(pattern, targetRPS, time.Since(scheduleStartedAt), rampDuration))
+	}
+	close(jobs)
 	workers.Wait()
 	close(results)
 	samples := make([]loadSample, 0, requests)
 	for sample := range results {
 		samples = append(samples, sample)
 	}
-	return samples
+	markDuplicateLoadRequestIDs(samples)
+	resourcesAfter := readLoadResourceSnapshot()
+	return loadExecution{
+		samples: samples, wall: time.Since(startedAt), scheduled: scheduled, dropped: dropped,
+		pattern: pattern, targetRPS: targetRPS,
+		clientGoroutineDelta: resourcesAfter.goroutines - resourcesBefore.goroutines,
+		clientHeapDeltaBytes: signedUint64Delta(resourcesAfter.heapAlloc, resourcesBefore.heapAlloc),
+	}
+}
+
+func loadSuiteTimeout(pattern string, concurrency, requests int, targetRPS float64, requestTimeout time.Duration, rampDurations ...time.Duration) time.Duration {
+	pattern = normalizeLoadPattern(pattern)
+	if requests < 1 {
+		requests = 1
+	}
+	if concurrency < 1 {
+		concurrency = 1
+	}
+	if requestTimeout <= 0 {
+		requestTimeout = time.Second
+	}
+	if pattern == "closed" || !finitePositive(targetRPS) {
+		waves := (requests-1)/concurrency + 1
+		return saturatingLoadDuration(float64(waves)*requestTimeout.Seconds() + 1)
+	}
+	scheduleSeconds := float64(requests) / targetRPS
+	if pattern == "ramp" {
+		if len(rampDurations) > 0 && rampDurations[0] > 0 {
+			// The rate is never below 10% of target. Adding one ramp
+			// duration is a conservative upper bound for filling the ramp,
+			// followed by the target-rate schedule.
+			scheduleSeconds += rampDurations[0].Seconds()
+		} else {
+			// Preserve a safe bound for direct callers that do not provide
+			// the ramp duration.
+			scheduleSeconds *= 10
+		}
+	}
+	return saturatingLoadDuration(scheduleSeconds + requestTimeout.Seconds() + 1)
+}
+
+func loadArrivalInterval(pattern string, targetRPS float64, elapsed, rampDuration time.Duration) time.Duration {
+	rate := targetRPS
+	if pattern == "ramp" && rampDuration > 0 && elapsed >= 0 && elapsed < rampDuration {
+		progress := float64(elapsed) / float64(rampDuration)
+		progress = min(max(progress, 0), 1)
+		rate *= 0.1 + 0.9*progress
+	}
+	if !finitePositive(rate) {
+		return 0
+	}
+	intervalNanos := float64(time.Second) / rate
+	maxDuration := float64((1 << 63) - 1)
+	if math.IsInf(intervalNanos, 0) || intervalNanos >= maxDuration {
+		return time.Duration((1 << 63) - 1)
+	}
+	return max(time.Duration(intervalNanos), time.Microsecond)
+}
+
+func normalizeLoadPattern(pattern string) string {
+	switch strings.ToLower(strings.TrimSpace(pattern)) {
+	case "fixed", "ramp":
+		return strings.ToLower(strings.TrimSpace(pattern))
+	default:
+		return "closed"
+	}
+}
+
+func finitePositive(value float64) bool {
+	return value > 0 && !math.IsNaN(value) && !math.IsInf(value, 0)
+}
+
+func saturatingLoadDuration(seconds float64) time.Duration {
+	if math.IsNaN(seconds) || seconds <= 0 {
+		return time.Second
+	}
+	maxDuration := float64((1<<63)-1) / float64(time.Second)
+	if math.IsInf(seconds, 0) || seconds >= maxDuration {
+		return time.Duration((1 << 63) - 1)
+	}
+	duration := time.Duration(math.Ceil(seconds * float64(time.Second)))
+	if duration < time.Nanosecond {
+		return time.Nanosecond
+	}
+	return duration
+}
+
+func waitUntil(ctx context.Context, target time.Time) bool {
+	delay := time.Until(target)
+	if delay <= 0 {
+		return ctx.Err() == nil
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func markDuplicateLoadRequestIDs(samples []loadSample) {
+	seen := make(map[string]struct{}, len(samples))
+	for index := range samples {
+		requestID := strings.TrimSpace(samples[index].requestID)
+		if requestID == "" {
+			continue
+		}
+		if _, exists := seen[requestID]; exists {
+			samples[index].success = false
+			samples[index].category = "duplicate_request_id"
+			continue
+		}
+		seen[requestID] = struct{}{}
+	}
 }
 
 func (r *runner) executeSoak(parent context.Context, concurrency, target, maxTokens int, duration time.Duration) ([]loadSample, int, bool) {
+	if concurrency < 1 || target < 1 {
+		return []loadSample{}, 0, false
+	}
+	if maxTokens < 1 {
+		maxTokens = 1
+	}
+	if duration <= 0 {
+		return []loadSample{}, 0, true
+	}
+	if parent == nil {
+		parent = context.Background()
+	}
 	scheduleCtx, stopScheduling := context.WithTimeout(parent, duration)
 	defer stopScheduling()
 	jobs := make(chan int)
@@ -731,11 +993,11 @@ func (r *runner) executeSoak(parent context.Context, concurrency, target, maxTok
 		go func() {
 			defer workers.Done()
 			for index := range jobs {
-				probe := buildLoadProbe(r.model, index, maxTokens)
+				probe := r.buildConfiguredLoadProbe(index, maxTokens)
 				requestCtx, requestCancel := r.scenarioContext(parent)
 				response := r.post(requestCtx, probe.path, probe.payload, true, probe.stream)
 				requestCancel()
-				results <- classifyLoadSample(response, probe.stream, probe.protocol)
+				results <- classifyLoadSample(response, probe)
 			}
 		}()
 	}
@@ -765,23 +1027,35 @@ func (r *runner) executeSoak(parent context.Context, concurrency, target, maxTok
 	for sample := range results {
 		samples = append(samples, sample)
 	}
+	markDuplicateLoadRequestIDs(samples)
 	return samples, schedule.count, schedule.durationReached
 }
 
-func classifyLoadSample(response apiResponse, stream bool, protocols ...string) loadSample {
-	protocol := "anthropic"
-	if len(protocols) > 0 && protocols[0] != "" {
-		protocol = protocols[0]
+func classifyLoadSample(response apiResponse, probe loadProbe) loadSample {
+	protocol := probe.protocol
+	if protocol == "" {
+		protocol = "anthropic"
 	}
-	sample := loadSample{duration: response.total.Milliseconds(), stream: stream, protocol: protocol, requestID: response.requestID}
-	if stream {
+	usage := extractTokenUsageFromBody(response.body)
+	if probe.stream {
+		usage = response.stream.usage
+	}
+	sample := loadSample{
+		duration: response.total.Milliseconds(), headers: response.headers.Milliseconds(), stream: probe.stream,
+		protocol: protocol, workload: probe.workload, requestID: response.requestID, outputTokens: usage.outputTokens,
+	}
+	if probe.stream {
 		sample.ttft = response.stream.firstSemantic.Milliseconds()
+		sample.maxStreamGap = response.stream.maxEventGap.Milliseconds()
+		sample.maxWireGap = response.stream.maxActivityGap.Milliseconds()
 	}
 	switch {
 	case errors.Is(response.err, context.DeadlineExceeded):
 		sample.category = "timeout"
 	case errors.Is(response.err, context.Canceled):
 		sample.category = "canceled"
+	case errors.Is(response.err, errResponseTooLarge):
+		sample.category = "response_too_large"
 	case response.err != nil:
 		sample.category = "transport"
 	case response.statusCode == http.StatusTooManyRequests:
@@ -790,46 +1064,141 @@ func classifyLoadSample(response apiResponse, stream bool, protocols ...string) 
 		sample.category = "http_5xx"
 	case response.statusCode < 200 || response.statusCode >= 300:
 		sample.category = "http_other"
-	case stream && response.stream.errorEvent != "":
+	case probe.stream && response.stream.errorEvent != "":
 		sample.category = "sse_error"
-	case stream && (!response.stream.terminal || !response.stream.semanticOutput):
+	case probe.stream && response.stream.incomplete:
+		sample.category = "output_limit"
+	case probe.stream && (!response.stream.terminal || !response.stream.semanticOutput):
 		sample.category = "stream_protocol"
-	case !stream && responseText(response.body) == "":
+	case !probe.stream && responseText(response.body) == "":
 		sample.category = "empty_response"
+	case probe.expectedMarker != "" && !loadResponseMatchesMarker(response, probe):
+		sample.category = "marker_mismatch"
 	default:
 		sample.success = true
 	}
 	return sample
 }
 
+func loadResponseMatchesMarker(response apiResponse, probe loadProbe) bool {
+	if probe.validation == loadValidationTool {
+		arguments, found := response.stream.toolArguments(probe.expectedTool)
+		var input map[string]interface{}
+		return found && response.stream.hasSingleCompleteTool(probe.expectedTool) && json.Unmarshal([]byte(arguments), &input) == nil && input["value"] == probe.expectedMarker
+	}
+	text := responseText(response.body)
+	if probe.stream {
+		text = response.stream.outputText()
+	}
+	if probe.minOutputChars > 0 && len([]rune(text)) < probe.minOutputChars {
+		return false
+	}
+	if probe.validation == loadValidationContains {
+		return containsLoadMarker(text, probe.expectedMarker)
+	}
+	return strings.TrimSpace(text) == probe.expectedMarker
+}
+
+func containsLoadMarker(text, marker string) bool {
+	if marker == "" {
+		return false
+	}
+	for offset := 0; offset < len(text); {
+		index := strings.Index(text[offset:], marker)
+		if index < 0 {
+			return false
+		}
+		end := offset + index + len(marker)
+		if end == len(text) || text[end] < '0' || text[end] > '9' {
+			return true
+		}
+		offset = end
+	}
+	return false
+}
+
 func buildLoadResult(name, model string, concurrency, expected int, samples []loadSample) scenarioResult {
+	markDuplicateLoadRequestIDs(samples)
+	return buildLoadExecutionResult(name, model, concurrency, expected, loadExecution{samples: samples, scheduled: len(samples), pattern: "closed"})
+}
+
+func buildLoadExecutionResult(name, model string, concurrency, expected int, execution loadExecution) scenarioResult {
+	if expected < 0 {
+		expected = 0
+	}
+	samples := execution.samples
 	durations := make([]int64, 0, len(samples))
+	successDurations := make([]int64, 0, len(samples))
+	failureDurations := make([]int64, 0, len(samples))
+	headers := make([]int64, 0, len(samples))
 	ttfts := make([]int64, 0, len(samples))
+	queueDelays := make([]int64, 0, len(samples))
+	streamGaps := make([]int64, 0, len(samples))
+	wireGaps := make([]int64, 0, len(samples))
+	selectionTimes := make([]int64, 0, len(samples))
 	successes := 0
 	streamRequests := 0
 	streamSuccesses := 0
 	nonStreamSuccesses := 0
 	failures := make(map[string]int)
 	protocolSuccesses := make(map[string]int)
+	workloadSuccesses := make(map[string]int)
+	workloadFailures := make(map[string]int)
+	endpointCounts := make(map[string]int)
 	requestIDs := make(map[string]struct{})
+	correlated := 0
+	accountAttempts := 0
+	affinityHits := 0
+	cacheHits := 0
+	toolUses := 0
+	outputTokens := 0
 	for _, sample := range samples {
-		durations = append(durations, sample.duration)
+		if sample.duration > 0 {
+			durations = append(durations, sample.duration)
+		}
+		if sample.headers > 0 {
+			headers = append(headers, sample.headers)
+		}
 		if sample.ttft > 0 {
 			ttfts = append(ttfts, sample.ttft)
+		}
+		if sample.queueDelay > 0 {
+			queueDelays = append(queueDelays, sample.queueDelay)
+		}
+		if sample.maxStreamGap > 0 {
+			streamGaps = append(streamGaps, sample.maxStreamGap)
+		}
+		if sample.maxWireGap > 0 {
+			wireGaps = append(wireGaps, sample.maxWireGap)
 		}
 		if sample.stream {
 			streamRequests++
 		}
+		workload := sample.workload
+		if workload == "" {
+			workload = "marker"
+		}
 		if sample.success {
 			successes++
 			protocolSuccesses[sample.protocol]++
+			workloadSuccesses[workload]++
+			if sample.duration > 0 {
+				successDurations = append(successDurations, sample.duration)
+			}
 			if sample.stream {
 				streamSuccesses++
 			} else {
 				nonStreamSuccesses++
 			}
 		} else {
+			workloadFailures[workload]++
+			if sample.duration > 0 {
+				failureDurations = append(failureDurations, sample.duration)
+			}
 			category := sample.category
+			if category == "" {
+				category = "unknown"
+			}
 			if sample.protocol != "" {
 				category = sample.protocol + "_" + category
 			}
@@ -838,31 +1207,75 @@ func buildLoadResult(name, model string, concurrency, expected int, samples []lo
 		if sample.requestID != "" {
 			requestIDs[sample.requestID] = struct{}{}
 		}
+		outputTokens += sample.outputTokens
+		if sample.correlated {
+			correlated++
+			accountAttempts += sample.accountAttempts
+			if sample.selectionMS > 0 {
+				selectionTimes = append(selectionTimes, sample.selectionMS)
+			}
+			if sample.affinityHit {
+				affinityHits++
+			}
+			if sample.cacheStatus == "hit" || sample.cacheStatus == "partial_hit" {
+				cacheHits++
+			}
+			toolUses += sample.toolUses
+			if sample.endpoint != "" {
+				endpointCounts[sample.endpoint]++
+			}
+		}
 	}
 	if missing := expected - len(samples); missing > 0 {
 		failures["not_started_or_canceled"] += missing
 	}
 	result := scenarioResult{
 		Name: name, Protocol: "load", Model: model, Requests: expected, Successes: successes,
-		DistinctRequestIDs: len(requestIDs),
-		FailureCategories:  failures, P50Millis: percentile(durations, 0.50), P95Millis: percentile(durations, 0.95), P99Millis: percentile(durations, 0.99),
+		ScheduledRequests: execution.scheduled, DroppedRequests: execution.dropped,
+		DistinctRequestIDs: len(requestIDs), OutputTokens: outputTokens,
+		FailureCategories: failures, WorkloadSuccesses: workloadSuccesses, WorkloadFailures: workloadFailures,
+		EndpointCounts: endpointCounts, CorrelatedRequests: correlated, AccountAttempts: accountAttempts,
+		AffinityHits: affinityHits, CacheHits: cacheHits, ToolUses: toolUses,
+		P50Millis: percentile(durations, 0.50), P95Millis: percentile(durations, 0.95), P99Millis: percentile(durations, 0.99),
+		SuccessP50Millis: percentile(successDurations, 0.50), SuccessP95Millis: percentile(successDurations, 0.95), SuccessP99Millis: percentile(successDurations, 0.99),
+		FailureP50Millis: percentile(failureDurations, 0.50), FailureP95Millis: percentile(failureDurations, 0.95), FailureP99Millis: percentile(failureDurations, 0.99),
+		HeaderP95Millis: percentile(headers, 0.95), TTFTP50Millis: percentile(ttfts, 0.50), TTFTP95Millis: percentile(ttfts, 0.95), TTFTP99Millis: percentile(ttfts, 0.99),
+		QueueP95Millis: percentile(queueDelays, 0.95), StreamGapP95MS: percentile(streamGaps, 0.95), WireGapP95MS: percentile(wireGaps, 0.95),
+		WallMillis: execution.wall.Milliseconds(), TargetRPS: execution.targetRPS, SelectionP95MS: percentile(selectionTimes, 0.95),
+		ClientGoroutineDelta: execution.clientGoroutineDelta, ClientHeapDeltaBytes: execution.clientHeapDeltaBytes,
+	}
+	if execution.wall > 0 {
+		seconds := execution.wall.Seconds()
+		result.ArrivalRPS = float64(execution.scheduled) / seconds
+		completed := max(len(samples)-execution.dropped, 0)
+		result.AchievedRPS = float64(completed) / seconds
+		result.SuccessRPS = float64(successes) / seconds
 	}
 	result.TotalMillis = result.P95Millis
 	result.Detail = fmt.Sprintf(
-		"success=%d/%d completed=%d stream=%d/%d nonstream=%d/%d concurrency=%d p50=%dms p95=%dms p99=%dms ttft_p95=%dms failures=%s",
+		"success=%d/%d completed=%d stream=%d/%d nonstream=%d/%d concurrency=%d pattern=%s arrival_rps=%.2f achieved_rps=%.2f success_rps=%.2f p95=%dms ttft_p95=%dms failures=%s",
 		successes, expected, len(samples),
 		streamSuccesses, streamRequests,
 		nonStreamSuccesses, len(samples)-streamRequests,
-		concurrency, result.P50Millis, result.P95Millis, result.P99Millis, percentile(ttfts, 0.95), formatFailureCategories(failures),
+		concurrency, execution.pattern, result.ArrivalRPS, result.AchievedRPS, result.SuccessRPS, result.P95Millis, result.TTFTP95Millis, formatFailureCategories(failures),
 	)
 	result.Detail += "; protocols=" + formatFailureCategories(protocolSuccesses)
-	if successes == expected {
+	if expected == 0 {
+		result.Status = statusFail
+		result.Detail += "; no requests were expected"
+	} else if successes == expected && len(samples) == expected {
 		result.Status = statusPass
 	} else {
 		result.Status = statusFail
 	}
 	if len(failures) == 0 {
 		result.FailureCategories = nil
+	}
+	if len(workloadFailures) == 0 {
+		result.WorkloadFailures = nil
+	}
+	if len(endpointCounts) == 0 {
+		result.EndpointCounts = nil
 	}
 	return result
 }

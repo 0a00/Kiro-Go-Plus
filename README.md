@@ -210,7 +210,8 @@ Run `bash scripts/dev-test.sh quick` for deterministic offline checks or
 `bash scripts/dev-test.sh full` before deployment. Opt-in live modes provide a
 three-protocol model matrix, detailed stream and heartbeat timing,
 tool/MCP/Responses roundtrips, cache and multimodal accounting, WebSearch,
-mixed-protocol concurrency staircases, and bounded soak tests. See
+closed-loop, fixed-rate, ramp, and realistic mixed-protocol load tests, plus
+bounded soak and post-load recovery checks. See
 [Local Development Testing](docs/development-testing.md).
 
 ## Per-account IPv6 Egress

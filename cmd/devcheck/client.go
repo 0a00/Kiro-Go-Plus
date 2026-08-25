@@ -5,19 +5,43 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
-const maxDiagnosticResponseBytes = 16 << 20
+const (
+	maxDiagnosticResponseBytes = 16 << 20
+	maxSSELineBytes            = 4 << 20
+	maxCapturedOutputBytes     = 64 << 10
+)
+
+// errResponseTooLarge keeps oversized diagnostics distinct from network
+// failures. The live service may legitimately stream for a long time, but a
+// diagnostic client must still have a finite memory budget.
+var errResponseTooLarge = errors.New("response exceeded diagnostic size limit")
 
 func newHTTPClient() *http.Client {
-	return &http.Client{CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
-		return http.ErrUseLastResponse
-	}}
+	baseTransport, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		return &http.Client{CheckRedirect: rejectRedirects}
+	}
+	transport := baseTransport.Clone()
+	transport.MaxIdleConns = 1024
+	transport.MaxIdleConnsPerHost = 1024
+	transport.IdleConnTimeout = 90 * time.Second
+	return &http.Client{
+		Transport:     transport,
+		CheckRedirect: rejectRedirects,
+	}
+}
+
+func rejectRedirects(_ *http.Request, _ []*http.Request) error {
+	return http.ErrUseLastResponse
 }
 
 type apiResponse struct {
@@ -89,6 +113,8 @@ type sseStats struct {
 	stopReason       string
 	usage            tokenUsage
 	tools            map[int]*sseToolState
+	output           []byte
+	outputTruncated  bool
 }
 
 func (r *runner) get(ctx context.Context, path string, authenticated bool) apiResponse {
@@ -154,12 +180,21 @@ func (r *runner) doWithSSEObserver(ctx context.Context, method, path string, bod
 }
 
 func readBounded(reader io.Reader, limit int64) ([]byte, error) {
+	if reader == nil {
+		return nil, fmt.Errorf("response reader is nil")
+	}
+	if limit < 0 {
+		return nil, fmt.Errorf("response limit must not be negative: %d", limit)
+	}
+	if limit == int64(^uint64(0)>>1) {
+		return nil, fmt.Errorf("response limit is too large")
+	}
 	data, err := io.ReadAll(io.LimitReader(reader, limit+1))
 	if err != nil {
 		return nil, err
 	}
 	if int64(len(data)) > limit {
-		return nil, fmt.Errorf("response exceeded %d bytes", limit)
+		return nil, fmt.Errorf("%w: response exceeded %d bytes", errResponseTooLarge, limit)
 	}
 	return data, nil
 }
@@ -170,9 +205,12 @@ func consumeSSE(reader io.Reader, startedAt time.Time) (sseStats, error) {
 
 func consumeSSEWithObserver(reader io.Reader, startedAt time.Time, onEvent func()) (sseStats, error) {
 	stats := sseStats{tools: make(map[int]*sseToolState)}
+	if reader == nil {
+		return stats, fmt.Errorf("response reader is nil")
+	}
 	limited := &io.LimitedReader{R: reader, N: maxDiagnosticResponseBytes + 1}
 	scanner := bufio.NewScanner(limited)
-	scanner.Buffer(make([]byte, 64<<10), 4<<20)
+	scanner.Buffer(make([]byte, 64<<10), maxSSELineBytes)
 	eventName := ""
 	dataLines := make([]string, 0, 1)
 	flush := func() error {
@@ -193,7 +231,7 @@ func consumeSSEWithObserver(reader io.Reader, startedAt time.Time, onEvent func(
 		return nil
 	}
 	for scanner.Scan() {
-		line := scanner.Text()
+		line := strings.TrimSuffix(scanner.Text(), "\r")
 		if line == "" {
 			if err := flush(); err != nil {
 				return stats, err
@@ -216,10 +254,13 @@ func consumeSSEWithObserver(reader io.Reader, startedAt time.Time, onEvent func(
 		return stats, err
 	}
 	if err := scanner.Err(); err != nil {
+		if strings.Contains(err.Error(), "token too long") {
+			return stats, fmt.Errorf("%w: SSE event line exceeded %d bytes", errResponseTooLarge, maxSSELineBytes)
+		}
 		return stats, err
 	}
 	if limited.N == 0 {
-		return stats, fmt.Errorf("stream response exceeded %d bytes", maxDiagnosticResponseBytes)
+		return stats, fmt.Errorf("%w: stream response exceeded %d bytes", errResponseTooLarge, maxDiagnosticResponseBytes)
 	}
 	return stats, nil
 }
@@ -281,6 +322,7 @@ func (s *sseStats) record(eventName, data string, elapsed time.Duration) error {
 			s.contentDeltas++
 			s.contentChars += len([]rune(text))
 			if text != "" {
+				s.captureOutput(text)
 				s.markText(elapsed)
 			}
 		case "thinking_delta":
@@ -335,6 +377,7 @@ func (s *sseStats) record(eventName, data string, elapsed time.Duration) error {
 		s.contentDeltas++
 		s.contentChars += len([]rune(text))
 		if text != "" {
+			s.captureOutput(text)
 			s.markText(elapsed)
 		}
 	case "response.reasoning_summary_text.delta":
@@ -395,6 +438,7 @@ func (s *sseStats) record(eventName, data string, elapsed time.Duration) error {
 		if content := stringField(delta, "content"); content != "" {
 			s.contentDeltas++
 			s.contentChars += len([]rune(content))
+			s.captureOutput(content)
 			s.markText(elapsed)
 		}
 		if reasoning := firstNonEmpty(stringField(delta, "reasoning_content"), stringField(delta, "reasoning")); reasoning != "" {
@@ -524,6 +568,34 @@ func (s *sseStats) markSemantic(elapsed time.Duration) {
 		s.firstSemantic = elapsed
 		s.semanticOutput = true
 	}
+}
+
+func (s *sseStats) captureOutput(text string) {
+	if text == "" || s.outputTruncated {
+		return
+	}
+	remaining := maxCapturedOutputBytes - len(s.output)
+	if remaining <= 0 {
+		s.outputTruncated = true
+		return
+	}
+	if len(text) > remaining {
+		cut := remaining
+		for cut > 0 && !utf8.ValidString(text[:cut]) {
+			cut--
+		}
+		s.output = append(s.output, text[:cut]...)
+		s.outputTruncated = true
+		return
+	}
+	s.output = append(s.output, text...)
+}
+
+func (s *sseStats) outputText() string {
+	if s == nil {
+		return ""
+	}
+	return string(s.output)
 }
 
 func (s *sseStats) markText(elapsed time.Duration) {

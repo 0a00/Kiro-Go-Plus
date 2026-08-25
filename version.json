@@ -1,5 +1,5 @@
 {
-  "version": "1.2.49",
-  "changelog": "Expand development verification with Responses tool roundtrips, cache and multimodal accounting, cross-protocol thinking and output-limit checks, long-stream diagnostics, mixed-protocol load tests, deterministic authentication flows, richer reports, Docker smoke tests, and weekly fuzzing.\n扩展开发验证体系：增加 Responses 工具往返、缓存与多模态计费、跨协议思考与输出上限、长流诊断、混合协议负载、确定性认证流程、增强报告、Docker 冒烟测试及每周 fuzz。",
+  "version": "1.2.50",
+  "changelog": "Harden development load diagnostics with bounded scheduling, explicit oversized-response classification, CRLF SSE parsing, safe log correlation, duplicate-request detection, and post-load recovery checks.\n增强开发负载诊断：增加有界调度、超大响应明确分类、CRLF SSE 解析、安全日志关联、重复请求检测及压测后恢复检查。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }

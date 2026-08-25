@@ -30,6 +30,19 @@ func TestSSEMetricsDistinguishEventThinkingTextToolAndGap(t *testing.T) {
 	if stats.maxEventGap != 50*time.Millisecond || !stats.terminal {
 		t.Fatalf("unexpected gap or terminal state: %+v", stats)
 	}
+	if stats.outputText() != "answer" {
+		t.Fatalf("captured output = %q", stats.outputText())
+	}
+}
+
+func TestSSEOutputCaptureIsBounded(t *testing.T) {
+	stats := sseStats{}
+	stats.captureOutput(strings.Repeat("a", maxCapturedOutputBytes-1))
+	stats.captureOutput("xyz")
+	stats.captureOutput("ignored")
+	if !stats.outputTruncated || len(stats.outputText()) != maxCapturedOutputBytes || !strings.HasSuffix(stats.outputText(), "x") {
+		t.Fatalf("bounded capture = bytes %d truncated %v", len(stats.outputText()), stats.outputTruncated)
+	}
 }
 
 func TestSSEMetricsTrackHeartbeatWireActivitySeparately(t *testing.T) {

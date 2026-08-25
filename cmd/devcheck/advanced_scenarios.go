@@ -14,23 +14,131 @@ import (
 )
 
 type loadProbe struct {
-	protocol string
-	path     string
-	stream   bool
-	payload  map[string]interface{}
+	protocol       string
+	path           string
+	stream         bool
+	payload        map[string]interface{}
+	expectedMarker string
+	workload       string
+	validation     string
+	expectedTool   string
+	minOutputChars int
 }
+
+const (
+	loadValidationExact    = "exact"
+	loadValidationContains = "contains"
+	loadValidationTool     = "tool"
+	realisticLoadCycle     = 14
+)
 
 func buildLoadProbe(model string, index, maxTokens int) loadProbe {
 	stream := index%2 == 1
-	prompt := fmt.Sprintf("Reply with exactly LOAD_OK_%d.", index)
+	marker := fmt.Sprintf("LOAD_OK_%d", index)
+	prompt := "Reply with exactly " + marker + "."
 	switch (index / 2) % 3 {
 	case 1:
-		return loadProbe{protocol: "openai", path: "/v1/chat/completions", stream: stream, payload: openAIChatPayload(model, stream, prompt, maxTokens)}
+		return loadProbe{protocol: "openai", path: "/v1/chat/completions", stream: stream, payload: openAIChatPayload(model, stream, prompt, maxTokens), expectedMarker: marker, workload: "marker", validation: loadValidationExact}
 	case 2:
-		return loadProbe{protocol: "responses", path: "/v1/responses", stream: stream, payload: responsesPayload(model, stream, prompt, maxTokens)}
+		return loadProbe{protocol: "responses", path: "/v1/responses", stream: stream, payload: responsesPayload(model, stream, prompt, maxTokens), expectedMarker: marker, workload: "marker", validation: loadValidationExact}
 	default:
-		return loadProbe{protocol: "anthropic", path: "/v1/messages", stream: stream, payload: claudePayload(model, stream, prompt, maxTokens)}
+		return loadProbe{protocol: "anthropic", path: "/v1/messages", stream: stream, payload: claudePayload(model, stream, prompt, maxTokens), expectedMarker: marker, workload: "marker", validation: loadValidationExact}
 	}
+}
+
+func (r *runner) buildConfiguredLoadProbe(index, maxTokens int) loadProbe {
+	if r.opts.loadProfile != "realistic" {
+		return buildLoadProbe(r.model, index, maxTokens)
+	}
+	marker := fmt.Sprintf("LOAD_OK_%d", index)
+	exactPrompt := "Reply with exactly " + marker + "."
+	switch index % realisticLoadCycle {
+	case 0, 1, 2, 3, 4, 5:
+		probe := buildLoadProbe(r.model, index, maxTokens)
+		probe.workload = "protocol-marker"
+		return probe
+	case 6:
+		return loadProbe{
+			protocol: "anthropic", path: "/v1/messages", stream: true,
+			payload:        claudePayload(r.thinking, true, "Think briefly, then "+exactPrompt, maxTokens),
+			expectedMarker: marker, workload: "thinking", validation: loadValidationExact,
+		}
+	case 7:
+		minimum := min(512, max(64, maxTokens))
+		prompt := "Begin with " + marker + ", then write a numbered technical explanation until near the output limit."
+		return loadProbe{
+			protocol: "anthropic", path: "/v1/messages", stream: true,
+			payload:        claudePayload(r.model, true, prompt, maxTokens),
+			expectedMarker: marker, workload: "long-stream", validation: loadValidationContains, minOutputChars: minimum,
+		}
+	case 8:
+		return loadToolProbe(r.model, marker, maxTokens, "load_echo", "function-tool")
+	case 9:
+		return loadToolProbe(r.model, marker, maxTokens, "mcp__devcheck__load_echo", "mcp-tool")
+	case 10:
+		encoded, _ := pngBase64(false)
+		return loadProbe{
+			protocol: "anthropic", path: "/v1/messages", stream: false,
+			payload:        loadImagePayload(r.model, encoded, exactPrompt, maxTokens),
+			expectedMarker: marker, workload: "image", validation: loadValidationExact,
+		}
+	case 11:
+		payload := claudePayload(r.model, false, exactPrompt, maxTokens)
+		payload["system"] = []interface{}{map[string]interface{}{
+			"type":          "text",
+			"text":          fmt.Sprintf("Load cache %x. ", r.startedAt.UnixNano()) + strings.Repeat("Stable shared repository context. ", 500),
+			"cache_control": map[string]interface{}{"type": "ephemeral"},
+		}}
+		return loadProbe{
+			protocol: "anthropic", path: "/v1/messages", payload: payload,
+			expectedMarker: marker, workload: "cache", validation: loadValidationExact,
+		}
+	case 12:
+		payload := claudePayload(r.model, false, exactPrompt, maxTokens)
+		payload["system"] = "Loaded development skill: preserve the exact LOAD_OK marker requested by the user."
+		return loadProbe{
+			protocol: "anthropic", path: "/v1/messages", payload: payload,
+			expectedMarker: marker, workload: "skill-context", validation: loadValidationExact,
+		}
+	default:
+		if !r.opts.webSearch {
+			probe := buildLoadProbe(r.model, index, maxTokens)
+			probe.workload = "protocol-marker"
+			return probe
+		}
+		payload := claudePayload(r.model, true, "Use web search to find the official Kiro IDE homepage. End your answer with "+marker+".", maxTokens)
+		payload["tools"] = []interface{}{webSearchTool(1)}
+		return loadProbe{
+			protocol: "anthropic", path: "/v1/messages", stream: true, payload: payload,
+			expectedMarker: marker, workload: "websearch", validation: loadValidationContains,
+		}
+	}
+}
+
+func loadToolProbe(model, marker string, maxTokens int, name, workload string) loadProbe {
+	payload := claudePayload(model, true, "Call "+name+" once with value "+marker+". Do not answer in text.", maxTokens)
+	payload["tools"] = []interface{}{map[string]interface{}{
+		"name": name, "description": "Return the supplied load-test value.",
+		"input_schema": map[string]interface{}{
+			"type": "object", "properties": map[string]interface{}{"value": map[string]interface{}{"type": "string"}}, "required": []string{"value"},
+		},
+	}}
+	payload["tool_choice"] = map[string]interface{}{"type": "tool", "name": name}
+	return loadProbe{
+		protocol: "anthropic", path: "/v1/messages", stream: true, payload: payload,
+		expectedMarker: marker, workload: workload, validation: loadValidationTool, expectedTool: name,
+	}
+}
+
+func loadImagePayload(model, encoded, prompt string, maxTokens int) map[string]interface{} {
+	payload := claudePayload(model, false, "", maxTokens)
+	payload["messages"] = []interface{}{map[string]interface{}{
+		"role": "user", "content": []interface{}{
+			map[string]interface{}{"type": "image", "source": map[string]interface{}{"type": "base64", "media_type": "image/png", "data": encoded}},
+			map[string]interface{}{"type": "text", "text": prompt},
+		},
+	}}
+	return payload
 }
 
 func (r *runner) runThinkingProtocols(parent context.Context) {

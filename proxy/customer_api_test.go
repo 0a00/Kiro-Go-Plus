@@ -166,6 +166,9 @@ func TestCustomerLogsAreIsolatedAndSanitized(t *testing.T) {
 	if body.Logs[1].ErrorCategory != "upstream" || body.Logs[1].FirstContentMs == nil || *body.Logs[1].FirstContentMs != 125 {
 		t.Fatalf("unexpected sanitized failure view: %+v", body.Logs[1])
 	}
+	if body.Logs[1].RequestID != "request-secret" || body.Logs[1].Endpoint != "runtime" {
+		t.Fatalf("missing safe request correlation fields: %+v", body.Logs[1])
+	}
 	response := recorder.Body.String()
 	for _, forbidden := range []string{
 		current.ID, current.Key, current.Name, other.ID, other.Name, "account-secret",
@@ -183,5 +186,20 @@ func TestCustomerLogsRejectInvalidLimit(t *testing.T) {
 	recorder := serveCustomerRequest(&Handler{}, customerRequest(http.MethodGet, "/api/logs?limit=invalid", entry.Key))
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("invalid limit returned %d, want 400", recorder.Code)
+	}
+}
+
+func TestCustomerEndpointClassIsAllowlisted(t *testing.T) {
+	tests := map[string]string{
+		"https://runtime.eu.example.invalid/generateAssistantResponse?token=secret": "runtime",
+		"CodeWhisperer":                           "codewhisperer",
+		"amazon q":                                "amazonq",
+		"https://kiro.example.invalid":            "kiro",
+		"https://unknown.example.invalid/private": "",
+	}
+	for endpoint, want := range tests {
+		if got := customerEndpointClass(endpoint); got != want {
+			t.Fatalf("customerEndpointClass(%q) = %q, want %q", endpoint, got, want)
+		}
 	}
 }

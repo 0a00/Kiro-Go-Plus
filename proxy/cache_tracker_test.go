@@ -200,6 +200,44 @@ func TestPromptCacheConcurrentShardsRespectLimits(t *testing.T) {
 	}
 }
 
+func TestPromptCacheConcurrentColdPopulationConverges(t *testing.T) {
+	tracker := newPromptCacheTracker(time.Hour)
+	tracker.ConfigureLimits(4, 16)
+	var fingerprint [32]byte
+	fingerprint[0] = 0x42
+	profile := &promptCacheProfile{
+		Model:            "claude-sonnet-4.5",
+		TotalInputTokens: 2048,
+		Breakpoints: []promptCacheBreakpoint{{
+			Fingerprint:      fingerprint,
+			CumulativeTokens: 2048,
+			TTL:              time.Hour,
+		}},
+	}
+	const workers = 64
+	start := make(chan struct{})
+	var group sync.WaitGroup
+	group.Add(workers)
+	for index := 0; index < workers; index++ {
+		go func() {
+			defer group.Done()
+			<-start
+			_ = tracker.Compute("account-stampede", profile)
+			tracker.Update("account-stampede", profile)
+		}()
+	}
+	close(start)
+	group.Wait()
+
+	if got := tracker.accountEntryCount("account-stampede"); got != 1 {
+		t.Fatalf("cold concurrent population retained %d entries, want one", got)
+	}
+	warm := tracker.Compute("account-stampede", profile)
+	if warm.CacheReadInputTokens <= 0 || warm.CacheCreationInputTokens != 0 {
+		t.Fatalf("warm request did not converge to a read-only hit: %+v", warm)
+	}
+}
+
 func TestPromptCacheReadEfficiencyScalesCacheRead(t *testing.T) {
 	tracker := newPromptCacheTrackerWithSettings(time.Hour, 0.5)
 	longSystem := strings.Repeat("You are a helpful coding assistant with deep knowledge of Go, Rust, Python, and TypeScript. ", 80)

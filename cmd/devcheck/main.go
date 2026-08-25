@@ -7,6 +7,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -39,6 +40,14 @@ type options struct {
 	requests         int
 	concurrencyCSV   string
 	concurrencySteps []int
+	allowHighLoad    bool
+	loadProfile      string
+	loadPattern      string
+	loadMaxTokens    int
+	warmupRequests   int
+	targetRPS        float64
+	rampDuration     time.Duration
+	postLoadRecovery bool
 	soakDuration     time.Duration
 	soakMaxRequests  int
 	soakTokenBudget  int
@@ -53,42 +62,74 @@ type options struct {
 }
 
 type scenarioResult struct {
-	Name               string         `json:"name"`
-	Status             string         `json:"status"`
-	Protocol           string         `json:"protocol,omitempty"`
-	Model              string         `json:"model,omitempty"`
-	Stream             bool           `json:"stream,omitempty"`
-	HTTPStatus         int            `json:"httpStatus,omitempty"`
-	RequestID          string         `json:"requestId,omitempty"`
-	RequestIDs         []string       `json:"requestIds,omitempty"`
-	StopReason         string         `json:"stopReason,omitempty"`
-	ResponseHeaderMS   int64          `json:"responseHeaderMillis,omitempty"`
-	FirstEventMillis   int64          `json:"firstEventMillis,omitempty"`
-	TTFTMillis         int64          `json:"ttftMillis,omitempty"`
-	FirstTextMillis    int64          `json:"firstTextMillis,omitempty"`
-	FirstThinkMillis   int64          `json:"firstThinkingMillis,omitempty"`
-	FirstToolMillis    int64          `json:"firstToolMillis,omitempty"`
-	MaxStreamGapMS     int64          `json:"maxStreamGapMillis,omitempty"`
-	MaxWireGapMS       int64          `json:"maxWireGapMillis,omitempty"`
-	TotalMillis        int64          `json:"totalMillis,omitempty"`
-	P50Millis          int64          `json:"p50Millis,omitempty"`
-	P95Millis          int64          `json:"p95Millis,omitempty"`
-	P99Millis          int64          `json:"p99Millis,omitempty"`
-	Events             int            `json:"events,omitempty"`
-	Heartbeats         int            `json:"heartbeats,omitempty"`
-	ContentDeltas      int            `json:"contentDeltas,omitempty"`
-	ThinkingDeltas     int            `json:"thinkingDeltas,omitempty"`
-	ToolCalls          int            `json:"toolCalls,omitempty"`
-	InputTokens        int            `json:"inputTokens,omitempty"`
-	OutputTokens       int            `json:"outputTokens,omitempty"`
-	ReasoningTokens    int            `json:"reasoningTokens,omitempty"`
-	CacheReadTokens    int            `json:"cacheReadTokens,omitempty"`
-	CacheCreateTokens  int            `json:"cacheCreationTokens,omitempty"`
-	DistinctRequestIDs int            `json:"distinctRequestIds,omitempty"`
-	Requests           int            `json:"requests,omitempty"`
-	Successes          int            `json:"successes,omitempty"`
-	FailureCategories  map[string]int `json:"failureCategories,omitempty"`
-	Detail             string         `json:"detail,omitempty"`
+	Name                 string         `json:"name"`
+	Status               string         `json:"status"`
+	Protocol             string         `json:"protocol,omitempty"`
+	Model                string         `json:"model,omitempty"`
+	Stream               bool           `json:"stream,omitempty"`
+	HTTPStatus           int            `json:"httpStatus,omitempty"`
+	RequestID            string         `json:"requestId,omitempty"`
+	RequestIDs           []string       `json:"requestIds,omitempty"`
+	StopReason           string         `json:"stopReason,omitempty"`
+	ResponseHeaderMS     int64          `json:"responseHeaderMillis,omitempty"`
+	FirstEventMillis     int64          `json:"firstEventMillis,omitempty"`
+	TTFTMillis           int64          `json:"ttftMillis,omitempty"`
+	FirstTextMillis      int64          `json:"firstTextMillis,omitempty"`
+	FirstThinkMillis     int64          `json:"firstThinkingMillis,omitempty"`
+	FirstToolMillis      int64          `json:"firstToolMillis,omitempty"`
+	MaxStreamGapMS       int64          `json:"maxStreamGapMillis,omitempty"`
+	MaxWireGapMS         int64          `json:"maxWireGapMillis,omitempty"`
+	TotalMillis          int64          `json:"totalMillis,omitempty"`
+	P50Millis            int64          `json:"p50Millis,omitempty"`
+	P95Millis            int64          `json:"p95Millis,omitempty"`
+	P99Millis            int64          `json:"p99Millis,omitempty"`
+	SuccessP50Millis     int64          `json:"successP50Millis,omitempty"`
+	SuccessP95Millis     int64          `json:"successP95Millis,omitempty"`
+	SuccessP99Millis     int64          `json:"successP99Millis,omitempty"`
+	FailureP50Millis     int64          `json:"failureP50Millis,omitempty"`
+	FailureP95Millis     int64          `json:"failureP95Millis,omitempty"`
+	FailureP99Millis     int64          `json:"failureP99Millis,omitempty"`
+	HeaderP95Millis      int64          `json:"responseHeaderP95Millis,omitempty"`
+	TTFTP50Millis        int64          `json:"ttftP50Millis,omitempty"`
+	TTFTP95Millis        int64          `json:"ttftP95Millis,omitempty"`
+	TTFTP99Millis        int64          `json:"ttftP99Millis,omitempty"`
+	QueueP95Millis       int64          `json:"queueP95Millis,omitempty"`
+	StreamGapP95MS       int64          `json:"streamGapP95Millis,omitempty"`
+	WireGapP95MS         int64          `json:"wireGapP95Millis,omitempty"`
+	WallMillis           int64          `json:"wallMillis,omitempty"`
+	TargetRPS            float64        `json:"targetRps,omitempty"`
+	ArrivalRPS           float64        `json:"arrivalRps,omitempty"`
+	AchievedRPS          float64        `json:"achievedRps,omitempty"`
+	SuccessRPS           float64        `json:"successRps,omitempty"`
+	ClientGoroutineDelta int            `json:"clientGoroutineDelta,omitempty"`
+	ClientHeapDeltaBytes int64          `json:"clientHeapAllocDeltaBytes,omitempty"`
+	Events               int            `json:"events,omitempty"`
+	Heartbeats           int            `json:"heartbeats,omitempty"`
+	ContentDeltas        int            `json:"contentDeltas,omitempty"`
+	ThinkingDeltas       int            `json:"thinkingDeltas,omitempty"`
+	ToolCalls            int            `json:"toolCalls,omitempty"`
+	InputTokens          int            `json:"inputTokens,omitempty"`
+	OutputTokens         int            `json:"outputTokens,omitempty"`
+	ReasoningTokens      int            `json:"reasoningTokens,omitempty"`
+	CacheReadTokens      int            `json:"cacheReadTokens,omitempty"`
+	CacheCreateTokens    int            `json:"cacheCreationTokens,omitempty"`
+	DistinctRequestIDs   int            `json:"distinctRequestIds,omitempty"`
+	Requests             int            `json:"requests,omitempty"`
+	ScheduledRequests    int            `json:"scheduledRequests,omitempty"`
+	DroppedRequests      int            `json:"droppedRequests,omitempty"`
+	WarmupRequests       int            `json:"warmupRequests,omitempty"`
+	Successes            int            `json:"successes,omitempty"`
+	FailureCategories    map[string]int `json:"failureCategories,omitempty"`
+	WorkloadSuccesses    map[string]int `json:"workloadSuccesses,omitempty"`
+	WorkloadFailures     map[string]int `json:"workloadFailures,omitempty"`
+	EndpointCounts       map[string]int `json:"endpointCounts,omitempty"`
+	CorrelatedRequests   int            `json:"correlatedRequests,omitempty"`
+	AccountAttempts      int            `json:"accountAttempts,omitempty"`
+	AffinityHits         int            `json:"affinityHits,omitempty"`
+	CacheHits            int            `json:"cacheHits,omitempty"`
+	ToolUses             int            `json:"toolUses,omitempty"`
+	SelectionP95MS       int64          `json:"accountSelectionP95Millis,omitempty"`
+	Detail               string         `json:"detail,omitempty"`
 }
 
 type devReport struct {
@@ -182,6 +223,14 @@ func parseOptions(args []string) (options, error) {
 	set.IntVar(&opts.concurrency, "concurrency", 5, "parallel requests for the load suite")
 	set.IntVar(&opts.requests, "requests", 10, "total requests for the load suite")
 	set.StringVar(&opts.concurrencyCSV, "concurrency-levels", "1,5,10,20,50,100", "comma-separated worker counts for the staircase suite")
+	set.BoolVar(&opts.allowHighLoad, "allow-high-load", false, "allow explicitly configured concurrency above 100 (maximum 1000)")
+	set.StringVar(&opts.loadProfile, "load-profile", "marker", "load workload profile: marker or realistic")
+	set.StringVar(&opts.loadPattern, "load-pattern", "closed", "load arrival pattern: closed, fixed, or ramp")
+	set.IntVar(&opts.loadMaxTokens, "load-max-tokens", 32, "maximum output tokens reserved by each load request")
+	set.IntVar(&opts.warmupRequests, "warmup-requests", 0, "unmeasured requests sent before a load, staircase, or soak suite")
+	set.Float64Var(&opts.targetRPS, "target-rps", 0, "target arrivals per second for fixed or ramp load patterns")
+	set.DurationVar(&opts.rampDuration, "ramp-duration", 30*time.Second, "time for a ramp load to rise from 10 percent to target RPS")
+	set.BoolVar(&opts.postLoadRecovery, "post-load-recovery", true, "verify health and one deterministic request after load execution")
 	set.DurationVar(&opts.soakDuration, "soak-duration", 5*time.Minute, "maximum duration of the soak suite")
 	set.IntVar(&opts.soakMaxRequests, "soak-max-requests", 100, "maximum requests in the soak suite")
 	set.IntVar(&opts.soakTokenBudget, "soak-token-budget", 3200, "maximum requested output tokens in the soak suite")
@@ -212,11 +261,50 @@ func parseOptions(args []string) (options, error) {
 	if opts.timeout < time.Second {
 		return options{}, errors.New("--timeout must be at least 1s")
 	}
-	if opts.concurrency < 1 || opts.concurrency > 100 {
-		return options{}, errors.New("--concurrency must be between 1 and 100")
+	maxConcurrency := 100
+	if opts.allowHighLoad {
+		maxConcurrency = 1000
+	}
+	if opts.concurrency < 1 || opts.concurrency > maxConcurrency {
+		if opts.allowHighLoad {
+			return options{}, errors.New("--concurrency must be between 1 and 1000")
+		}
+		return options{}, errors.New("--concurrency above 100 requires --allow-high-load")
 	}
 	if opts.requests < 1 || opts.requests > 10000 {
 		return options{}, errors.New("--requests must be between 1 and 10000")
+	}
+	opts.loadProfile = strings.ToLower(strings.TrimSpace(opts.loadProfile))
+	if opts.loadProfile != "marker" && opts.loadProfile != "realistic" {
+		return options{}, errors.New("--load-profile must be marker or realistic")
+	}
+	opts.loadPattern = strings.ToLower(strings.TrimSpace(opts.loadPattern))
+	if opts.loadPattern != "closed" && opts.loadPattern != "fixed" && opts.loadPattern != "ramp" {
+		return options{}, errors.New("--load-pattern must be closed, fixed, or ramp")
+	}
+	if opts.loadMaxTokens < 1 || opts.loadMaxTokens > 128000 {
+		return options{}, errors.New("--load-max-tokens must be between 1 and 128000")
+	}
+	if opts.loadProfile == "realistic" && opts.loadMaxTokens < 128 {
+		return options{}, errors.New("--load-profile realistic requires --load-max-tokens of at least 128")
+	}
+	if opts.warmupRequests < 0 || opts.warmupRequests > 1000 {
+		return options{}, errors.New("--warmup-requests must be between 0 and 1000")
+	}
+	if opts.loadPattern == "closed" && opts.targetRPS != 0 {
+		return options{}, errors.New("--target-rps requires --load-pattern fixed or ramp")
+	}
+	if opts.loadPattern != "closed" && (opts.targetRPS < 0.1 || opts.targetRPS > 10000) {
+		return options{}, errors.New("fixed and ramp loads require --target-rps between 0.1 and 10000")
+	}
+	if math.IsNaN(opts.targetRPS) || math.IsInf(opts.targetRPS, 0) {
+		return options{}, errors.New("--target-rps must be a finite number")
+	}
+	if opts.suite != "load" && opts.loadPattern != "closed" {
+		return options{}, errors.New("fixed and ramp patterns are currently supported only by --suite load")
+	}
+	if opts.rampDuration < time.Second || opts.rampDuration > time.Hour {
+		return options{}, errors.New("--ramp-duration must be between 1s and 1h")
 	}
 	if opts.soakDuration < time.Second || opts.soakDuration > 24*time.Hour {
 		return options{}, errors.New("--soak-duration must be between 1s and 24h")
@@ -226,6 +314,9 @@ func parseOptions(args []string) (options, error) {
 	}
 	if opts.soakTokenBudget < 32 || opts.soakTokenBudget > 1000000 {
 		return options{}, errors.New("--soak-token-budget must be between 32 and 1000000")
+	}
+	if opts.suite == "soak" && opts.soakTokenBudget < opts.loadMaxTokens {
+		return options{}, errors.New("--soak-token-budget must reserve at least one --load-max-tokens request")
 	}
 	if opts.model != "" && opts.modelsCSV != "" {
 		return options{}, errors.New("--model and --models cannot be used together")
@@ -238,7 +329,7 @@ func parseOptions(args []string) (options, error) {
 	if parseErr != nil {
 		return options{}, fmt.Errorf("invalid --models: %w", parseErr)
 	}
-	opts.concurrencySteps, parseErr = parseConcurrencySteps(opts.concurrencyCSV)
+	opts.concurrencySteps, parseErr = parseConcurrencySteps(opts.concurrencyCSV, maxConcurrency)
 	if parseErr != nil {
 		return options{}, fmt.Errorf("invalid --concurrency-levels: %w", parseErr)
 	}
@@ -318,7 +409,7 @@ func parseCSV(raw string, limit int) ([]string, error) {
 	return values, nil
 }
 
-func parseConcurrencySteps(raw string) ([]int, error) {
+func parseConcurrencySteps(raw string, maximum int) ([]int, error) {
 	values, err := parseCSV(raw, 20)
 	if err != nil {
 		return nil, err
@@ -326,8 +417,8 @@ func parseConcurrencySteps(raw string) ([]int, error) {
 	steps := make([]int, 0, len(values))
 	for _, value := range values {
 		var parsed int
-		if _, err := fmt.Sscanf(value, "%d", &parsed); err != nil || fmt.Sprint(parsed) != value || parsed < 1 || parsed > 100 {
-			return nil, fmt.Errorf("%q is not an integer between 1 and 100", value)
+		if _, err := fmt.Sscanf(value, "%d", &parsed); err != nil || fmt.Sprint(parsed) != value || parsed < 1 || parsed > maximum {
+			return nil, fmt.Errorf("%q is not an integer between 1 and %d", value, maximum)
 		}
 		steps = append(steps, parsed)
 	}
@@ -459,6 +550,14 @@ func configurationFingerprint(opts options) string {
 		TimeoutMillis   int64    `json:"timeoutMillis"`
 		Concurrency     int      `json:"concurrency"`
 		Requests        int      `json:"requests"`
+		LoadProfile     string   `json:"loadProfile"`
+		LoadPattern     string   `json:"loadPattern"`
+		LoadMaxTokens   int      `json:"loadMaxTokens"`
+		WarmupRequests  int      `json:"warmupRequests"`
+		TargetRPS       float64  `json:"targetRps"`
+		RampMillis      int64    `json:"rampMillis"`
+		AllowHighLoad   bool     `json:"allowHighLoad"`
+		PostRecovery    bool     `json:"postLoadRecovery"`
 		SoakMillis      int64    `json:"soakMillis"`
 		SoakMaxRequests int      `json:"soakMaxRequests"`
 		SoakTokenBudget int      `json:"soakTokenBudget"`
@@ -470,6 +569,9 @@ func configurationFingerprint(opts options) string {
 	}{
 		BaseURL: opts.baseURL, Suite: opts.suite, TimeoutMillis: opts.timeout.Milliseconds(),
 		Concurrency: opts.concurrency, Requests: opts.requests, SoakMillis: opts.soakDuration.Milliseconds(),
+		LoadProfile: opts.loadProfile, LoadPattern: opts.loadPattern, LoadMaxTokens: opts.loadMaxTokens,
+		WarmupRequests: opts.warmupRequests, TargetRPS: opts.targetRPS, RampMillis: opts.rampDuration.Milliseconds(), AllowHighLoad: opts.allowHighLoad,
+		PostRecovery:    opts.postLoadRecovery,
 		SoakMaxRequests: opts.soakMaxRequests, SoakTokenBudget: opts.soakTokenBudget,
 		WebSearch: opts.webSearch, Cancellation: opts.cancellation, AllModels: opts.allModels,
 		Models: append([]string(nil), opts.models...), Scenarios: scenarios,
@@ -501,9 +603,15 @@ func percentile(values []int64, percentile float64) int64 {
 	if len(values) == 0 {
 		return 0
 	}
+	if math.IsNaN(percentile) || percentile < 0 {
+		percentile = 0
+	}
+	if percentile > 1 {
+		percentile = 1
+	}
 	ordered := append([]int64(nil), values...)
 	sort.Slice(ordered, func(i, j int) bool { return ordered[i] < ordered[j] })
-	index := int(float64(len(ordered)-1) * percentile)
+	index := int(math.Ceil(float64(len(ordered))*percentile)) - 1
 	if index < 0 {
 		index = 0
 	}

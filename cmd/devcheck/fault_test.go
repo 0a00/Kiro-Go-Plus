@@ -49,6 +49,28 @@ func TestFaultFixturesRejectEmptyCorruptTruncatedAndConflictingStreams(t *testin
 	}
 }
 
+func TestSSECRLFAndResponseSizeLimitsAreHandledExplicitly(t *testing.T) {
+	stream := strings.Join([]string{
+		"event: content_block_delta\r", "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"OK\"}}\r", "\r",
+		"event: message_stop\r", "data: {\"type\":\"message_stop\"}\r", "\r",
+	}, "\n")
+	stats, err := consumeSSE(strings.NewReader(stream), time.Now())
+	if err != nil || !stats.terminal || stats.outputText() != "OK" {
+		t.Fatalf("CRLF stream = stats=%+v err=%v", stats, err)
+	}
+
+	line := ":" + strings.Repeat("x", 1023) + "\n"
+	oversized := strings.Repeat(line, maxDiagnosticResponseBytes/len(line)+1)
+	_, err = consumeSSE(strings.NewReader(oversized), time.Now())
+	if !errors.Is(err, errResponseTooLarge) {
+		t.Fatalf("oversized SSE error = %v, want response size sentinel", err)
+	}
+	sample := classifyLoadSample(apiResponse{err: err}, loadProbe{stream: true})
+	if sample.category != "response_too_large" {
+		t.Fatalf("oversized SSE category = %+v", sample)
+	}
+}
+
 func TestFaultFixturesClassifyRateLimitServerTimeoutAndProtocolFailures(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -65,7 +87,7 @@ func TestFaultFixturesClassifyRateLimitServerTimeoutAndProtocolFailures(t *testi
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			sample := classifyLoadSample(tc.response, tc.stream)
+			sample := classifyLoadSample(tc.response, loadProbe{stream: tc.stream})
 			if sample.success || sample.category != tc.want {
 				t.Fatalf("sample = %+v, want category %q", sample, tc.want)
 			}
@@ -145,13 +167,19 @@ func TestBoundedSoakStopsSchedulingWithoutCancelingInflightRequests(t *testing.T
 		time.Sleep(15 * time.Millisecond)
 		var payload map[string]interface{}
 		_ = json.NewDecoder(req.Body).Decode(&payload)
+		encoded, _ := json.Marshal(payload)
+		marker := loadMarkerFromPayload(string(encoded))
+		if marker == "" {
+			http.Error(w, "load marker missing", http.StatusBadRequest)
+			return
+		}
 		if stream, _ := payload["stream"].(bool); stream {
 			w.Header().Set("Content-Type", "text/event-stream")
-			_, _ = w.Write([]byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"OK\"}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"))
+			_, _ = fmt.Fprintf(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":%q}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n", marker)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"content":[{"type":"text","text":"OK"}]}`))
+		_, _ = fmt.Fprintf(w, `{"content":[{"type":"text","text":%q}]}`, marker)
 	}))
 	defer server.Close()
 	r := &runner{opts: options{baseURL: server.URL, timeout: time.Second}, apiKey: "test", client: server.Client(), model: "claude-sonnet-5", userAgent: "devcheck-test"}
@@ -174,7 +202,7 @@ func TestBuildLoadResultReportsPercentilesAndFailureCategories(t *testing.T) {
 		{duration: 40, category: "http_5xx"},
 	}
 	result := buildLoadResult("fixture", "model", 2, 5, samples)
-	if result.Status != statusFail || result.Successes != 2 || result.P50Millis != 20 || result.P95Millis != 30 || result.P99Millis != 30 {
+	if result.Status != statusFail || result.Successes != 2 || result.P50Millis != 20 || result.P95Millis != 40 || result.P99Millis != 40 {
 		t.Fatalf("unexpected load summary: %+v", result)
 	}
 	if result.FailureCategories["http_429"] != 1 || result.FailureCategories["http_5xx"] != 1 || result.FailureCategories["not_started_or_canceled"] != 1 {
@@ -208,11 +236,34 @@ func TestParseOptionsSupportsMatrixStaircaseSoakAndScenarioSelection(t *testing.
 }
 
 func TestClassifyLoadSampleKeepsWrappedCancellationKinds(t *testing.T) {
-	sample := classifyLoadSample(apiResponse{err: fmt.Errorf("wrapped: %w", context.DeadlineExceeded)}, false)
+	sample := classifyLoadSample(apiResponse{err: fmt.Errorf("wrapped: %w", context.DeadlineExceeded)}, loadProbe{})
 	if sample.category != "timeout" {
 		t.Fatalf("wrapped timeout category = %q", sample.category)
 	}
 	if !errors.Is(fmt.Errorf("wrapped: %w", context.Canceled), context.Canceled) {
 		t.Fatal("sanity check for wrapped cancellation failed")
+	}
+}
+
+func TestClassifyLoadSampleRejectsCrossTalkMarkers(t *testing.T) {
+	probe := loadProbe{protocol: "anthropic", expectedMarker: "LOAD_OK_7"}
+	correct := apiResponse{
+		statusCode: http.StatusOK,
+		body:       []byte(`{"content":[{"type":"text","text":"LOAD_OK_7"}]}`),
+	}
+	if sample := classifyLoadSample(correct, probe); !sample.success {
+		t.Fatalf("correct marker rejected: %+v", sample)
+	}
+
+	wrong := correct
+	wrong.body = []byte(`{"content":[{"type":"text","text":"LOAD_OK_6"}]}`)
+	if sample := classifyLoadSample(wrong, probe); sample.success || sample.category != "marker_mismatch" {
+		t.Fatalf("cross-talk marker accepted: %+v", sample)
+	}
+
+	extra := correct
+	extra.body = []byte(`{"content":[{"type":"text","text":"LOAD_OK_7 extra"}]}`)
+	if sample := classifyLoadSample(extra, probe); sample.success || sample.category != "marker_mismatch" {
+		t.Fatalf("non-exact marker accepted: %+v", sample)
 	}
 }

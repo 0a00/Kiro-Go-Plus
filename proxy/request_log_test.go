@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"kiro-go/config"
 	accountpool "kiro-go/pool"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -79,6 +81,48 @@ func TestRequestLogPersistenceRoundTrip(t *testing.T) {
 	}
 	if err := restored.Flush(); err != nil {
 		t.Fatalf("flush restored request log: %v", err)
+	}
+}
+
+func TestRequestLogConcurrentWritersPersistConsistentBoundedState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "request_log.json")
+	log, err := newPersistentRequestLog(128, path)
+	if err != nil {
+		t.Fatalf("create persistent log: %v", err)
+	}
+	const writers = 16
+	const entriesPerWriter = 32
+	var group sync.WaitGroup
+	group.Add(writers)
+	for writer := 0; writer < writers; writer++ {
+		go func(index int) {
+			defer group.Done()
+			for entry := 0; entry < entriesPerWriter; entry++ {
+				log.add(requestLogEntry{Protocol: "concurrent", RequestID: fmt.Sprintf("req-%d-%d", index, entry)})
+			}
+		}(writer)
+	}
+	group.Wait()
+	if err := log.Flush(); err != nil {
+		t.Fatalf("flush concurrent request log: %v", err)
+	}
+	restored, err := newPersistentRequestLog(128, path)
+	if err != nil {
+		t.Fatalf("restore concurrent request log: %v", err)
+	}
+	entries := restored.list(200)
+	if len(entries) != 128 {
+		t.Fatalf("restored %d entries, want bounded 128", len(entries))
+	}
+	seen := make(map[uint64]struct{}, len(entries))
+	for _, entry := range entries {
+		if entry.ID == 0 {
+			t.Fatal("persisted entry lost its ID")
+		}
+		if _, exists := seen[entry.ID]; exists {
+			t.Fatalf("duplicate persisted ID %d", entry.ID)
+		}
+		seen[entry.ID] = struct{}{}
 	}
 }
 

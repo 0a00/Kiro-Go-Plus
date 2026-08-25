@@ -11,6 +11,7 @@ func FuzzConsumeSSE(f *testing.F) {
 		"",
 		"data: [DONE]\n\n",
 		"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+		"event: message_stop\r\ndata: {\"type\":\"message_stop\"}\r\n\r\n",
 		"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"OK\"}}\n\n",
 		"data: {not-json}\n\n",
 	} {

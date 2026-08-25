@@ -5,6 +5,7 @@ import (
 	"kiro-go/config"
 	"net/http"
 	"strconv"
+	"strings"
 )
 
 const (
@@ -138,8 +139,13 @@ func (h *Handler) handleCustomerMe(w http.ResponseWriter, r *http.Request) {
 
 type customerRequestLogView struct {
 	Timestamp                int64   `json:"timestamp"`
+	RequestID                string  `json:"requestId,omitempty"`
 	Protocol                 string  `json:"protocol"`
 	Model                    string  `json:"model"`
+	Endpoint                 string  `json:"endpoint,omitempty"`
+	AccountSelectionMs       int64   `json:"accountSelectionMs,omitempty"`
+	AccountAttempts          int     `json:"accountAttempts,omitempty"`
+	RouteAffinityHit         bool    `json:"routeAffinityHit,omitempty"`
 	Status                   string  `json:"status"`
 	StatusCode               int     `json:"statusCode"`
 	ErrorCategory            string  `json:"errorCategory,omitempty"`
@@ -158,8 +164,15 @@ type customerRequestLogView struct {
 	CacheReadInputTokens     int     `json:"cacheReadInputTokens,omitempty"`
 	CacheCreationInputTokens int     `json:"cacheCreationInputTokens,omitempty"`
 	CacheStatus              string  `json:"cacheStatus,omitempty"`
+	CacheMatchedInputTokens  int     `json:"cacheMatchedInputTokens,omitempty"`
+	CacheEligibleInputTokens int     `json:"cacheEligibleInputTokens,omitempty"`
+	CacheReadEfficiency      float64 `json:"cacheReadEfficiency,omitempty"`
+	CacheAccountingMode      string  `json:"cacheAccountingMode,omitempty"`
 	WebSearchRequests        int     `json:"webSearchRequests,omitempty"`
+	RequestToolCount         int     `json:"requestToolCount,omitempty"`
 	ToolUseCount             int     `json:"toolUseCount,omitempty"`
+	ToolTruncationCount      int     `json:"toolTruncationCount,omitempty"`
+	ToolRecoveryAttempts     int     `json:"toolRecoveryAttempts,omitempty"`
 	Credits                  float64 `json:"credits,omitempty"`
 }
 
@@ -192,8 +205,13 @@ func customerRequestErrorCategory(entry requestLogEntry) string {
 func customerRequestLog(entry requestLogEntry) customerRequestLogView {
 	return customerRequestLogView{
 		Timestamp:                entry.Timestamp,
+		RequestID:                entry.RequestID,
 		Protocol:                 entry.Protocol,
 		Model:                    entry.Model,
+		Endpoint:                 customerEndpointClass(entry.Endpoint),
+		AccountSelectionMs:       entry.AccountSelectionMs,
+		AccountAttempts:          entry.AccountAttempts,
+		RouteAffinityHit:         entry.RouteAffinityHit,
 		Status:                   entry.Status,
 		StatusCode:               entry.StatusCode,
 		ErrorCategory:            customerRequestErrorCategory(entry),
@@ -212,9 +230,32 @@ func customerRequestLog(entry requestLogEntry) customerRequestLogView {
 		CacheReadInputTokens:     entry.CacheReadInputTokens,
 		CacheCreationInputTokens: entry.CacheCreationInputTokens,
 		CacheStatus:              entry.CacheStatus,
+		CacheMatchedInputTokens:  entry.CacheMatchedInputTokens,
+		CacheEligibleInputTokens: entry.CacheEligibleInputTokens,
+		CacheReadEfficiency:      entry.CacheReadEfficiency,
+		CacheAccountingMode:      entry.CacheAccountingMode,
 		WebSearchRequests:        entry.WebSearchRequests,
+		RequestToolCount:         entry.RequestToolCount,
 		ToolUseCount:             entry.ToolUseCount,
+		ToolTruncationCount:      entry.ToolTruncationCount,
+		ToolRecoveryAttempts:     entry.ToolRecoveryAttempts,
 		Credits:                  entry.Credits,
+	}
+}
+
+func customerEndpointClass(endpoint string) string {
+	endpoint = strings.ToLower(strings.TrimSpace(endpoint))
+	switch {
+	case strings.Contains(endpoint, "runtime"):
+		return "runtime"
+	case strings.Contains(endpoint, "codewhisperer"):
+		return "codewhisperer"
+	case strings.Contains(endpoint, "amazonq") || strings.Contains(endpoint, "amazon q"):
+		return "amazonq"
+	case strings.Contains(endpoint, "kiro"):
+		return "kiro"
+	default:
+		return ""
 	}
 }
 

@@ -78,6 +78,59 @@ duration, request, or requested-output-token cap and lets in-flight requests
 finish. Reports include distinct request-ID counts, p50/p95/p99, per-protocol
 successes, and categorized failures such as `anthropic_http_429`,
 `openai_timeout`, `responses_empty_response`, and `responses_stream_protocol`.
+Responses or individual SSE lines beyond the diagnostic memory budget are
+reported as `*_response_too_large`, rather than being misclassified as a
+generic transport failure. SSE parsing accepts both LF and CRLF framing.
+
+The default load profile is a low-cost exact-marker probe. It validates the
+complete response against a request-unique `LOAD_OK_n` marker, so a duplicated
+or cross-talk response is a failure rather than a false success. The optional
+`realistic` profile requires at least 128 requested output tokens and cycles
+through protocol modes, thinking, long output, function tools, MCP-shaped
+tools, image input, prompt cache, and Skill-style system context. Add
+`--web-search` to include a bounded native WebSearch case; this consumes
+external search quota.
+
+Arrival and concurrency controls are explicit:
+
+```bash
+# Closed-loop workers, with an unmeasured warmup.
+bash scripts/dev-test.sh load --warmup-requests 5 --concurrency 20 --requests 100
+
+# Open-loop fixed arrivals; client queue overflow is reported as client_overload.
+bash scripts/dev-test.sh load --load-pattern fixed --target-rps 10 \
+  --concurrency 20 --requests 200
+
+# Ramp from 10% to the target rate over the selected duration.
+bash scripts/dev-test.sh load --load-pattern ramp --target-rps 20 \
+  --ramp-duration 2m --concurrency 50 --requests 600
+
+# Realistic workload mix. Use a small request count first.
+bash scripts/dev-test.sh load --load-profile realistic --load-max-tokens 256 \
+  --concurrency 10 --requests 56
+```
+
+Concurrency above 100 requires `--allow-high-load` and is capped at 1000.
+`--load-max-tokens`, request count, warmup count, and WebSearch are quota
+controls; the harness does not silently raise them. `--post-load-recovery`
+performs one health check and one deterministic request after measured load and
+is enabled by default.
+
+Load `p50/p95/p99` fields describe individual request latency. `wallMillis`
+describes the complete scheduler plus drain interval; `achievedRps` and
+`arrivalRps` is the scheduled arrival rate, while `achievedRps` excludes
+dropped arrivals and `successRps` counts successful completions; all use that
+wall interval. Separate success/failure latencies, response-header p95, TTFT
+percentiles, queue delay, stream/wire gap, client goroutine delta, and heap
+delta make buffering and client saturation visible. Fixed/ramp modes use a
+bounded queue, so dropped arrivals are counted as `client_overload` instead of
+being hidden.
+
+After a load run, the harness best-effort correlates up to 500 in-memory
+customer request-log entries by request ID. Only normalized endpoint, account
+attempt count, selection latency, affinity, cache status, and tool count are
+used; account IDs, emails, tool names/arguments, request bodies, and API keys
+are never included in the report.
 
 ## Continuous Integration
 

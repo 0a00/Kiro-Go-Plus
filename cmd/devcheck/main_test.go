@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -186,16 +187,22 @@ func TestRunLoadMixesStreamAndNonStreamRequests(t *testing.T) {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
 			return
 		}
+		encoded, _ := json.Marshal(payload)
+		marker := loadMarkerFromPayload(string(encoded))
+		if marker == "" {
+			http.Error(w, "load marker missing", http.StatusBadRequest)
+			return
+		}
 		if streaming, _ := payload["stream"].(bool); streaming {
 			streamRequests.Add(1)
 			w.Header().Set("Content-Type", "text/event-stream")
-			_, _ = w.Write([]byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"OK\"}}\n\n"))
+			_, _ = fmt.Fprintf(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":%q}}\n\n", marker)
 			_, _ = w.Write([]byte("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"))
 			return
 		}
 		nonStreamRequests.Add(1)
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"content":[{"type":"text","text":"OK"}]}`))
+		_, _ = fmt.Fprintf(w, `{"content":[{"type":"text","text":%q}]}`, marker)
 	}))
 	defer server.Close()
 
@@ -353,7 +360,19 @@ func TestSelectClaudeModelAndPercentile(t *testing.T) {
 	if got := selectClaudeModel(models); got != "claude-sonnet-5" {
 		t.Fatalf("selected model = %q", got)
 	}
-	if got := percentile([]int64{50, 10, 30, 20, 40}, 0.95); got != 40 {
-		t.Fatalf("p95 = %d, want nearest-rank floor value 40", got)
+	if got := percentile([]int64{50, 10, 30, 20, 40}, 0.95); got != 50 {
+		t.Fatalf("p95 = %d, want nearest-rank value 50", got)
 	}
+}
+
+func loadMarkerFromPayload(payload string) string {
+	start := strings.Index(payload, "LOAD_OK_")
+	if start < 0 {
+		return ""
+	}
+	end := start + len("LOAD_OK_")
+	for end < len(payload) && payload[end] >= '0' && payload[end] <= '9' {
+		end++
+	}
+	return payload[start:end]
 }

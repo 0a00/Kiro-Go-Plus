@@ -27,12 +27,24 @@ Live modes require KIRO_DEV_API_KEY in the environment. Optional variables:
   KIRO_DEV_FUZZ_TIME. client-e2e also accepts KIRO_DEV_ALLOW_REMOTE,
   KIRO_DEV_CLIENT_TIMEOUT, and KIRO_DEV_MAX_BUDGET_USD.
 
+Load controls:
+  --load-profile marker|realistic, --load-max-tokens N, --warmup-requests N,
+  --load-pattern closed|fixed|ramp, --target-rps N, --ramp-duration D,
+  --allow-high-load (required above 100 workers), --post-load-recovery=false.
+
 Examples:
   bash scripts/dev-test.sh quick
   bash scripts/dev-test.sh live-full --web-search
   bash scripts/dev-test.sh client-e2e
   bash scripts/dev-test.sh matrix --models claude-sonnet-5,claude-sonnet-5-thinking
   bash scripts/dev-test.sh load --concurrency 20 --requests 100
+  bash scripts/dev-test.sh load --load-profile realistic --load-max-tokens 256 \
+    --warmup-requests 5 --concurrency 20 --requests 140
+  bash scripts/dev-test.sh load --load-pattern fixed --target-rps 10 \
+    --concurrency 20 --requests 200
+  bash scripts/dev-test.sh load --load-pattern ramp --target-rps 20 \
+    --ramp-duration 2m --concurrency 50 --requests 600
+  bash scripts/dev-test.sh load --allow-high-load --concurrency 250 --requests 500
   bash scripts/dev-test.sh staircase --requests 10
   bash scripts/dev-test.sh soak --soak-duration 10m --soak-max-requests 500 --soak-token-budget 16000
 EOF
@@ -127,8 +139,8 @@ run_full() {
 }
 
 run_fault() {
-  info "running deterministic downstream protocol fault fixtures"
-  go test ./cmd/devcheck -count=1 -run 'Test(FaultFixtures|RunnerSeparatesResponseHeaders|AnthropicAndMCPToolResultRoundTrips|ResponsesFunctionAndCustomToolRoundTrips|PromptCacheReuse|MultimodalAccounting|ThinkingOutputLimitAndLongStream|BoundedSoak|BuildLoadResult)'
+  info "running deterministic downstream protocol and load fault fixtures"
+  go test ./cmd/devcheck -count=1
   info "running upstream EventStream and failover fault fixtures"
   go test ./proxy -count=1 -run 'Test(ParseEventStreamRejects|ParseEventStreamMarks|AccountFailover|AccountAttemptController|MeaningfulStream|ToolAssembly)'
 }
