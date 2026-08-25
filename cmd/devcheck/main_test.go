@@ -342,6 +342,40 @@ func TestWriteReportUsesPrivatePermissionsAndOmitsAPIKey(t *testing.T) {
 	}
 }
 
+func TestWriteReportReplacesSymlinkWithoutTouchingTarget(t *testing.T) {
+	directory := t.TempDir()
+	target := filepath.Join(directory, "target.json")
+	path := filepath.Join(directory, "report.json")
+	if err := os.WriteFile(target, []byte("sentinel"), 0o600); err != nil {
+		t.Fatalf("create target: %v", err)
+	}
+	if err := os.Symlink(target, path); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	r := &runner{
+		opts:    options{baseURL: "http://127.0.0.1:8080", suite: "smoke"},
+		apiKey:  "report-secret",
+		results: []scenarioResult{{Name: "health", Status: statusPass}},
+	}
+	if err := r.writeReport(path); err != nil {
+		t.Fatalf("write report through symlink: %v", err)
+	}
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("read target: %v", err)
+	}
+	if string(data) != "sentinel" {
+		t.Fatalf("symlink target was modified: %q", data)
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatalf("stat report: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		t.Fatal("report path remained a symlink")
+	}
+}
+
 func TestParseOptionsRejectsRemoteCredentialTargetByDefault(t *testing.T) {
 	if _, err := parseOptions([]string{"--base-url", "https://example.com"}); err == nil {
 		t.Fatal("remote base URL was accepted without explicit approval")

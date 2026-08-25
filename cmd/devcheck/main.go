@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sort"
 	"strings"
 	"syscall"
@@ -28,108 +29,141 @@ const (
 )
 
 type options struct {
-	baseURL          string
-	model            string
-	thinkingModel    string
-	modelsCSV        string
-	models           []string
-	allModels        bool
-	suite            string
-	timeout          time.Duration
-	concurrency      int
-	requests         int
-	concurrencyCSV   string
-	concurrencySteps []int
-	allowHighLoad    bool
-	loadProfile      string
-	loadPattern      string
-	loadMaxTokens    int
-	warmupRequests   int
-	targetRPS        float64
-	rampDuration     time.Duration
-	postLoadRecovery bool
-	soakDuration     time.Duration
-	soakMaxRequests  int
-	soakTokenBudget  int
-	webSearch        bool
-	cancellation     bool
-	scenariosCSV     string
-	scenarioFilter   map[string]struct{}
-	listScenarios    bool
-	reportPath       string
-	failOnWarning    bool
-	allowRemote      bool
+	baseURL                  string
+	model                    string
+	thinkingModel            string
+	modelsCSV                string
+	models                   []string
+	allModels                bool
+	suite                    string
+	timeout                  time.Duration
+	concurrency              int
+	requests                 int
+	concurrencyCSV           string
+	concurrencySteps         []int
+	allowHighLoad            bool
+	loadProfile              string
+	loadPattern              string
+	loadMaxTokens            int
+	warmupRequests           int
+	targetRPS                float64
+	rampDuration             time.Duration
+	postLoadRecovery         bool
+	staircaseHold            time.Duration
+	staircaseCooldown        time.Duration
+	staircaseMaxRequests     int
+	resourceSampleInterval   time.Duration
+	collectServerStats       bool
+	requireServerStats       bool
+	soakDuration             time.Duration
+	soakMaxRequests          int
+	soakTokenBudget          int
+	minSuccessRate           float64
+	maxP95Millis             int64
+	maxTTFTP95Millis         int64
+	maxStreamGapMillis       int64
+	maxClientOverloadRate    float64
+	maxClientGoroutineGrowth int
+	maxClientHeapGrowthMB    int64
+	baselinePath             string
+	baselineTolerancePercent float64
+	webSearch                bool
+	cancellation             bool
+	scenariosCSV             string
+	scenarioFilter           map[string]struct{}
+	listScenarios            bool
+	reportPath               string
+	failOnWarning            bool
+	allowRemote              bool
 }
 
 type scenarioResult struct {
-	Name                 string         `json:"name"`
-	Status               string         `json:"status"`
-	Protocol             string         `json:"protocol,omitempty"`
-	Model                string         `json:"model,omitempty"`
-	Stream               bool           `json:"stream,omitempty"`
-	HTTPStatus           int            `json:"httpStatus,omitempty"`
-	RequestID            string         `json:"requestId,omitempty"`
-	RequestIDs           []string       `json:"requestIds,omitempty"`
-	StopReason           string         `json:"stopReason,omitempty"`
-	ResponseHeaderMS     int64          `json:"responseHeaderMillis,omitempty"`
-	FirstEventMillis     int64          `json:"firstEventMillis,omitempty"`
-	TTFTMillis           int64          `json:"ttftMillis,omitempty"`
-	FirstTextMillis      int64          `json:"firstTextMillis,omitempty"`
-	FirstThinkMillis     int64          `json:"firstThinkingMillis,omitempty"`
-	FirstToolMillis      int64          `json:"firstToolMillis,omitempty"`
-	MaxStreamGapMS       int64          `json:"maxStreamGapMillis,omitempty"`
-	MaxWireGapMS         int64          `json:"maxWireGapMillis,omitempty"`
-	TotalMillis          int64          `json:"totalMillis,omitempty"`
-	P50Millis            int64          `json:"p50Millis,omitempty"`
-	P95Millis            int64          `json:"p95Millis,omitempty"`
-	P99Millis            int64          `json:"p99Millis,omitempty"`
-	SuccessP50Millis     int64          `json:"successP50Millis,omitempty"`
-	SuccessP95Millis     int64          `json:"successP95Millis,omitempty"`
-	SuccessP99Millis     int64          `json:"successP99Millis,omitempty"`
-	FailureP50Millis     int64          `json:"failureP50Millis,omitempty"`
-	FailureP95Millis     int64          `json:"failureP95Millis,omitempty"`
-	FailureP99Millis     int64          `json:"failureP99Millis,omitempty"`
-	HeaderP95Millis      int64          `json:"responseHeaderP95Millis,omitempty"`
-	TTFTP50Millis        int64          `json:"ttftP50Millis,omitempty"`
-	TTFTP95Millis        int64          `json:"ttftP95Millis,omitempty"`
-	TTFTP99Millis        int64          `json:"ttftP99Millis,omitempty"`
-	QueueP95Millis       int64          `json:"queueP95Millis,omitempty"`
-	StreamGapP95MS       int64          `json:"streamGapP95Millis,omitempty"`
-	WireGapP95MS         int64          `json:"wireGapP95Millis,omitempty"`
-	WallMillis           int64          `json:"wallMillis,omitempty"`
-	TargetRPS            float64        `json:"targetRps,omitempty"`
-	ArrivalRPS           float64        `json:"arrivalRps,omitempty"`
-	AchievedRPS          float64        `json:"achievedRps,omitempty"`
-	SuccessRPS           float64        `json:"successRps,omitempty"`
-	ClientGoroutineDelta int            `json:"clientGoroutineDelta,omitempty"`
-	ClientHeapDeltaBytes int64          `json:"clientHeapAllocDeltaBytes,omitempty"`
-	Events               int            `json:"events,omitempty"`
-	Heartbeats           int            `json:"heartbeats,omitempty"`
-	ContentDeltas        int            `json:"contentDeltas,omitempty"`
-	ThinkingDeltas       int            `json:"thinkingDeltas,omitempty"`
-	ToolCalls            int            `json:"toolCalls,omitempty"`
-	InputTokens          int            `json:"inputTokens,omitempty"`
-	OutputTokens         int            `json:"outputTokens,omitempty"`
-	ReasoningTokens      int            `json:"reasoningTokens,omitempty"`
-	CacheReadTokens      int            `json:"cacheReadTokens,omitempty"`
-	CacheCreateTokens    int            `json:"cacheCreationTokens,omitempty"`
-	DistinctRequestIDs   int            `json:"distinctRequestIds,omitempty"`
-	Requests             int            `json:"requests,omitempty"`
-	ScheduledRequests    int            `json:"scheduledRequests,omitempty"`
-	DroppedRequests      int            `json:"droppedRequests,omitempty"`
-	WarmupRequests       int            `json:"warmupRequests,omitempty"`
-	Successes            int            `json:"successes,omitempty"`
-	FailureCategories    map[string]int `json:"failureCategories,omitempty"`
-	WorkloadSuccesses    map[string]int `json:"workloadSuccesses,omitempty"`
-	WorkloadFailures     map[string]int `json:"workloadFailures,omitempty"`
-	EndpointCounts       map[string]int `json:"endpointCounts,omitempty"`
-	CorrelatedRequests   int            `json:"correlatedRequests,omitempty"`
-	AccountAttempts      int            `json:"accountAttempts,omitempty"`
-	AffinityHits         int            `json:"affinityHits,omitempty"`
-	CacheHits            int            `json:"cacheHits,omitempty"`
-	ToolUses             int            `json:"toolUses,omitempty"`
-	SelectionP95MS       int64          `json:"accountSelectionP95Millis,omitempty"`
-	Detail               string         `json:"detail,omitempty"`
+	Name                      string         `json:"name"`
+	Status                    string         `json:"status"`
+	Protocol                  string         `json:"protocol,omitempty"`
+	Model                     string         `json:"model,omitempty"`
+	Stream                    bool           `json:"stream,omitempty"`
+	HTTPStatus                int            `json:"httpStatus,omitempty"`
+	RequestID                 string         `json:"requestId,omitempty"`
+	RequestIDs                []string       `json:"requestIds,omitempty"`
+	StopReason                string         `json:"stopReason,omitempty"`
+	ResponseHeaderMS          int64          `json:"responseHeaderMillis,omitempty"`
+	FirstEventMillis          int64          `json:"firstEventMillis,omitempty"`
+	TTFTMillis                int64          `json:"ttftMillis,omitempty"`
+	FirstTextMillis           int64          `json:"firstTextMillis,omitempty"`
+	FirstThinkMillis          int64          `json:"firstThinkingMillis,omitempty"`
+	FirstToolMillis           int64          `json:"firstToolMillis,omitempty"`
+	MaxStreamGapMS            int64          `json:"maxStreamGapMillis,omitempty"`
+	MaxWireGapMS              int64          `json:"maxWireGapMillis,omitempty"`
+	TotalMillis               int64          `json:"totalMillis,omitempty"`
+	HealthCheckMillis         int64          `json:"healthCheckMillis,omitempty"`
+	P50Millis                 int64          `json:"p50Millis,omitempty"`
+	P95Millis                 int64          `json:"p95Millis,omitempty"`
+	P99Millis                 int64          `json:"p99Millis,omitempty"`
+	SuccessP50Millis          int64          `json:"successP50Millis,omitempty"`
+	SuccessP95Millis          int64          `json:"successP95Millis,omitempty"`
+	SuccessP99Millis          int64          `json:"successP99Millis,omitempty"`
+	FailureP50Millis          int64          `json:"failureP50Millis,omitempty"`
+	FailureP95Millis          int64          `json:"failureP95Millis,omitempty"`
+	FailureP99Millis          int64          `json:"failureP99Millis,omitempty"`
+	HeaderP95Millis           int64          `json:"responseHeaderP95Millis,omitempty"`
+	TTFTP50Millis             int64          `json:"ttftP50Millis,omitempty"`
+	TTFTP95Millis             int64          `json:"ttftP95Millis,omitempty"`
+	TTFTP99Millis             int64          `json:"ttftP99Millis,omitempty"`
+	QueueP95Millis            int64          `json:"queueP95Millis,omitempty"`
+	StreamGapP95MS            int64          `json:"streamGapP95Millis,omitempty"`
+	WireGapP95MS              int64          `json:"wireGapP95Millis,omitempty"`
+	ScheduleMillis            int64          `json:"scheduleMillis,omitempty"`
+	WallMillis                int64          `json:"wallMillis,omitempty"`
+	SampleCount               int            `json:"sampleCount,omitempty"`
+	CompletedRequests         int            `json:"completedRequests,omitempty"`
+	SuccessRate               float64        `json:"successRate,omitempty"`
+	CompletionRate            float64        `json:"completionRate,omitempty"`
+	ClientOverloadRate        float64        `json:"clientOverloadRate,omitempty"`
+	ThresholdFailures         []string       `json:"thresholdFailures,omitempty"`
+	TargetRPS                 float64        `json:"targetRps,omitempty"`
+	ArrivalRPS                float64        `json:"arrivalRps,omitempty"`
+	AchievedRPS               float64        `json:"achievedRps,omitempty"`
+	SuccessRPS                float64        `json:"successRps,omitempty"`
+	ClientGoroutineDelta      int            `json:"clientGoroutineDelta,omitempty"`
+	ClientHeapDeltaBytes      int64          `json:"clientHeapAllocDeltaBytes,omitempty"`
+	ClientResourceSamples     int            `json:"clientResourceSamples,omitempty"`
+	ClientPeakGoroutines      int            `json:"clientPeakGoroutines,omitempty"`
+	ClientPeakHeapAllocBytes  int64          `json:"clientPeakHeapAllocBytes,omitempty"`
+	ClientPeakGoroutineGrowth int            `json:"clientPeakGoroutineGrowth,omitempty"`
+	ClientPeakHeapGrowthBytes int64          `json:"clientPeakHeapGrowthBytes,omitempty"`
+	ServerStatsSamples        int            `json:"serverStatsSamples,omitempty"`
+	ServerStatsRequestsDelta  int64          `json:"serverStatsRequestsDelta,omitempty"`
+	ServerStatsTokensDelta    int64          `json:"serverStatsTokensDelta,omitempty"`
+	ServerStatsErrors         int            `json:"serverStatsErrors,omitempty"`
+	ServerStatsCounterReset   bool           `json:"serverStatsCounterReset,omitempty"`
+	Events                    int            `json:"events,omitempty"`
+	Heartbeats                int            `json:"heartbeats,omitempty"`
+	ContentDeltas             int            `json:"contentDeltas,omitempty"`
+	ThinkingDeltas            int            `json:"thinkingDeltas,omitempty"`
+	ToolCalls                 int            `json:"toolCalls,omitempty"`
+	InputTokens               int            `json:"inputTokens,omitempty"`
+	OutputTokens              int            `json:"outputTokens,omitempty"`
+	ReasoningTokens           int            `json:"reasoningTokens,omitempty"`
+	CacheReadTokens           int            `json:"cacheReadTokens,omitempty"`
+	CacheCreateTokens         int            `json:"cacheCreationTokens,omitempty"`
+	DistinctRequestIDs        int            `json:"distinctRequestIds,omitempty"`
+	Requests                  int            `json:"requests,omitempty"`
+	ScheduledRequests         int            `json:"scheduledRequests,omitempty"`
+	DroppedRequests           int            `json:"droppedRequests,omitempty"`
+	WarmupRequests            int            `json:"warmupRequests,omitempty"`
+	Successes                 int            `json:"successes,omitempty"`
+	FailureCategories         map[string]int `json:"failureCategories,omitempty"`
+	WorkloadSuccesses         map[string]int `json:"workloadSuccesses,omitempty"`
+	WorkloadFailures          map[string]int `json:"workloadFailures,omitempty"`
+	EndpointCounts            map[string]int `json:"endpointCounts,omitempty"`
+	CorrelatedRequests        int            `json:"correlatedRequests,omitempty"`
+	AccountAttempts           int            `json:"accountAttempts,omitempty"`
+	AffinityHits              int            `json:"affinityHits,omitempty"`
+	CacheHits                 int            `json:"cacheHits,omitempty"`
+	ToolUses                  int            `json:"toolUses,omitempty"`
+	SelectionP95MS            int64          `json:"accountSelectionP95Millis,omitempty"`
+	Detail                    string         `json:"detail,omitempty"`
 }
 
 type devReport struct {
@@ -138,24 +172,45 @@ type devReport struct {
 	ServerVersion            string           `json:"serverVersion,omitempty"`
 	ConfigurationFingerprint string           `json:"configurationFingerprint"`
 	Suite                    string           `json:"suite"`
+	LoadProfile              string           `json:"loadProfile,omitempty"`
+	LoadPattern              string           `json:"loadPattern,omitempty"`
+	LoadMaxTokens            int              `json:"loadMaxTokens,omitempty"`
+	Concurrency              int              `json:"concurrency,omitempty"`
+	Requests                 int              `json:"requests,omitempty"`
+	TargetRPS                float64          `json:"targetRps,omitempty"`
+	RampMillis               int64            `json:"rampMillis,omitempty"`
+	WarmupRequests           int              `json:"warmupRequests,omitempty"`
+	ConcurrencyLevels        []int            `json:"concurrencyLevels,omitempty"`
+	StaircaseHoldMillis      int64            `json:"staircaseHoldMillis,omitempty"`
+	StaircaseCooldownMillis  int64            `json:"staircaseCooldownMillis,omitempty"`
+	StaircaseMaxRequests     int              `json:"staircaseMaxRequests,omitempty"`
+	SoakMillis               int64            `json:"soakMillis,omitempty"`
+	SoakMaxRequests          int              `json:"soakMaxRequests,omitempty"`
+	SoakTokenBudget          int              `json:"soakTokenBudget,omitempty"`
 	Model                    string           `json:"model,omitempty"`
 	Models                   []string         `json:"models,omitempty"`
 	Results                  []scenarioResult `json:"results"`
 	Summary                  map[string]int   `json:"summary"`
+	BaselineCompared         bool             `json:"baselineCompared,omitempty"`
+	BaselineRegressions      int              `json:"baselineRegressions,omitempty"`
+	BaselineMissing          int              `json:"baselineMissing,omitempty"`
 }
 
 type runner struct {
-	opts          options
-	apiKey        string
-	client        *http.Client
-	results       []scenarioResult
-	models        []string
-	selected      []string
-	model         string
-	thinking      string
-	serverVersion string
-	startedAt     time.Time
-	userAgent     string
+	opts                options
+	apiKey              string
+	client              *http.Client
+	results             []scenarioResult
+	models              []string
+	selected            []string
+	model               string
+	thinking            string
+	serverVersion       string
+	startedAt           time.Time
+	userAgent           string
+	baselineCompared    bool
+	baselineRegressions int
+	baselineMissing     int
 }
 
 func main() {
@@ -193,6 +248,12 @@ func run(args []string) int {
 		userAgent: "kiro-go-plus-devcheck/1",
 	}
 	r.runSuite(ctx)
+	if opts.baselinePath != "" {
+		if err := r.compareLoadBaseline(opts.baselinePath); err != nil {
+			fmt.Fprintf(os.Stderr, "compare baseline: %v\n", err)
+			return 1
+		}
+	}
 	r.printResults()
 
 	if opts.reportPath != "" {
@@ -200,6 +261,9 @@ func run(args []string) int {
 			fmt.Fprintf(os.Stderr, "write report: %v\n", err)
 			return 1
 		}
+	}
+	if r.baselineMissing > 0 {
+		return 1
 	}
 	for _, result := range r.results {
 		if result.Status == statusFail || (opts.failOnWarning && result.Status == statusWarn) {
@@ -231,9 +295,24 @@ func parseOptions(args []string) (options, error) {
 	set.Float64Var(&opts.targetRPS, "target-rps", 0, "target arrivals per second for fixed or ramp load patterns")
 	set.DurationVar(&opts.rampDuration, "ramp-duration", 30*time.Second, "time for a ramp load to rise from 10 percent to target RPS")
 	set.BoolVar(&opts.postLoadRecovery, "post-load-recovery", true, "verify health and one deterministic request after load execution")
+	set.DurationVar(&opts.staircaseHold, "staircase-hold", 0, "hold each staircase level for this duration (0 keeps request-count mode)")
+	set.DurationVar(&opts.staircaseCooldown, "staircase-cooldown", 0, "cool down between staircase levels")
+	set.IntVar(&opts.staircaseMaxRequests, "staircase-max-requests", 10000, "request cap per staircase level when a hold duration is used")
+	set.DurationVar(&opts.resourceSampleInterval, "resource-sample-interval", 5*time.Second, "client resource sampling interval; 0 disables time-series sampling")
+	set.BoolVar(&opts.collectServerStats, "server-stats", true, "sample authenticated customer counters before and after load")
+	set.BoolVar(&opts.requireServerStats, "require-server-stats", false, "fail load results when authenticated customer counters cannot be sampled or reset")
 	set.DurationVar(&opts.soakDuration, "soak-duration", 5*time.Minute, "maximum duration of the soak suite")
 	set.IntVar(&opts.soakMaxRequests, "soak-max-requests", 100, "maximum requests in the soak suite")
 	set.IntVar(&opts.soakTokenBudget, "soak-token-budget", 3200, "maximum requested output tokens in the soak suite")
+	set.Float64Var(&opts.minSuccessRate, "min-success-rate", 0, "minimum load success rate in percent; 0 keeps the default all-request gate")
+	set.Int64Var(&opts.maxP95Millis, "max-p95-ms", 0, "maximum load total-latency P95 in milliseconds; 0 disables the threshold")
+	set.Int64Var(&opts.maxTTFTP95Millis, "max-ttft-p95-ms", 0, "maximum load semantic TTFT P95 in milliseconds; 0 disables the threshold")
+	set.Int64Var(&opts.maxStreamGapMillis, "max-stream-gap-p95-ms", 0, "maximum load protocol-event gap P95 in milliseconds; 0 disables the threshold")
+	set.Float64Var(&opts.maxClientOverloadRate, "max-client-overload-rate", -1, "maximum dropped-arrival rate in percent; -1 disables the threshold")
+	set.IntVar(&opts.maxClientGoroutineGrowth, "max-client-goroutine-growth", -1, "maximum post-load client goroutine delta; -1 disables the threshold")
+	set.Int64Var(&opts.maxClientHeapGrowthMB, "max-client-heap-growth-mb", -1, "maximum post-load client heap growth in MiB; -1 disables the threshold")
+	set.StringVar(&opts.baselinePath, "baseline", "", "load JSON report used for regression comparison")
+	set.Float64Var(&opts.baselineTolerancePercent, "baseline-tolerance-percent", 10, "allowed relative latency regression against --baseline")
 	set.BoolVar(&opts.webSearch, "web-search", false, "run the network-dependent native WebSearch scenario")
 	set.BoolVar(&opts.cancellation, "cancellation", true, "run client cancellation and recovery in the full suite")
 	set.StringVar(&opts.scenariosCSV, "scenarios", "", "comma-separated full-suite scenario IDs to run")
@@ -306,6 +385,18 @@ func parseOptions(args []string) (options, error) {
 	if opts.rampDuration < time.Second || opts.rampDuration > time.Hour {
 		return options{}, errors.New("--ramp-duration must be between 1s and 1h")
 	}
+	if opts.staircaseHold < 0 || opts.staircaseHold > 24*time.Hour {
+		return options{}, errors.New("--staircase-hold must be between 0 and 24h")
+	}
+	if opts.staircaseCooldown < 0 || opts.staircaseCooldown > time.Hour {
+		return options{}, errors.New("--staircase-cooldown must be between 0 and 1h")
+	}
+	if opts.staircaseMaxRequests < 1 || opts.staircaseMaxRequests > 10000 {
+		return options{}, errors.New("--staircase-max-requests must be between 1 and 10000")
+	}
+	if opts.resourceSampleInterval != 0 && (opts.resourceSampleInterval < 100*time.Millisecond || opts.resourceSampleInterval > time.Minute) {
+		return options{}, errors.New("--resource-sample-interval must be 0 or between 100ms and 1m")
+	}
 	if opts.soakDuration < time.Second || opts.soakDuration > 24*time.Hour {
 		return options{}, errors.New("--soak-duration must be between 1s and 24h")
 	}
@@ -315,8 +406,32 @@ func parseOptions(args []string) (options, error) {
 	if opts.soakTokenBudget < 32 || opts.soakTokenBudget > 1000000 {
 		return options{}, errors.New("--soak-token-budget must be between 32 and 1000000")
 	}
+	if math.IsNaN(opts.minSuccessRate) || math.IsInf(opts.minSuccessRate, 0) || opts.minSuccessRate < 0 || opts.minSuccessRate > 100 {
+		return options{}, errors.New("--min-success-rate must be between 0 and 100")
+	}
+	if opts.maxP95Millis < 0 || opts.maxTTFTP95Millis < 0 || opts.maxStreamGapMillis < 0 {
+		return options{}, errors.New("latency thresholds must not be negative")
+	}
+	if math.IsNaN(opts.maxClientOverloadRate) || math.IsInf(opts.maxClientOverloadRate, 0) || opts.maxClientOverloadRate < -1 || opts.maxClientOverloadRate > 100 {
+		return options{}, errors.New("--max-client-overload-rate must be -1 or between 0 and 100")
+	}
+	if opts.maxClientGoroutineGrowth < -1 || opts.maxClientGoroutineGrowth > 1000000 {
+		return options{}, errors.New("--max-client-goroutine-growth must be -1 or between 0 and 1000000")
+	}
+	if opts.maxClientHeapGrowthMB < -1 || opts.maxClientHeapGrowthMB > 16384 {
+		return options{}, errors.New("--max-client-heap-growth-mb must be -1 or between 0 and 16384")
+	}
+	if math.IsNaN(opts.baselineTolerancePercent) || math.IsInf(opts.baselineTolerancePercent, 0) || opts.baselineTolerancePercent < 0 || opts.baselineTolerancePercent > 1000 {
+		return options{}, errors.New("--baseline-tolerance-percent must be between 0 and 1000")
+	}
 	if opts.suite == "soak" && opts.soakTokenBudget < opts.loadMaxTokens {
 		return options{}, errors.New("--soak-token-budget must reserve at least one --load-max-tokens request")
+	}
+	if opts.requireServerStats && !opts.collectServerStats {
+		return options{}, errors.New("--require-server-stats cannot be combined with --server-stats=false")
+	}
+	if opts.requireServerStats && opts.suite != "load" && opts.suite != "staircase" && opts.suite != "soak" {
+		return options{}, errors.New("--require-server-stats is supported only by load, staircase, and soak suites")
 	}
 	if opts.model != "" && opts.modelsCSV != "" {
 		return options{}, errors.New("--model and --models cannot be used together")
@@ -462,7 +577,14 @@ func uniqueNonEmpty(values []string) []string {
 }
 
 func (r *runner) scenarioContext(parent context.Context) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(parent, r.opts.timeout)
+	if parent == nil {
+		parent = context.Background()
+	}
+	timeout := r.opts.timeout
+	if timeout <= 0 {
+		timeout = time.Second
+	}
+	return context.WithTimeout(parent, timeout)
 }
 
 func (r *runner) printResults() {
@@ -513,29 +635,70 @@ func (r *runner) writeReport(path string) error {
 		ServerVersion:            r.serverVersion,
 		ConfigurationFingerprint: configurationFingerprint(r.opts),
 		Suite:                    r.opts.suite,
+		LoadProfile:              r.opts.loadProfile,
+		LoadPattern:              r.opts.loadPattern,
+		LoadMaxTokens:            r.opts.loadMaxTokens,
+		Concurrency:              r.opts.concurrency,
+		Requests:                 r.opts.requests,
+		TargetRPS:                r.opts.targetRPS,
+		RampMillis:               r.opts.rampDuration.Milliseconds(),
+		WarmupRequests:           r.opts.warmupRequests,
+		ConcurrencyLevels:        append([]int(nil), r.opts.concurrencySteps...),
+		StaircaseHoldMillis:      r.opts.staircaseHold.Milliseconds(),
+		StaircaseCooldownMillis:  r.opts.staircaseCooldown.Milliseconds(),
+		StaircaseMaxRequests:     r.opts.staircaseMaxRequests,
+		SoakMillis:               r.opts.soakDuration.Milliseconds(),
+		SoakMaxRequests:          r.opts.soakMaxRequests,
+		SoakTokenBudget:          r.opts.soakTokenBudget,
 		Model:                    r.model,
 		Models:                   append([]string(nil), r.selected...),
 		Results:                  r.results,
 		Summary:                  r.summary(),
+		BaselineCompared:         r.baselineCompared,
+		BaselineRegressions:      r.baselineRegressions,
+		BaselineMissing:          r.baselineMissing,
 	}
 	data, err := json.MarshalIndent(report, "", "  ")
 	if err != nil {
 		return err
 	}
 	data = append(data, '\n')
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	return writePrivateFileAtomically(path, data)
+}
+
+// writePrivateFileAtomically prevents readers from observing a half-written
+// report and keeps the temporary file beside the destination for an atomic
+// same-filesystem rename.
+func writePrivateFileAtomically(path string, data []byte) error {
+	directory := filepath.Dir(path)
+	pattern := "." + filepath.Base(path) + ".tmp-*"
+	file, err := os.CreateTemp(directory, pattern)
 	if err != nil {
 		return err
 	}
+	temporary := file.Name()
+	closed := false
+	defer func() {
+		if !closed {
+			_ = file.Close()
+		}
+		_ = os.Remove(temporary)
+	}()
 	if err := file.Chmod(0o600); err != nil {
-		_ = file.Close()
 		return err
 	}
 	if _, err := file.Write(data); err != nil {
-		_ = file.Close()
 		return err
 	}
-	return file.Close()
+	if err := file.Sync(); err != nil {
+		return err
+	}
+	if err := file.Close(); err != nil {
+		closed = true
+		return err
+	}
+	closed = true
+	return os.Rename(temporary, path)
 }
 
 func configurationFingerprint(opts options) string {
@@ -545,27 +708,41 @@ func configurationFingerprint(opts options) string {
 	}
 	sort.Strings(scenarios)
 	snapshot := struct {
-		BaseURL         string   `json:"baseUrl"`
-		Suite           string   `json:"suite"`
-		TimeoutMillis   int64    `json:"timeoutMillis"`
-		Concurrency     int      `json:"concurrency"`
-		Requests        int      `json:"requests"`
-		LoadProfile     string   `json:"loadProfile"`
-		LoadPattern     string   `json:"loadPattern"`
-		LoadMaxTokens   int      `json:"loadMaxTokens"`
-		WarmupRequests  int      `json:"warmupRequests"`
-		TargetRPS       float64  `json:"targetRps"`
-		RampMillis      int64    `json:"rampMillis"`
-		AllowHighLoad   bool     `json:"allowHighLoad"`
-		PostRecovery    bool     `json:"postLoadRecovery"`
-		SoakMillis      int64    `json:"soakMillis"`
-		SoakMaxRequests int      `json:"soakMaxRequests"`
-		SoakTokenBudget int      `json:"soakTokenBudget"`
-		WebSearch       bool     `json:"webSearch"`
-		Cancellation    bool     `json:"cancellation"`
-		AllModels       bool     `json:"allModels"`
-		Models          []string `json:"models,omitempty"`
-		Scenarios       []string `json:"scenarios,omitempty"`
+		BaseURL                  string   `json:"baseUrl"`
+		Suite                    string   `json:"suite"`
+		TimeoutMillis            int64    `json:"timeoutMillis"`
+		Concurrency              int      `json:"concurrency"`
+		Requests                 int      `json:"requests"`
+		LoadProfile              string   `json:"loadProfile"`
+		LoadPattern              string   `json:"loadPattern"`
+		LoadMaxTokens            int      `json:"loadMaxTokens"`
+		WarmupRequests           int      `json:"warmupRequests"`
+		TargetRPS                float64  `json:"targetRps"`
+		RampMillis               int64    `json:"rampMillis"`
+		AllowHighLoad            bool     `json:"allowHighLoad"`
+		PostRecovery             bool     `json:"postLoadRecovery"`
+		SoakMillis               int64    `json:"soakMillis"`
+		SoakMaxRequests          int      `json:"soakMaxRequests"`
+		SoakTokenBudget          int      `json:"soakTokenBudget"`
+		StaircaseHoldMillis      int64    `json:"staircaseHoldMillis"`
+		StaircaseCooldownMillis  int64    `json:"staircaseCooldownMillis"`
+		StaircaseMaxRequests     int      `json:"staircaseMaxRequests"`
+		ResourceSampleMillis     int64    `json:"resourceSampleMillis"`
+		CollectServerStats       bool     `json:"collectServerStats"`
+		RequireServerStats       bool     `json:"requireServerStats"`
+		MinSuccessRate           float64  `json:"minSuccessRate"`
+		MaxP95Millis             int64    `json:"maxP95Millis"`
+		MaxTTFTP95Millis         int64    `json:"maxTTFTP95Millis"`
+		MaxStreamGapMillis       int64    `json:"maxStreamGapMillis"`
+		MaxClientOverloadRate    float64  `json:"maxClientOverloadRate"`
+		MaxClientGoroutineGrowth int      `json:"maxClientGoroutineGrowth"`
+		MaxClientHeapGrowthMB    int64    `json:"maxClientHeapGrowthMb"`
+		BaselineTolerancePercent float64  `json:"baselineTolerancePercent"`
+		WebSearch                bool     `json:"webSearch"`
+		Cancellation             bool     `json:"cancellation"`
+		AllModels                bool     `json:"allModels"`
+		Models                   []string `json:"models,omitempty"`
+		Scenarios                []string `json:"scenarios,omitempty"`
 	}{
 		BaseURL: opts.baseURL, Suite: opts.suite, TimeoutMillis: opts.timeout.Milliseconds(),
 		Concurrency: opts.concurrency, Requests: opts.requests, SoakMillis: opts.soakDuration.Milliseconds(),
@@ -573,6 +750,13 @@ func configurationFingerprint(opts options) string {
 		WarmupRequests: opts.warmupRequests, TargetRPS: opts.targetRPS, RampMillis: opts.rampDuration.Milliseconds(), AllowHighLoad: opts.allowHighLoad,
 		PostRecovery:    opts.postLoadRecovery,
 		SoakMaxRequests: opts.soakMaxRequests, SoakTokenBudget: opts.soakTokenBudget,
+		StaircaseHoldMillis: opts.staircaseHold.Milliseconds(), StaircaseCooldownMillis: opts.staircaseCooldown.Milliseconds(), StaircaseMaxRequests: opts.staircaseMaxRequests,
+		ResourceSampleMillis: opts.resourceSampleInterval.Milliseconds(), MinSuccessRate: opts.minSuccessRate,
+		CollectServerStats: opts.collectServerStats,
+		RequireServerStats: opts.requireServerStats,
+		MaxP95Millis:       opts.maxP95Millis, MaxTTFTP95Millis: opts.maxTTFTP95Millis, MaxStreamGapMillis: opts.maxStreamGapMillis,
+		MaxClientOverloadRate: opts.maxClientOverloadRate, MaxClientGoroutineGrowth: opts.maxClientGoroutineGrowth,
+		MaxClientHeapGrowthMB: opts.maxClientHeapGrowthMB, BaselineTolerancePercent: opts.baselineTolerancePercent,
 		WebSearch: opts.webSearch, Cancellation: opts.cancellation, AllModels: opts.allModels,
 		Models: append([]string(nil), opts.models...), Scenarios: scenarios,
 	}

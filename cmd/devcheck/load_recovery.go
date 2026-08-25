@@ -21,8 +21,13 @@ func (r *runner) runPostLoadRecovery(parent context.Context) {
 	response := r.post(requestCtx, probe.path, probe.payload, true, probe.stream)
 	requestCancel()
 	sample := classifyLoadSample(response, probe)
-	result := responseScenarioResult("post-load-recovery", "load", r.model, response, false)
-	result.TotalMillis += health.total.Milliseconds()
+	var result scenarioResult
+	if probe.stream {
+		result = streamScenarioResult("post-load-recovery", "load", r.model, response)
+	} else {
+		result = responseScenarioResult("post-load-recovery", "load", r.model, response, false)
+	}
+	result.HealthCheckMillis = health.total.Milliseconds()
 	switch {
 	case !validJSONResponse(health):
 		result.Status = statusFail
@@ -34,5 +39,5 @@ func (r *runner) runPostLoadRecovery(parent context.Context) {
 		result.Status = statusPass
 		result.Detail = "health and deterministic request recovered after load"
 	}
-	r.add(result)
+	r.add(r.finalizeLoadResult(result))
 }

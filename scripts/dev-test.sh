@@ -4,13 +4,15 @@ set -Eeuo pipefail
 usage() {
   cat <<'EOF'
 Usage:
-  bash scripts/dev-test.sh [quick|full|fault|fuzz|bench|live|live-full|client-e2e|matrix|load|staircase|soak|all] [options]
+  bash scripts/dev-test.sh [quick|full|fault|pressure|docker-restart|fuzz|bench|live|live-full|client-e2e|matrix|load|staircase|soak|all] [options]
 
 Modes:
   quick       Offline unit tests, vet, build, JavaScript, shell, and Compose checks.
   full        Quick checks plus race detection, repeated stream regressions, updater tests,
               and pinned govulncheck dependency scanning.
   fault       Run deterministic stream, retry, timeout, and fault-injection regressions.
+  pressure    Repeat load, failover, endpoint-circuit, admission, cache, and persistence regressions.
+  docker-restart Build an isolated image, restart a disposable container, and recheck health.
   fuzz        Run bounded EventStream, SSE, schema, and request-parser fuzzing.
   bench       Run parser, translation, cache, routing, and logging benchmarks.
   live        Run the smoke suite against a local service.
@@ -30,7 +32,12 @@ Live modes require KIRO_DEV_API_KEY in the environment. Optional variables:
 Load controls:
   --load-profile marker|realistic, --load-max-tokens N, --warmup-requests N,
   --load-pattern closed|fixed|ramp, --target-rps N, --ramp-duration D,
-  --allow-high-load (required above 100 workers), --post-load-recovery=false.
+  --allow-high-load (required above 100 workers), --post-load-recovery=false,
+  --staircase-hold D, --staircase-cooldown D, --server-stats=false,
+  --require-server-stats,
+  --max-p95-ms N, --max-ttft-p95-ms N, --max-stream-gap-p95-ms N,
+  --max-client-goroutine-growth N, --max-client-heap-growth-mb N,
+  --baseline FILE, --baseline-tolerance-percent N.
 
 Examples:
   bash scripts/dev-test.sh quick
@@ -47,6 +54,9 @@ Examples:
   bash scripts/dev-test.sh load --allow-high-load --concurrency 250 --requests 500
   bash scripts/dev-test.sh staircase --requests 10
   bash scripts/dev-test.sh soak --soak-duration 10m --soak-max-requests 500 --soak-token-budget 16000
+  bash scripts/dev-test.sh staircase --concurrency-levels 1,5,10,20 --staircase-hold 30s --staircase-cooldown 10s
+  bash scripts/dev-test.sh load --json-report /tmp/load.json --max-p95-ms 30000
+  bash scripts/dev-test.sh load --baseline /tmp/load.json --baseline-tolerance-percent 10
 EOF
 }
 
@@ -68,16 +78,16 @@ if [[ $# -gt 0 ]]; then
   shift
 fi
 
-check_tracked_secrets() {
+check_sensitive_paths() {
   local path
   while IFS= read -r path; do
     case "$path" in
-      data/*|.env|.env.*|kiro-accounts-*.json|*account-export*.json|*credentials-export*.json|*.pem|*.key|*.p12|*.pfx|*.db|*.sqlite|*.sqlite3)
+      data/*|.env|.env.*|kiro-accounts-*.json|*account-export*.json|*credentials-export*.json|*.pem|*.key|*.p12|*.pfx|*.db|*.sqlite|*.sqlite3|*.log|*.bak|*.tar|*.tar.gz|*.zip|*.7z|.update-backups/*)
         [[ "$path" == ".env.example" ]] && continue
-        die "tracked sensitive path detected: $path"
+        die "sensitive path is tracked or staged for publication: $path"
         ;;
     esac
-  done < <(git ls-files)
+  done < <(git ls-files --cached --others --exclude-standard)
 }
 
 check_compose() {
@@ -122,7 +132,7 @@ run_quick() {
 
   info "checking shell syntax and tracked sensitive paths"
   bash -n scripts/*.sh
-  check_tracked_secrets
+  check_sensitive_paths
   check_compose
 }
 
@@ -143,6 +153,63 @@ run_fault() {
   go test ./cmd/devcheck -count=1
   info "running upstream EventStream and failover fault fixtures"
   go test ./proxy -count=1 -run 'Test(ParseEventStreamRejects|ParseEventStreamMarks|AccountFailover|AccountAttemptController|MeaningfulStream|ToolAssembly)'
+}
+
+run_pressure() {
+  info "repeating deterministic devcheck pressure and fault regressions"
+  go test ./cmd/devcheck -shuffle=on -count=3 -timeout=15m
+  info "repeating account failover, endpoint circuit, admission, cache, and persistence regressions"
+  go test ./proxy -shuffle=on -count=3 -timeout=20m -run 'Test(APIKeyAdmission|AccountAttemptController|AccountEndpointRoute|UpstreamHealth|CallKiroAPIFallsBack|CallKiroAPIRetries|CallKiroAPIStops|PromptCache|ResponsesStore|RequestLogPersistence|TokenRefreshCoordinator)'
+  go test ./pool -shuffle=on -count=3 -timeout=15m -run 'Test(AcquireForModel|CircuitBreaker|FailedHalfOpen|RuntimeStatePersists)'
+}
+
+run_docker_restart() {
+  command -v docker >/dev/null 2>&1 || die "docker is required for docker-restart"
+  command -v openssl >/dev/null 2>&1 || die "openssl is required for docker-restart"
+  local name="kiro-go-plus-restart-${BASHPID}"
+  local image="kiro-go-plus-restart:${BASHPID}"
+  local data_dir
+  local master_key
+  data_dir="$(mktemp -d)"
+  master_key="$(openssl rand -base64 32)"
+  chmod 0777 "$data_dir"
+  cleanup_docker_restart() {
+    docker rm -f "$name" >/dev/null 2>&1 || true
+    docker image rm "$image" >/dev/null 2>&1 || true
+    rm -rf "$data_dir"
+  }
+  trap cleanup_docker_restart EXIT
+
+  info "building isolated restart image"
+  docker build --tag "$image" .
+  info "starting disposable container"
+  docker run --detach --name "$name" \
+    --env ADMIN_PASSWORD=devcheck-admin-password \
+    --env KIRO_MASTER_KEY="$master_key" \
+    --env KIRO_LISTEN_HOST=0.0.0.0 \
+    --env KIRO_LISTEN_PORT=8080 \
+    --volume "$data_dir:/app/data" \
+    "$image" >/dev/null
+
+  wait_for_health() {
+    local attempt
+    for attempt in $(seq 1 45); do
+      if docker exec "$name" wget -q -O - http://127.0.0.1:8080/health | grep -q '"status":"ok"'; then
+        return 0
+      fi
+      sleep 1
+    done
+    docker logs "$name" >&2 || true
+    return 1
+  }
+
+  wait_for_health || die "container did not become healthy before restart"
+  info "restarting disposable container"
+  docker restart "$name" >/dev/null
+  wait_for_health || die "container did not recover after restart"
+  info "container restart health check passed"
+  cleanup_docker_restart
+  trap - EXIT
 }
 
 run_fuzz() {
@@ -173,6 +240,12 @@ case "$MODE" in
     ;;
   fault)
     run_fault
+    ;;
+  pressure)
+    run_pressure
+    ;;
+  docker-restart)
+    run_docker_restart
     ;;
   fuzz)
     run_fuzz

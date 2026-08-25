@@ -639,7 +639,7 @@ func (r *runner) runLoad(parent context.Context) {
 	r.runLoadWarmup(parent)
 	execution := r.executeLoad(parent, r.opts.concurrency, r.opts.requests, r.effectiveLoadMaxTokens())
 	r.correlateLoadSamples(parent, execution.samples)
-	r.add(buildLoadExecutionResult("concurrent-load", r.model, r.opts.concurrency, r.opts.requests, execution))
+	r.add(r.finalizeLoadResult(buildLoadExecutionResult("concurrent-load", r.model, r.opts.concurrency, r.opts.requests, execution)))
 	r.runPostLoadRecovery(parent)
 }
 
@@ -648,15 +648,36 @@ func (r *runner) runStaircase(parent context.Context) {
 		parent = context.Background()
 	}
 	r.runLoadWarmup(parent)
-	for _, concurrency := range r.opts.concurrencySteps {
+	for level, concurrency := range r.opts.concurrencySteps {
 		requests := max(r.opts.requests, concurrency)
-		execution := r.executeLoadPattern(parent, concurrency, requests, r.effectiveLoadMaxTokens(), "closed", 0, 0, 0)
+		levelParent := parent
+		expected := requests
+		holdMode := r.opts.staircaseHold > 0
+		var levelCancel context.CancelFunc
+		if holdMode {
+			levelParent, levelCancel = context.WithTimeout(parent, r.opts.staircaseHold)
+			requests = r.opts.staircaseMaxRequests
+		}
+		execution := r.executeLoadPatternWithParents(levelParent, parent, parent, concurrency, requests, r.effectiveLoadMaxTokens(), "closed", 0, 0, 0)
+		if levelCancel != nil {
+			levelCancel()
+			expected = execution.scheduled
+		}
 		r.correlateLoadSamples(parent, execution.samples)
-		result := buildLoadExecutionResult(fmt.Sprintf("concurrency-staircase-%d", concurrency), r.model, concurrency, requests, execution)
-		result.Detail += "; level requests are max(--requests, concurrency)"
+		result := r.finalizeLoadResult(buildLoadExecutionResult(fmt.Sprintf("concurrency-staircase-%d", concurrency), r.model, concurrency, expected, execution))
+		if holdMode {
+			result.Detail += fmt.Sprintf("; level_hold=%s level_request_cap=%d", r.opts.staircaseHold, r.opts.staircaseMaxRequests)
+		} else {
+			result.Detail += "; level requests are max(--requests, concurrency)"
+		}
 		r.add(result)
 		if parent.Err() != nil {
 			return
+		}
+		if level < len(r.opts.concurrencySteps)-1 && r.opts.staircaseCooldown > 0 {
+			if !sleepWithContext(parent, r.opts.staircaseCooldown) {
+				return
+			}
 		}
 	}
 	r.runPostLoadRecovery(parent)
@@ -669,17 +690,11 @@ func (r *runner) runSoak(parent context.Context) {
 	r.runLoadWarmup(parent)
 	maxTokensPerRequest := r.effectiveLoadMaxTokens()
 	target := min(r.opts.soakMaxRequests, r.opts.soakTokenBudget/maxTokensPerRequest)
-	resourcesBefore := readLoadResourceSnapshot()
-	startedAt := time.Now()
-	samples, scheduled, durationReached := r.executeSoak(parent, r.opts.concurrency, target, maxTokensPerRequest, r.opts.soakDuration)
-	resourcesAfter := readLoadResourceSnapshot()
-	execution := loadExecution{
-		samples: samples, wall: time.Since(startedAt), scheduled: scheduled, pattern: "closed",
-		clientGoroutineDelta: resourcesAfter.goroutines - resourcesBefore.goroutines,
-		clientHeapDeltaBytes: signedUint64Delta(resourcesAfter.heapAlloc, resourcesBefore.heapAlloc),
-	}
+	execution := r.executeSoakExecution(parent, r.opts.concurrency, target, maxTokensPerRequest, r.opts.soakDuration)
+	scheduled := execution.scheduled
+	durationReached := execution.soakDurationReached
 	r.correlateLoadSamples(parent, execution.samples)
-	result := buildLoadExecutionResult("bounded-soak", r.model, r.opts.concurrency, scheduled, execution)
+	result := r.finalizeLoadResult(buildLoadExecutionResult("bounded-soak", r.model, r.opts.concurrency, scheduled, execution))
 	stopReason := "request/token cap"
 	if durationReached {
 		stopReason = "duration cap"
@@ -708,7 +723,7 @@ func (r *runner) runLoadWarmup(parent context.Context) {
 	execution := r.executeLoadPattern(parent, concurrency, r.opts.warmupRequests, r.effectiveLoadMaxTokens(), "closed", 0, 0, 1_000_000)
 	result := buildLoadExecutionResult("load-warmup", r.model, concurrency, r.opts.warmupRequests, execution)
 	result.WarmupRequests = r.opts.warmupRequests
-	r.add(result)
+	r.add(r.finalizeLoadResult(result))
 }
 
 func (r *runner) effectiveLoadMaxTokens() int {
@@ -719,14 +734,27 @@ func (r *runner) effectiveLoadMaxTokens() int {
 }
 
 type loadExecution struct {
-	samples              []loadSample
-	wall                 time.Duration
-	scheduled            int
-	dropped              int
-	pattern              string
-	targetRPS            float64
-	clientGoroutineDelta int
-	clientHeapDeltaBytes int64
+	samples                []loadSample
+	scheduleWall           time.Duration
+	wall                   time.Duration
+	scheduled              int
+	dropped                int
+	pattern                string
+	targetRPS              float64
+	clientGoroutineDelta   int
+	clientHeapDeltaBytes   int64
+	clientGoroutinesBefore int
+	clientHeapBefore       uint64
+	clientGoroutinesAfter  int
+	clientHeapAfter        uint64
+	clientResourceSamples  int
+	clientPeakGoroutines   int
+	clientPeakHeapAlloc    uint64
+	serverStatsBefore      loadServerStats
+	serverStatsAfter       loadServerStats
+	serverStatsSamples     int
+	serverStatsErrors      int
+	soakDurationReached    bool
 }
 
 type loadJob struct {
@@ -762,6 +790,14 @@ func (r *runner) executeLoad(parent context.Context, concurrency, requests, maxT
 }
 
 func (r *runner) executeLoadPattern(parent context.Context, concurrency, requests, maxTokens int, pattern string, targetRPS float64, rampDuration time.Duration, indexOffset int) loadExecution {
+	return r.executeLoadPatternWithParents(parent, parent, parent, concurrency, requests, maxTokens, pattern, targetRPS, rampDuration, indexOffset)
+}
+
+// executeLoadPatternWithParents separates the scheduling window from the
+// request lifetime. A staircase hold should stop admitting new work at the
+// level deadline, but requests already admitted must get their normal request
+// timeout to finish and be measured accurately.
+func (r *runner) executeLoadPatternWithParents(scheduleParent, requestParent, statsParent context.Context, concurrency, requests, maxTokens int, pattern string, targetRPS float64, rampDuration time.Duration, indexOffset int) loadExecution {
 	pattern = normalizeLoadPattern(pattern)
 	if pattern != "closed" && (!finitePositive(targetRPS)) {
 		pattern = "closed"
@@ -778,11 +814,20 @@ func (r *runner) executeLoadPattern(parent context.Context, concurrency, request
 	if maxTokens < 1 {
 		maxTokens = 1
 	}
-	if parent == nil {
-		parent = context.Background()
+	if scheduleParent == nil {
+		scheduleParent = context.Background()
+	}
+	if requestParent == nil {
+		requestParent = scheduleParent
+	}
+	if statsParent == nil {
+		statsParent = requestParent
+	}
+	if requestParent.Err() != nil {
+		return loadExecution{pattern: pattern, targetRPS: targetRPS}
 	}
 	suiteTimeout := loadSuiteTimeout(pattern, concurrency, requests, targetRPS, r.opts.timeout, rampDuration)
-	ctx, cancel := context.WithTimeout(parent, suiteTimeout)
+	ctx, cancel := context.WithTimeout(scheduleParent, suiteTimeout)
 	defer cancel()
 	queueCapacity := 0
 	if pattern != "closed" {
@@ -791,8 +836,21 @@ func (r *runner) executeLoadPattern(parent context.Context, concurrency, request
 	jobs := make(chan loadJob, queueCapacity)
 	results := make(chan loadSample, requests)
 	var workers sync.WaitGroup
-	startedAt := time.Now()
 	resourcesBefore := readLoadResourceSnapshot()
+	resourceSampler := newLoadResourceSampler(requestParent, r.opts.resourceSampleInterval)
+	var serverBefore loadServerStats
+	var serverBeforeErr error
+	if r.opts.collectServerStats {
+		serverBefore, serverBeforeErr = r.fetchLoadServerStats(loadStatsContext(statsParent))
+	}
+	serverStatsSamples := 0
+	serverStatsErrors := 0
+	if r.opts.collectServerStats && serverBeforeErr == nil {
+		serverStatsSamples++
+	} else if r.opts.collectServerStats {
+		serverStatsErrors++
+	}
+	startedAt := time.Now()
 	for worker := 0; worker < concurrency; worker++ {
 		workers.Add(1)
 		go func() {
@@ -800,7 +858,7 @@ func (r *runner) executeLoadPattern(parent context.Context, concurrency, request
 			for job := range jobs {
 				requestStartedAt := time.Now()
 				probe := r.buildConfiguredLoadProbe(job.index, maxTokens)
-				requestCtx, requestCancel := r.scenarioContext(ctx)
+				requestCtx, requestCancel := r.scenarioContext(requestParent)
 				response := r.post(requestCtx, probe.path, probe.payload, true, probe.stream)
 				requestCancel()
 				sample := classifyLoadSample(response, probe)
@@ -845,6 +903,7 @@ func (r *runner) executeLoadPattern(parent context.Context, concurrency, request
 		}
 		nextArrival = nextArrival.Add(loadArrivalInterval(pattern, targetRPS, time.Since(scheduleStartedAt), rampDuration))
 	}
+	scheduleWall := time.Since(scheduleStartedAt)
 	close(jobs)
 	workers.Wait()
 	close(results)
@@ -853,12 +912,30 @@ func (r *runner) executeLoadPattern(parent context.Context, concurrency, request
 		samples = append(samples, sample)
 	}
 	markDuplicateLoadRequestIDs(samples)
+	resourceSampler.stop()
+	resourceSamples, peakGoroutines, peakHeapAlloc := resourceSampler.summary()
 	resourcesAfter := readLoadResourceSnapshot()
+	loadWall := time.Since(startedAt)
+	var serverAfter loadServerStats
+	var serverAfterErr error
+	if r.opts.collectServerStats {
+		serverAfter, serverAfterErr = r.fetchLoadServerStats(loadStatsContext(statsParent))
+	}
+	if r.opts.collectServerStats && serverAfterErr == nil {
+		serverStatsSamples++
+	} else if r.opts.collectServerStats {
+		serverStatsErrors++
+	}
 	return loadExecution{
-		samples: samples, wall: time.Since(startedAt), scheduled: scheduled, dropped: dropped,
+		samples: samples, scheduleWall: scheduleWall, wall: loadWall, scheduled: scheduled, dropped: dropped,
 		pattern: pattern, targetRPS: targetRPS,
-		clientGoroutineDelta: resourcesAfter.goroutines - resourcesBefore.goroutines,
-		clientHeapDeltaBytes: signedUint64Delta(resourcesAfter.heapAlloc, resourcesBefore.heapAlloc),
+		clientGoroutineDelta:   resourcesAfter.goroutines - resourcesBefore.goroutines,
+		clientHeapDeltaBytes:   signedUint64Delta(resourcesAfter.heapAlloc, resourcesBefore.heapAlloc),
+		clientGoroutinesBefore: resourcesBefore.goroutines, clientHeapBefore: resourcesBefore.heapAlloc,
+		clientGoroutinesAfter: resourcesAfter.goroutines, clientHeapAfter: resourcesAfter.heapAlloc,
+		clientResourceSamples: resourceSamples, clientPeakGoroutines: peakGoroutines, clientPeakHeapAlloc: peakHeapAlloc,
+		serverStatsBefore: serverBefore, serverStatsAfter: serverAfter,
+		serverStatsSamples: serverStatsSamples, serverStatsErrors: serverStatsErrors,
 	}
 }
 
@@ -954,6 +1031,23 @@ func waitUntil(ctx context.Context, target time.Time) bool {
 	}
 }
 
+func sleepWithContext(ctx context.Context, duration time.Duration) bool {
+	if duration <= 0 {
+		return ctx == nil || ctx.Err() == nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
 func markDuplicateLoadRequestIDs(samples []loadSample) {
 	seen := make(map[string]struct{}, len(samples))
 	for index := range samples {
@@ -971,18 +1065,39 @@ func markDuplicateLoadRequestIDs(samples []loadSample) {
 }
 
 func (r *runner) executeSoak(parent context.Context, concurrency, target, maxTokens int, duration time.Duration) ([]loadSample, int, bool) {
+	execution := r.executeSoakExecution(parent, concurrency, target, maxTokens, duration)
+	return execution.samples, execution.scheduled, execution.soakDurationReached
+}
+
+func (r *runner) executeSoakExecution(parent context.Context, concurrency, target, maxTokens int, duration time.Duration) loadExecution {
 	if concurrency < 1 || target < 1 {
-		return []loadSample{}, 0, false
+		return loadExecution{pattern: "soak"}
 	}
 	if maxTokens < 1 {
 		maxTokens = 1
 	}
 	if duration <= 0 {
-		return []loadSample{}, 0, true
+		return loadExecution{pattern: "soak", soakDurationReached: true}
 	}
 	if parent == nil {
 		parent = context.Background()
 	}
+	resourcesBefore := readLoadResourceSnapshot()
+	resourceSampler := newLoadResourceSampler(parent, r.opts.resourceSampleInterval)
+	var serverBefore loadServerStats
+	var serverBeforeErr error
+	if r.opts.collectServerStats {
+		serverBefore, serverBeforeErr = r.fetchLoadServerStats(loadStatsContext(parent))
+	}
+	serverStatsSamples := 0
+	serverStatsErrors := 0
+	if r.opts.collectServerStats && serverBeforeErr == nil {
+		serverStatsSamples++
+	} else if r.opts.collectServerStats {
+		serverStatsErrors++
+	}
+	startedAt := time.Now()
+	scheduleStartedAt := startedAt
 	scheduleCtx, stopScheduling := context.WithTimeout(parent, duration)
 	defer stopScheduling()
 	jobs := make(chan int)
@@ -1004,6 +1119,7 @@ func (r *runner) executeSoak(parent context.Context, concurrency, target, maxTok
 	type scheduleResult struct {
 		count           int
 		durationReached bool
+		wall            time.Duration
 	}
 	scheduledResult := make(chan scheduleResult, 1)
 	go func() {
@@ -1014,11 +1130,11 @@ func (r *runner) executeSoak(parent context.Context, concurrency, target, maxTok
 			case jobs <- index:
 				scheduled++
 			case <-scheduleCtx.Done():
-				scheduledResult <- scheduleResult{count: scheduled, durationReached: errors.Is(scheduleCtx.Err(), context.DeadlineExceeded)}
+				scheduledResult <- scheduleResult{count: scheduled, durationReached: errors.Is(scheduleCtx.Err(), context.DeadlineExceeded), wall: time.Since(scheduleStartedAt)}
 				return
 			}
 		}
-		scheduledResult <- scheduleResult{count: scheduled}
+		scheduledResult <- scheduleResult{count: scheduled, wall: time.Since(scheduleStartedAt)}
 	}()
 	workers.Wait()
 	close(results)
@@ -1028,7 +1144,31 @@ func (r *runner) executeSoak(parent context.Context, concurrency, target, maxTok
 		samples = append(samples, sample)
 	}
 	markDuplicateLoadRequestIDs(samples)
-	return samples, schedule.count, schedule.durationReached
+	resourceSampler.stop()
+	resourceSamples, peakGoroutines, peakHeapAlloc := resourceSampler.summary()
+	resourcesAfter := readLoadResourceSnapshot()
+	loadWall := time.Since(startedAt)
+	var serverAfter loadServerStats
+	var serverAfterErr error
+	if r.opts.collectServerStats {
+		serverAfter, serverAfterErr = r.fetchLoadServerStats(loadStatsContext(parent))
+	}
+	if r.opts.collectServerStats && serverAfterErr == nil {
+		serverStatsSamples++
+	} else if r.opts.collectServerStats {
+		serverStatsErrors++
+	}
+	return loadExecution{
+		samples: samples, scheduleWall: schedule.wall, wall: loadWall, scheduled: schedule.count,
+		pattern: "soak", clientGoroutineDelta: resourcesAfter.goroutines - resourcesBefore.goroutines,
+		clientHeapDeltaBytes:   signedUint64Delta(resourcesAfter.heapAlloc, resourcesBefore.heapAlloc),
+		clientGoroutinesBefore: resourcesBefore.goroutines, clientHeapBefore: resourcesBefore.heapAlloc,
+		clientGoroutinesAfter: resourcesAfter.goroutines, clientHeapAfter: resourcesAfter.heapAlloc,
+		clientResourceSamples: resourceSamples, clientPeakGoroutines: peakGoroutines, clientPeakHeapAlloc: peakHeapAlloc,
+		serverStatsBefore: serverBefore, serverStatsAfter: serverAfter,
+		serverStatsSamples: serverStatsSamples, serverStatsErrors: serverStatsErrors,
+		soakDurationReached: schedule.durationReached,
+	}
 }
 
 func classifyLoadSample(response apiResponse, probe loadProbe) loadSample {
@@ -1050,12 +1190,17 @@ func classifyLoadSample(response apiResponse, probe loadProbe) loadSample {
 		sample.maxWireGap = response.stream.maxActivityGap.Milliseconds()
 	}
 	switch {
+	case errors.Is(response.err, errResponseTooLarge):
+		sample.category = "response_too_large"
+	case response.err != nil && probe.stream && response.stream.semanticOutput && !response.stream.terminal:
+		// Keep the observable failure mode: once semantic data reached the
+		// client, an ended stream is truncated even when the transport reports
+		// the underlying deadline or cancellation cause.
+		sample.category = "stream_truncated"
 	case errors.Is(response.err, context.DeadlineExceeded):
 		sample.category = "timeout"
 	case errors.Is(response.err, context.Canceled):
 		sample.category = "canceled"
-	case errors.Is(response.err, errResponseTooLarge):
-		sample.category = "response_too_large"
 	case response.err != nil:
 		sample.category = "transport"
 	case response.statusCode == http.StatusTooManyRequests:
@@ -1229,9 +1374,18 @@ func buildLoadExecutionResult(name, model string, concurrency, expected int, exe
 	if missing := expected - len(samples); missing > 0 {
 		failures["not_started_or_canceled"] += missing
 	}
+	completed := max(len(samples)-execution.dropped, 0)
+	serverDelta := loadServerStats{}
+	serverCounterReset := false
+	if execution.serverStatsSamples >= 2 {
+		serverDelta, serverCounterReset = loadServerStatsDelta(execution.serverStatsBefore, execution.serverStatsAfter)
+	}
+	peakGoroutineGrowth := max(execution.clientPeakGoroutines-execution.clientGoroutinesBefore, 0)
+	peakHeapGrowth := signedUint64Delta(execution.clientPeakHeapAlloc, execution.clientHeapBefore)
 	result := scenarioResult{
 		Name: name, Protocol: "load", Model: model, Requests: expected, Successes: successes,
 		ScheduledRequests: execution.scheduled, DroppedRequests: execution.dropped,
+		SampleCount: len(samples), CompletedRequests: completed,
 		DistinctRequestIDs: len(requestIDs), OutputTokens: outputTokens,
 		FailureCategories: failures, WorkloadSuccesses: workloadSuccesses, WorkloadFailures: workloadFailures,
 		EndpointCounts: endpointCounts, CorrelatedRequests: correlated, AccountAttempts: accountAttempts,
@@ -1241,25 +1395,48 @@ func buildLoadExecutionResult(name, model string, concurrency, expected int, exe
 		FailureP50Millis: percentile(failureDurations, 0.50), FailureP95Millis: percentile(failureDurations, 0.95), FailureP99Millis: percentile(failureDurations, 0.99),
 		HeaderP95Millis: percentile(headers, 0.95), TTFTP50Millis: percentile(ttfts, 0.50), TTFTP95Millis: percentile(ttfts, 0.95), TTFTP99Millis: percentile(ttfts, 0.99),
 		QueueP95Millis: percentile(queueDelays, 0.95), StreamGapP95MS: percentile(streamGaps, 0.95), WireGapP95MS: percentile(wireGaps, 0.95),
-		WallMillis: execution.wall.Milliseconds(), TargetRPS: execution.targetRPS, SelectionP95MS: percentile(selectionTimes, 0.95),
+		ScheduleMillis: execution.scheduleWall.Milliseconds(), WallMillis: execution.wall.Milliseconds(), TargetRPS: execution.targetRPS, SelectionP95MS: percentile(selectionTimes, 0.95),
 		ClientGoroutineDelta: execution.clientGoroutineDelta, ClientHeapDeltaBytes: execution.clientHeapDeltaBytes,
+		ClientResourceSamples: execution.clientResourceSamples, ClientPeakGoroutines: execution.clientPeakGoroutines,
+		ClientPeakHeapAllocBytes:  serverSafeInt64(execution.clientPeakHeapAlloc),
+		ClientPeakGoroutineGrowth: peakGoroutineGrowth,
+		ClientPeakHeapGrowthBytes: peakHeapGrowth,
+		ServerStatsSamples:        execution.serverStatsSamples, ServerStatsRequestsDelta: serverDelta.requests,
+		ServerStatsTokensDelta: serverDelta.tokens, ServerStatsErrors: execution.serverStatsErrors, ServerStatsCounterReset: serverCounterReset,
 	}
 	if execution.wall > 0 {
 		seconds := execution.wall.Seconds()
-		result.ArrivalRPS = float64(execution.scheduled) / seconds
-		completed := max(len(samples)-execution.dropped, 0)
 		result.AchievedRPS = float64(completed) / seconds
 		result.SuccessRPS = float64(successes) / seconds
 	}
-	result.TotalMillis = result.P95Millis
+	arrivalWindow := loadArrivalWindow(execution)
+	if arrivalWindow > 0 {
+		result.ArrivalRPS = float64(execution.scheduled) / arrivalWindow.Seconds()
+	}
+	if expected > 0 {
+		result.SuccessRate = 100 * float64(successes) / float64(expected)
+	}
+	if execution.scheduled > 0 {
+		result.CompletionRate = 100 * float64(completed) / float64(execution.scheduled)
+		result.ClientOverloadRate = 100 * float64(execution.dropped) / float64(execution.scheduled)
+	}
+	result.TotalMillis = execution.wall.Milliseconds()
 	result.Detail = fmt.Sprintf(
-		"success=%d/%d completed=%d stream=%d/%d nonstream=%d/%d concurrency=%d pattern=%s arrival_rps=%.2f achieved_rps=%.2f success_rps=%.2f p95=%dms ttft_p95=%dms failures=%s",
-		successes, expected, len(samples),
+		"success=%d/%d completed=%d samples=%d success_rate=%.1f%% completion_rate=%.1f%% overload_rate=%.1f%% stream=%d/%d nonstream=%d/%d concurrency=%d pattern=%s arrival_rps=%.2f achieved_rps=%.2f success_rps=%.2f p95=%dms ttft_p95=%dms schedule=%dms wall=%dms failures=%s",
+		successes, expected, completed,
+		len(samples), result.SuccessRate, result.CompletionRate, result.ClientOverloadRate,
 		streamSuccesses, streamRequests,
 		nonStreamSuccesses, len(samples)-streamRequests,
-		concurrency, execution.pattern, result.ArrivalRPS, result.AchievedRPS, result.SuccessRPS, result.P95Millis, result.TTFTP95Millis, formatFailureCategories(failures),
+		concurrency, execution.pattern, result.ArrivalRPS, result.AchievedRPS, result.SuccessRPS, result.P95Millis, result.TTFTP95Millis, result.ScheduleMillis, result.WallMillis, formatFailureCategories(failures),
 	)
 	result.Detail += "; protocols=" + formatFailureCategories(protocolSuccesses)
+	result.Detail += fmt.Sprintf("; client_goroutines_delta=%d peak_growth=%d heap_delta=%dB", result.ClientGoroutineDelta, result.ClientPeakGoroutineGrowth, result.ClientHeapDeltaBytes)
+	if result.ServerStatsErrors > 0 {
+		result.Detail += fmt.Sprintf("; server_stats_errors=%d", result.ServerStatsErrors)
+	}
+	if result.ServerStatsCounterReset {
+		result.Detail += "; server_counters=reset"
+	}
 	if expected == 0 {
 		result.Status = statusFail
 		result.Detail += "; no requests were expected"
@@ -1276,6 +1453,71 @@ func buildLoadExecutionResult(name, model string, concurrency, expected int, exe
 	}
 	if len(endpointCounts) == 0 {
 		result.EndpointCounts = nil
+	}
+	return result
+}
+
+func loadArrivalWindow(execution loadExecution) time.Duration {
+	if execution.pattern == "fixed" || execution.pattern == "ramp" {
+		if execution.scheduleWall > 0 {
+			return execution.scheduleWall
+		}
+	}
+	return execution.wall
+}
+
+func serverSafeInt64(value uint64) int64 {
+	maxInt64 := uint64(^uint64(0) >> 1)
+	if value > maxInt64 {
+		return int64(maxInt64)
+	}
+	return int64(value)
+}
+
+func (r *runner) finalizeLoadResult(result scenarioResult) scenarioResult {
+	if r == nil || result.Protocol != "load" || result.Requests <= 0 {
+		return result
+	}
+	violations := make([]string, 0, 7)
+	if r.opts.minSuccessRate > 0 && result.SuccessRate < r.opts.minSuccessRate {
+		violations = append(violations, fmt.Sprintf("success_rate %.1f%% < %.1f%%", result.SuccessRate, r.opts.minSuccessRate))
+	}
+	if r.opts.maxP95Millis > 0 && result.P95Millis > r.opts.maxP95Millis {
+		violations = append(violations, fmt.Sprintf("p95 %dms > %dms", result.P95Millis, r.opts.maxP95Millis))
+	}
+	if r.opts.maxTTFTP95Millis > 0 && result.TTFTP95Millis > r.opts.maxTTFTP95Millis {
+		violations = append(violations, fmt.Sprintf("ttft_p95 %dms > %dms", result.TTFTP95Millis, r.opts.maxTTFTP95Millis))
+	}
+	if r.opts.maxStreamGapMillis > 0 && result.StreamGapP95MS > r.opts.maxStreamGapMillis {
+		violations = append(violations, fmt.Sprintf("stream_gap_p95 %dms > %dms", result.StreamGapP95MS, r.opts.maxStreamGapMillis))
+	}
+	if r.opts.maxClientOverloadRate >= 0 && result.ClientOverloadRate > r.opts.maxClientOverloadRate {
+		violations = append(violations, fmt.Sprintf("client_overload_rate %.1f%% > %.1f%%", result.ClientOverloadRate, r.opts.maxClientOverloadRate))
+	}
+	if r.opts.maxClientGoroutineGrowth > 0 && result.ClientGoroutineDelta > r.opts.maxClientGoroutineGrowth {
+		violations = append(violations, fmt.Sprintf("client_goroutine_delta %d > %d", result.ClientGoroutineDelta, r.opts.maxClientGoroutineGrowth))
+	}
+	if r.opts.maxClientHeapGrowthMB > 0 {
+		limit := r.opts.maxClientHeapGrowthMB * 1024 * 1024
+		if result.ClientHeapDeltaBytes > limit {
+			violations = append(violations, fmt.Sprintf("client_heap_delta %dB > %dB", result.ClientHeapDeltaBytes, limit))
+		}
+	}
+	if r.opts.requireServerStats {
+		if result.ServerStatsErrors > 0 {
+			violations = append(violations, fmt.Sprintf("server_stats_errors=%d", result.ServerStatsErrors))
+		}
+		if result.ServerStatsSamples < 2 {
+			violations = append(violations, fmt.Sprintf("server_stats_samples=%d < 2", result.ServerStatsSamples))
+		}
+		if result.ServerStatsCounterReset {
+			violations = append(violations, "server_stats_counter_reset")
+		}
+	}
+	if len(violations) > 0 {
+		result.Status = statusFail
+		result.ThresholdFailures = append(result.ThresholdFailures, violations...)
+		result.Detail += "; threshold_failures=" + strings.Join(violations, " | ")
 	}
 	return result
 }

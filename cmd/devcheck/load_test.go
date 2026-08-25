@@ -9,6 +9,7 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -24,11 +25,12 @@ func TestParseLoadControlsAndHighConcurrencyGuard(t *testing.T) {
 		"--suite", "load", "--concurrency", "250", "--allow-high-load",
 		"--concurrency-levels", "1,250", "--load-profile", "realistic", "--load-max-tokens", "256",
 		"--load-pattern", "fixed", "--target-rps", "12.5", "--warmup-requests", "3",
+		"--max-client-goroutine-growth", "20", "--max-client-heap-growth-mb", "64", "--require-server-stats",
 	})
 	if err != nil {
 		t.Fatalf("valid load controls rejected: %v", err)
 	}
-	if opts.concurrency != 250 || len(opts.concurrencySteps) != 2 || opts.loadProfile != "realistic" || opts.loadPattern != "fixed" || opts.targetRPS != 12.5 || opts.warmupRequests != 3 {
+	if opts.concurrency != 250 || len(opts.concurrencySteps) != 2 || opts.loadProfile != "realistic" || opts.loadPattern != "fixed" || opts.targetRPS != 12.5 || opts.warmupRequests != 3 || opts.maxClientGoroutineGrowth != 20 || opts.maxClientHeapGrowthMB != 64 || !opts.requireServerStats {
 		t.Fatalf("unexpected parsed load controls: %+v", opts)
 	}
 	for _, args := range [][]string{
@@ -38,6 +40,10 @@ func TestParseLoadControlsAndHighConcurrencyGuard(t *testing.T) {
 		{"--suite", "soak", "--load-max-tokens", "4096", "--soak-token-budget", "1024"},
 		{"--suite", "load", "--allow-high-load", "--concurrency", "1001"},
 		{"--suite", "staircase", "--load-pattern", "fixed", "--target-rps", "5"},
+		{"--suite", "load", "--max-client-goroutine-growth", "-2"},
+		{"--suite", "load", "--max-client-heap-growth-mb", "16385"},
+		{"--suite", "load", "--server-stats=false", "--require-server-stats"},
+		{"--suite", "smoke", "--require-server-stats"},
 	} {
 		if _, err := parseOptions(args); err == nil {
 			t.Fatalf("invalid load controls accepted: %v", args)
@@ -218,6 +224,60 @@ func TestExecuteLoadClosesEveryResponseBody(t *testing.T) {
 	}
 }
 
+func TestRepeatedLoadExecutionDrainsClientGoroutines(t *testing.T) {
+	transport := &loadFixtureRoundTripper{}
+	r := &runner{
+		opts:   options{baseURL: "http://fixture", timeout: time.Second, loadProfile: "marker", loadPattern: "closed"},
+		apiKey: "fixture", client: &http.Client{Transport: transport}, model: "claude-sonnet-5", userAgent: "devcheck-test",
+	}
+	baseline := runtime.NumGoroutine()
+	const rounds = 20
+	const requestsPerRound = 16
+	for round := 0; round < rounds; round++ {
+		execution := r.executeLoad(context.Background(), 8, requestsPerRound, 32)
+		if len(execution.samples) != requestsPerRound {
+			t.Fatalf("round %d returned %d samples, want %d", round, len(execution.samples), requestsPerRound)
+		}
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	after := runtime.NumGoroutine()
+	for time.Now().Before(deadline) {
+		runtime.GC()
+		after = runtime.NumGoroutine()
+		if after <= baseline+2 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if after > baseline+2 {
+		t.Fatalf("client goroutines did not drain after repeated load: before=%d after=%d", baseline, after)
+	}
+	if got := int(transport.closed.Load()); got != rounds*requestsPerRound {
+		t.Fatalf("response bodies closed=%d, want %d", got, rounds*requestsPerRound)
+	}
+}
+
+func TestLoadArrivalWindowUsesSchedulingOnlyForOpenLoop(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		pattern string
+		want    time.Duration
+	}{
+		{name: "fixed", pattern: "fixed", want: 20 * time.Millisecond},
+		{name: "ramp", pattern: "ramp", want: 20 * time.Millisecond},
+		{name: "closed", pattern: "closed", want: 200 * time.Millisecond},
+		{name: "soak", pattern: "soak", want: 200 * time.Millisecond},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := loadArrivalWindow(loadExecution{pattern: tc.pattern, scheduleWall: 20 * time.Millisecond, wall: 200 * time.Millisecond})
+			if got != tc.want {
+				t.Fatalf("arrival window = %s, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestPostLoadRecoveryChecksHealthAndMarker(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		if req.URL.Path == "/health" {
@@ -302,6 +362,9 @@ func TestExecuteLoadOpenLoopCountsClientOverload(t *testing.T) {
 	}
 	if result.ArrivalRPS <= result.AchievedRPS {
 		t.Fatalf("open-loop rates hid dropped arrivals: arrival %.2f achieved %.2f", result.ArrivalRPS, result.AchievedRPS)
+	}
+	if result.ScheduleMillis <= 0 || result.ScheduleMillis >= result.WallMillis || result.ArrivalRPS < 100 {
+		t.Fatalf("arrival rate used drain time: schedule=%dms wall=%dms arrival=%.2f", result.ScheduleMillis, result.WallMillis, result.ArrivalRPS)
 	}
 	if !hasFailureSuffix(result.FailureCategories, "client_overload") {
 		t.Fatalf("client overload was not reported: %+v", result.FailureCategories)
