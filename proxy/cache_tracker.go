@@ -20,6 +20,7 @@ const defaultPromptCacheTTL = 5 * time.Minute
 const defaultPromptCacheMaxEntriesPerAccount = 2048
 const defaultPromptCacheMaxEntriesTotal = 50000
 const promptCacheShardCount = 64
+const promptCacheReservationTTL = 10 * time.Minute
 
 // Anthropic requires cached prefixes to reach a minimum token count before
 // caching takes effect. Breakpoints below this threshold are excluded from
@@ -43,6 +44,7 @@ type promptCacheUsage struct {
 	upstreamCacheRead       int
 	upstreamCacheCreation   int
 	hasUpstreamBreakdown    bool
+	reservation             *promptCacheReservation
 }
 
 type promptCacheDiagnostic struct {
@@ -114,11 +116,23 @@ type promptCacheEntry struct {
 	shardElem   *list.Element
 }
 
+type promptCachePending struct {
+	expiresAt time.Time
+	token     uint64
+}
+
+type promptCacheReservation struct {
+	scope       string
+	fingerprint [32]byte
+	token       uint64
+}
+
 type promptCacheShard struct {
 	mu               sync.Mutex
 	entriesByAccount map[string]map[[32]byte]*promptCacheEntry
 	accountOrder     map[string]*list.List
 	order            *list.List
+	pendingByAccount map[string]map[[32]byte]*promptCachePending
 }
 
 type promptCacheTracker struct {
@@ -133,6 +147,7 @@ type promptCacheTracker struct {
 	maxEntriesPerAccount int
 	maxEntriesTotal      int
 	entryCount           atomic.Int64
+	reservationSequence  atomic.Uint64
 	evictionMu           sync.Mutex
 	trackedRequests      atomic.Uint64
 	cacheHits            atomic.Uint64
@@ -188,6 +203,7 @@ func newPromptCacheTrackerWithEfficiencyRange(maxTTL time.Duration, readEfficien
 		tracker.shards[i].entriesByAccount = make(map[string]map[[32]byte]*promptCacheEntry)
 		tracker.shards[i].accountOrder = make(map[string]*list.List)
 		tracker.shards[i].order = list.New()
+		tracker.shards[i].pendingByAccount = make(map[string]map[[32]byte]*promptCachePending)
 	}
 	return tracker
 }
@@ -273,7 +289,7 @@ func (t *promptCacheTracker) ConfigureAccountingMode(mode string) {
 }
 
 func (t *promptCacheTracker) BuildClaudeProfile(req *ClaudeRequest, totalInputTokens int) *promptCacheProfile {
-	if t == nil {
+	if t == nil || req == nil {
 		return nil
 	}
 	t.settingsMu.RLock()
@@ -326,21 +342,281 @@ func (t *promptCacheTracker) BuildClaudeProfile(req *ClaudeRequest, totalInputTo
 	if len(breakpoints) == 0 {
 		return nil
 	}
+	return finalizePromptCacheProfile(breakpoints, cumulativeTokens, totalInputTokens, req.Model)
+}
 
-	if totalInputTokens < cumulativeTokens {
-		totalInputTokens = cumulativeTokens
+// promptCacheTTLFromClaudeRequest retains the last explicit cache-control TTL
+// while the request still has its original Claude structure. The translated
+// Kiro payload has no cache_control field, so this internal hint avoids
+// silently downgrading an explicit 1-hour breakpoint to the default 5-minute
+// TTL.
+func promptCacheTTLFromClaudeRequest(req *ClaudeRequest) time.Duration {
+	if req == nil {
+		return 0
+	}
+	var ttl time.Duration
+	for _, block := range flattenClaudeCacheBlocks(req) {
+		if block.TTL > 0 {
+			ttl = block.TTL
+		}
+	}
+	return ttl
+}
+
+// BuildKiroProfile builds a protocol-neutral profile from the final payload
+// sent upstream. Building at this boundary is important: Claude, Chat
+// Completions, and Responses all undergo different normalization before they
+// reach Kiro, and truncation or prompt filtering can change the actual prefix.
+//
+// The profile intentionally excludes transport/session metadata such as
+// conversation IDs, continuation IDs, and profile ARNs. Those values are not
+// prompt content and would split otherwise identical cache prefixes. Every
+// semantic payload boundary is retained as a breakpoint so a later turn can
+// reuse the longest stable history prefix.
+func (t *promptCacheTracker) BuildKiroProfile(payload *KiroPayload, totalInputTokens int) *promptCacheProfile {
+	if t == nil || payload == nil {
+		return nil
+	}
+	t.settingsMu.RLock()
+	enabled := t.enabled
+	t.settingsMu.RUnlock()
+	if !enabled {
+		return nil
 	}
 
+	model := currentMessageModelID(payload)
+	profileTTL := t.automaticKiroProfileTTL(payload)
+	blocks := make([]cacheablePromptBlock, 0, 4+len(payload.ConversationState.History))
+	blocks = append(blocks, cacheablePromptBlock{
+		Value: map[string]interface{}{
+			"kind":   "kiro_payload_v3",
+			"model":  model,
+			"fields": normalizeCacheFingerprintValue(payload.AdditionalModelRequestFields),
+		},
+		// Model and additional request fields are fingerprinted so changes do
+		// not reuse an incompatible prefix. They are transport metadata for
+		// this estimator and are deliberately not charged as prompt tokens.
+		Tokens: 0,
+		TTL:    profileTTL,
+	})
+
+	current := payload.ConversationState.CurrentMessage.UserInputMessage
+	if context := current.UserInputMessageContext; context != nil {
+		// Keep current tool definitions ahead of history so stable tool
+		// schemas can be reused across turns, matching the API's prompt
+		// prefix semantics.
+		blocks = append(blocks, kiroToolCacheBlocks(context, profileTTL)...)
+	}
+
+	for _, entry := range payload.ConversationState.History {
+		blocks = append(blocks, kiroHistoryCacheBlocks(entry, profileTTL)...)
+	}
+	blocks = append(blocks, kiroUserContentCacheBlock(current, profileTTL))
+	if context := current.UserInputMessageContext; context != nil {
+		blocks = append(blocks, kiroToolResultsCacheBlock(context, profileTTL)...)
+	}
+
+	return buildKiroPayloadProfile(blocks, totalInputTokens, model)
+}
+
+// automaticKiroProfileTTL supplies a TTL for protocols that do not expose
+// Anthropic cache_control in the final Kiro payload. An explicit Claude TTL is
+// preserved by the translator; otherwise the configured local TTL is the
+// correct upper bound for an automatically tracked prefix.
+func (t *promptCacheTracker) automaticKiroProfileTTL(payload *KiroPayload) time.Duration {
+	if payload != nil && payload.promptCacheTTL > 0 {
+		return normalizePromptCacheTTL(payload.promptCacheTTL)
+	}
+	if maxTTL, _, _ := t.settingsSnapshot(); maxTTL > 0 {
+		return normalizePromptCacheTTL(maxTTL)
+	}
+	return defaultPromptCacheTTL
+}
+
+func buildKiroPayloadProfile(blocks []cacheablePromptBlock, totalInputTokens int, model string) *promptCacheProfile {
+	if len(blocks) == 0 {
+		return nil
+	}
+
+	hasher := sha256.New()
+	breakpoints := make([]promptCacheBreakpoint, 0, len(blocks))
+	cumulativeTokens := 0
+	for _, block := range blocks {
+		writeHashChunk(hasher, canonicalizeCacheValue(normalizeCacheFingerprintValue(block.Value)))
+		cumulativeTokens += maxInt(block.Tokens, 0)
+		var fingerprint [32]byte
+		copy(fingerprint[:], hasher.Sum(nil))
+		breakpoints = append(breakpoints, promptCacheBreakpoint{
+			Fingerprint:      fingerprint,
+			CumulativeTokens: cumulativeTokens,
+			TTL:              normalizePromptCacheTTL(block.TTL),
+		})
+	}
+	return finalizePromptCacheProfile(breakpoints, cumulativeTokens, totalInputTokens, model)
+}
+
+// finalizePromptCacheProfile keeps cache accounting bounded by the final
+// payload estimate. A profile may omit transport metadata from its block token
+// estimates, so raising TotalInputTokens to the synthetic cumulative value
+// would over-report input and cache creation tokens.
+func finalizePromptCacheProfile(breakpoints []promptCacheBreakpoint, cumulativeTokens, totalInputTokens int, model string) *promptCacheProfile {
+	if totalInputTokens <= 0 {
+		totalInputTokens = cumulativeTokens
+	}
+	if totalInputTokens <= 0 {
+		return nil
+	}
+
+	normalized := make([]promptCacheBreakpoint, 0, len(breakpoints))
+	previous := 0
+	for _, breakpoint := range breakpoints {
+		tokens := maxInt(breakpoint.CumulativeTokens, 0)
+		if tokens > totalInputTokens {
+			tokens = totalInputTokens
+		}
+		// Zero-token blocks and multiple blocks crossing the supplied total
+		// must not create duplicate breakpoints with different fingerprints.
+		if tokens <= previous {
+			continue
+		}
+		breakpoint.CumulativeTokens = tokens
+		normalized = append(normalized, breakpoint)
+		previous = tokens
+	}
+	if len(normalized) == 0 {
+		return nil
+	}
 	return &promptCacheProfile{
-		Breakpoints:      breakpoints,
+		Breakpoints:      normalized,
 		TotalInputTokens: totalInputTokens,
-		Model:            req.Model,
+		Model:            model,
+	}
+}
+
+func kiroHistoryCacheBlocks(entry KiroHistoryMessage, ttl time.Duration) []cacheablePromptBlock {
+	blocks := make([]cacheablePromptBlock, 0, 4)
+	if entry.UserInputMessage != nil {
+		blocks = append(blocks, kiroUserCacheBlocks(*entry.UserInputMessage, ttl)...)
+	}
+	if assistant := entry.AssistantResponseMessage; assistant != nil {
+		toolUses := make([]interface{}, 0, len(assistant.ToolUses))
+		for _, toolUse := range assistant.ToolUses {
+			toolUses = append(toolUses, map[string]interface{}{
+				"id":    toolUse.ToolUseID,
+				"name":  toolUse.Name,
+				"input": normalizeCacheFingerprintValue(toolUse.Input),
+			})
+		}
+		value := map[string]interface{}{
+			"kind":  "assistant",
+			"text":  assistant.Content,
+			"tools": toolUses,
+		}
+		blocks = append(blocks, cacheablePromptBlock{
+			Value:  value,
+			Tokens: estimateKiroAssistantResponseTokens(assistant),
+			TTL:    ttl,
+		})
+	}
+	return blocks
+}
+
+func kiroUserCacheBlocks(message KiroUserInputMessage, ttl time.Duration) []cacheablePromptBlock {
+	blocks := []cacheablePromptBlock{kiroUserContentCacheBlock(message, ttl)}
+	if context := message.UserInputMessageContext; context != nil {
+		blocks = append(blocks, kiroToolCacheBlocks(context, ttl)...)
+		blocks = append(blocks, kiroToolResultsCacheBlock(context, ttl)...)
+	}
+	return blocks
+}
+
+func kiroUserContentCacheBlock(message KiroUserInputMessage, ttl time.Duration) cacheablePromptBlock {
+	images := make([]interface{}, 0, len(message.Images))
+	for _, image := range message.Images {
+		images = append(images, kiroImageFingerprint(image))
+	}
+	contentValue := map[string]interface{}{
+		"kind":     "user",
+		"model_id": message.ModelID,
+		"origin":   message.Origin,
+		"content":  message.Content,
+		"images":   images,
+	}
+	return cacheablePromptBlock{
+		Value:  contentValue,
+		Tokens: estimateKiroUserContentTokens(&message),
+		TTL:    ttl,
+	}
+}
+
+func kiroToolCacheBlocks(context *UserInputMessageContext, ttl time.Duration) []cacheablePromptBlock {
+	if context == nil || len(context.Tools) == 0 {
+		return nil
+	}
+	blocks := make([]cacheablePromptBlock, 0, len(context.Tools))
+	for _, tool := range context.Tools {
+		spec := tool.ToolSpecification
+		blocks = append(blocks, cacheablePromptBlock{
+			Value: map[string]interface{}{
+				"kind":         "tool",
+				"name":         spec.Name,
+				"description":  spec.Description,
+				"input_schema": normalizeCacheFingerprintValue(spec.InputSchema.JSON),
+			},
+			Tokens: estimateKiroToolWrapperTokens(tool),
+			TTL:    ttl,
+		})
+	}
+	return blocks
+}
+
+func kiroToolResultsCacheBlock(context *UserInputMessageContext, ttl time.Duration) []cacheablePromptBlock {
+	if context == nil || len(context.ToolResults) == 0 {
+		return nil
+	}
+	results := make([]interface{}, 0, len(context.ToolResults))
+	for _, result := range context.ToolResults {
+		contents := make([]interface{}, 0, len(result.Content))
+		for _, content := range result.Content {
+			contents = append(contents, content.Text)
+		}
+		results = append(results, map[string]interface{}{
+			"id":      result.ToolUseID,
+			"status":  result.Status,
+			"content": contents,
+		})
+	}
+	return []cacheablePromptBlock{{
+		Value:  map[string]interface{}{"kind": "tool_results", "results": results},
+		Tokens: estimateKiroToolContextTokens(&UserInputMessageContext{ToolResults: context.ToolResults}),
+		TTL:    ttl,
+	}}
+}
+
+func kiroImageFingerprint(image KiroImage) map[string]interface{} {
+	data := []byte(image.Source.Bytes)
+	if decoded, err := decodeBase64Payload(image.Source.Bytes); err == nil {
+		data = decoded
+	}
+	digest := sha256.Sum256(data)
+	return map[string]interface{}{
+		"type":   "image",
+		"format": image.Format,
+		"sha256": hex.EncodeToString(digest[:]),
 	}
 }
 
 func (t *promptCacheTracker) Compute(accountID string, profile *promptCacheProfile) promptCacheUsage {
 	usage, _ := t.ComputeDetailed(accountID, profile)
 	return usage
+}
+
+func boundedPromptCacheBreakpointTokens(breakpoint promptCacheBreakpoint, totalInputTokens int) int {
+	tokens := maxInt(breakpoint.CumulativeTokens, 0)
+	if totalInputTokens > 0 && tokens > totalInputTokens {
+		return totalInputTokens
+	}
+	return tokens
 }
 
 func (t *promptCacheTracker) ComputeDetailed(accountID string, profile *promptCacheProfile) (promptCacheUsage, promptCacheDiagnostic) {
@@ -359,8 +635,12 @@ func (t *promptCacheTracker) ComputeDetailed(accountID string, profile *promptCa
 	}
 
 	minTokens := minCacheableTokensForModel(profile.Model)
-	last := profile.Breakpoints[len(profile.Breakpoints)-1]
-	lastTokens := minInt(last.CumulativeTokens, profile.TotalInputTokens)
+	lastTokens := 0
+	for _, breakpoint := range profile.Breakpoints {
+		if tokens := boundedPromptCacheBreakpointTokens(breakpoint, profile.TotalInputTokens); tokens > lastTokens {
+			lastTokens = tokens
+		}
+	}
 	diagnostic.EligibleInputTokens = lastTokens
 	now := time.Now()
 
@@ -376,6 +656,7 @@ func (t *promptCacheTracker) ComputeDetailed(accountID string, profile *promptCa
 		}
 	}
 	t.pruneExpiredAccountLocked(shard, accountID, now)
+	t.prunePendingAccountLocked(shard, accountID, now)
 	entries := shard.entriesByAccount[accountID]
 	if lastTokens < minTokens {
 		shard.mu.Unlock()
@@ -385,21 +666,25 @@ func (t *promptCacheTracker) ComputeDetailed(accountID string, profile *promptCa
 
 	rawMatchedTokens := 0
 	var matchedFingerprint [32]byte
+	var newestMissing *promptCacheBreakpoint
 	touched := false
 	for i := len(profile.Breakpoints) - 1; i >= 0; i-- {
 		breakpoint := profile.Breakpoints[i]
+		breakpointTokens := boundedPromptCacheBreakpointTokens(breakpoint, profile.TotalInputTokens)
 		// Skip breakpoints below the minimum cacheable token threshold.
-		if breakpoint.CumulativeTokens < minTokens {
+		if breakpointTokens < minTokens || breakpointTokens <= 0 {
 			continue
 		}
 		entry, ok := entries[breakpoint.Fingerprint]
 		if !ok || entry.ExpiresAt.Before(now) {
+			if newestMissing == nil {
+				missing := breakpoint
+				missing.CumulativeTokens = breakpointTokens
+				newestMissing = &missing
+			}
 			continue
 		}
-		rawMatchedTokens = minInt(breakpoint.CumulativeTokens, profile.TotalInputTokens)
-		if rawMatchedTokens > lastTokens {
-			rawMatchedTokens = lastTokens
-		}
+		rawMatchedTokens = minInt(breakpointTokens, lastTokens)
 		matchedFingerprint = breakpoint.Fingerprint
 		entry.TTL = effectivePromptCacheTTL(maxTTL, entry.TTL)
 		entry.LastAccess = now
@@ -410,17 +695,53 @@ func (t *promptCacheTracker) ComputeDetailed(accountID string, profile *promptCa
 		if shard.order != nil && entry.shardElem != nil {
 			shard.order.MoveToFront(entry.shardElem)
 		}
+		if pending := shard.pendingByAccount[accountID]; pending != nil {
+			delete(pending, breakpoint.Fingerprint)
+			if len(pending) == 0 {
+				delete(shard.pendingByAccount, accountID)
+			}
+		}
 		touched = true
 		break
 	}
 	namespaceEntries := len(entries)
+	inFlight := false
+	var reservation *promptCacheReservation
+	if rawMatchedTokens < lastTokens && newestMissing != nil {
+		pending := shard.pendingByAccount[accountID]
+		if pending != nil {
+			if current := pending[newestMissing.Fingerprint]; current != nil && current.expiresAt.After(now) {
+				inFlight = true
+			}
+		}
+		if !inFlight {
+			if pending == nil {
+				pending = make(map[[32]byte]*promptCachePending)
+				if shard.pendingByAccount == nil {
+					shard.pendingByAccount = make(map[string]map[[32]byte]*promptCachePending)
+				}
+				shard.pendingByAccount[accountID] = pending
+			}
+			reservation = &promptCacheReservation{
+				scope:       accountID,
+				fingerprint: newestMissing.Fingerprint,
+				token:       t.reservationSequence.Add(1),
+			}
+			pending[newestMissing.Fingerprint] = &promptCachePending{
+				expiresAt: now.Add(promptCacheReservationTTL),
+				token:     reservation.token,
+			}
+		}
+	}
 	shard.mu.Unlock()
 	if touched {
 		t.markStateChanged()
 	}
 	if rawMatchedTokens == 0 {
 		diagnostic.Status = "miss"
-		if expiredMatch {
+		if inFlight {
+			diagnostic.Reason = "cache_creation_in_flight"
+		} else if expiredMatch {
 			diagnostic.Reason = "expired"
 		} else if namespaceEntries == 0 {
 			diagnostic.Reason = "empty_namespace"
@@ -440,6 +761,13 @@ func (t *promptCacheTracker) ComputeDetailed(accountID string, profile *promptCa
 	// reported as a new cache creation on every exact hit.
 	creation := maxInt(lastTokens-rawMatchedTokens, 0)
 	cache5m, cache1h := computePromptCacheTTLBreakdown(profile, rawMatchedTokens)
+	if inFlight {
+		// Another request is already creating this prefix. Do not count the
+		// same creation again; this request remains a miss until the next
+		// request observes the stored entry.
+		creation = 0
+		cache5m, cache1h = 0, 0
+	}
 	usage := promptCacheUsage{
 		CacheCreationInputTokens:   creation,
 		CacheReadInputTokens:       matchedTokens,
@@ -448,6 +776,7 @@ func (t *promptCacheTracker) ComputeDetailed(accountID string, profile *promptCa
 		localMatchedInputTokens:    rawMatchedTokens,
 		targetReadRate:             readEfficiency,
 		hasTargetReadRate:          true,
+		reservation:                reservation,
 	}
 	diagnostic.MatchedInputTokens = rawMatchedTokens
 	if rawMatchedTokens > 0 {
@@ -456,6 +785,9 @@ func (t *promptCacheTracker) ComputeDetailed(accountID string, profile *promptCa
 			diagnostic.Status = "partial_hit"
 		} else {
 			diagnostic.Status = "hit"
+		}
+		if inFlight {
+			diagnostic.Reason = "cache_creation_in_flight"
 		}
 		if matchedTokens == 0 {
 			diagnostic.Reason = "read_efficiency_zero"
@@ -475,14 +807,19 @@ func (t *promptCacheTracker) Update(accountID string, profile *promptCacheProfil
 	shard := t.shardFor(accountID)
 	shard.mu.Lock()
 	t.pruneExpiredAccountLocked(shard, accountID, now)
+	t.prunePendingAccountLocked(shard, accountID, now)
 	updated := false
 	for _, breakpoint := range profile.Breakpoints {
 		// Skip breakpoints below the minimum cacheable token threshold.
-		if breakpoint.CumulativeTokens < minTokens {
+		if profile.TotalInputTokens > 0 && breakpoint.CumulativeTokens > profile.TotalInputTokens {
+			continue
+		}
+		if boundedPromptCacheBreakpointTokens(breakpoint, profile.TotalInputTokens) < minTokens {
 			continue
 		}
 		ttl := effectivePromptCacheTTL(maxTTL, breakpoint.TTL)
 		t.putEntryLocked(shard, accountID, breakpoint.Fingerprint, now.Add(ttl), ttl, now)
+		t.clearPendingLocked(shard, accountID, breakpoint.Fingerprint)
 		updated = true
 	}
 	t.enforceAccountLimitLocked(shard, accountID, maxPerAccount)
@@ -491,6 +828,26 @@ func (t *promptCacheTracker) Update(accountID string, profile *promptCacheProfil
 		t.markStateChanged()
 	}
 	t.enforceGlobalLimit(maxTotal)
+}
+
+// ReleaseReservation lets a failed upstream attempt make the prefix eligible
+// for creation again. It is intentionally token-checked so a late failure
+// cannot release a newer request's reservation for the same fingerprint.
+func (t *promptCacheTracker) ReleaseReservation(usage promptCacheUsage) {
+	if t == nil || usage.reservation == nil || usage.reservation.scope == "" {
+		return
+	}
+	reservation := usage.reservation
+	shard := t.shardFor(reservation.scope)
+	shard.mu.Lock()
+	defer shard.mu.Unlock()
+	pending := shard.pendingByAccount[reservation.scope]
+	if current := pending[reservation.fingerprint]; current != nil && current.token == reservation.token {
+		delete(pending, reservation.fingerprint)
+		if len(pending) == 0 {
+			delete(shard.pendingByAccount, reservation.scope)
+		}
+	}
 }
 
 func effectivePromptCacheTTL(maxTTL, requestedTTL time.Duration) time.Duration {
@@ -614,6 +971,29 @@ func (t *promptCacheTracker) pruneExpiredAccountLocked(shard *promptCacheShard, 
 	}
 }
 
+func (t *promptCacheTracker) prunePendingAccountLocked(shard *promptCacheShard, accountID string, now time.Time) {
+	pending := shard.pendingByAccount[accountID]
+	for fingerprint, reservation := range pending {
+		if reservation == nil || !reservation.expiresAt.After(now) {
+			delete(pending, fingerprint)
+		}
+	}
+	if len(pending) == 0 {
+		delete(shard.pendingByAccount, accountID)
+	}
+}
+
+func (t *promptCacheTracker) clearPendingLocked(shard *promptCacheShard, accountID string, fingerprint [32]byte) {
+	pending := shard.pendingByAccount[accountID]
+	if pending == nil {
+		return
+	}
+	delete(pending, fingerprint)
+	if len(pending) == 0 {
+		delete(shard.pendingByAccount, accountID)
+	}
+}
+
 func (t *promptCacheTracker) enforceAccountLimitLocked(shard *promptCacheShard, accountID string, maxEntries int) {
 	entries := shard.entriesByAccount[accountID]
 	for len(entries) > maxEntries {
@@ -690,6 +1070,10 @@ func (t *promptCacheTracker) PruneExpired(now time.Time) {
 		shard.mu.Lock()
 		for accountID := range shard.entriesByAccount {
 			t.pruneExpiredAccountLocked(shard, accountID, now)
+			t.prunePendingAccountLocked(shard, accountID, now)
+		}
+		for accountID := range shard.pendingByAccount {
+			t.prunePendingAccountLocked(shard, accountID, now)
 		}
 		shard.mu.Unlock()
 	}
@@ -841,6 +1225,7 @@ func (t *promptCacheTracker) Clear() {
 		t.shards[i].entriesByAccount = make(map[string]map[[32]byte]*promptCacheEntry)
 		t.shards[i].accountOrder = make(map[string]*list.List)
 		t.shards[i].order = list.New()
+		t.shards[i].pendingByAccount = make(map[string]map[[32]byte]*promptCachePending)
 	}
 	t.entryCount.Store(0)
 	for i := len(t.shards) - 1; i >= 0; i-- {
@@ -1240,7 +1625,7 @@ func computePromptCacheTTLBreakdown(profile *promptCacheProfile, matchedTokens i
 	cache1h := 0
 	previous := matchedTokens
 	for _, breakpoint := range profile.Breakpoints {
-		current := minInt(breakpoint.CumulativeTokens, profile.TotalInputTokens)
+		current := boundedPromptCacheBreakpointTokens(breakpoint, profile.TotalInputTokens)
 		if current <= previous {
 			continue
 		}

@@ -321,14 +321,17 @@ type KiroPayload struct {
 	toolTruncationCount     int
 	toolRecoveryAttempts    int
 	toolRecoveryHintApplied bool
-	accountSelectionMs      int64
-	accountAttempts         int
-	routeAffinityHit        bool
-	requestTiming           *requestFirstContentTimer
-	promptCacheDiagnostic   promptCacheDiagnostic
-	hasCacheDiagnostic      bool
-	runtimeMu               sync.RWMutex
-	selectedEndpoint        string
+	// promptCacheTTL preserves an explicit Claude cache-control TTL across
+	// translation. It is intentionally not serialized to the Kiro API.
+	promptCacheTTL        time.Duration
+	accountSelectionMs    int64
+	accountAttempts       int
+	routeAffinityHit      bool
+	requestTiming         *requestFirstContentTimer
+	promptCacheDiagnostic promptCacheDiagnostic
+	hasCacheDiagnostic    bool
+	runtimeMu             sync.RWMutex
+	selectedEndpoint      string
 }
 
 func (p *KiroPayload) beginStreamMetrics(startedAt time.Time) {

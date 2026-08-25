@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"encoding/json"
 	"kiro-go/config"
 	"strconv"
 	"strings"
@@ -38,7 +39,7 @@ func TestPromptCacheTrackerComputeAndUpdate(t *testing.T) {
 		Messages: []ClaudeMessage{{Role: "user", Content: "hello world"}},
 	}
 
-	profile := tracker.BuildClaudeProfile(req, 120)
+	profile := tracker.BuildClaudeProfile(req, 2048)
 	if profile == nil {
 		t.Fatalf("expected cache profile to be built")
 	}
@@ -58,6 +59,259 @@ func TestPromptCacheTrackerComputeAndUpdate(t *testing.T) {
 	}
 	if second.CacheCreationInputTokens != 0 {
 		t.Fatalf("expected repeated request to avoid cache creation, got %+v", second)
+	}
+}
+
+func buildKiroCacheTestPayload(model, system, current string) *KiroPayload {
+	payload := &KiroPayload{}
+	payload.ConversationState.CurrentMessage.UserInputMessage = KiroUserInputMessage{
+		Content: current,
+		ModelID: model,
+		Origin:  "AI_EDITOR",
+	}
+	payload.ConversationState.History = []KiroHistoryMessage{
+		{UserInputMessage: &KiroUserInputMessage{Content: system, ModelID: model, Origin: "AI_EDITOR"}},
+		{AssistantResponseMessage: &KiroAssistantResponseMessage{Content: "I will follow these instructions."}},
+	}
+	return payload
+}
+
+func TestPromptCacheBuildKiroProfileSupportsUnmarkedFinalPayload(t *testing.T) {
+	tracker := newPromptCacheTracker(time.Hour)
+	model := "claude-sonnet-4.6"
+	stableSystem := strings.Repeat("stable project instruction ", 500)
+	first := buildKiroCacheTestPayload(model, stableSystem, "first question")
+	firstProfile := tracker.BuildKiroProfile(first, estimateKiroPayloadTokens(first))
+	if firstProfile == nil {
+		t.Fatal("expected a cache profile without explicit cache_control")
+	}
+	tracker.Update("acct-1", firstProfile)
+
+	second := buildKiroCacheTestPayload(model, stableSystem, "follow-up question")
+	second.ConversationState.History = append(second.ConversationState.History,
+		KiroHistoryMessage{UserInputMessage: &KiroUserInputMessage{Content: "first question", ModelID: model, Origin: "AI_EDITOR"}},
+		KiroHistoryMessage{AssistantResponseMessage: &KiroAssistantResponseMessage{Content: "first answer"}},
+	)
+	// Keep the historical turn before the current turn, matching the wire
+	// layout produced by the translators on the next conversation request.
+	second.ConversationState.CurrentMessage.UserInputMessage.Content = "follow-up question"
+	secondProfile := tracker.BuildKiroProfile(second, estimateKiroPayloadTokens(second))
+	if secondProfile == nil {
+		t.Fatal("expected a second final-payload profile")
+	}
+	usage := tracker.Compute("acct-1", secondProfile)
+	if usage.CacheReadInputTokens <= 0 {
+		t.Fatalf("expected prior current message to become a reusable history prefix, got %+v", usage)
+	}
+}
+
+func TestPromptCacheKiroProfileUsesConfiguredTTLForUnmarkedPayload(t *testing.T) {
+	tracker := newPromptCacheTracker(time.Hour)
+	payload := buildKiroCacheTestPayload("claude-sonnet-4.6", strings.Repeat("stable project instruction ", 500), "hello")
+	profile := tracker.BuildKiroProfile(payload, estimateKiroPayloadTokens(payload))
+	if profile == nil || len(profile.Breakpoints) == 0 {
+		t.Fatal("expected an automatically tracked profile")
+	}
+	tracker.Update("acct-ttl", profile)
+	entry, ok := tracker.entry("acct-ttl", profile.Breakpoints[len(profile.Breakpoints)-1].Fingerprint)
+	if !ok {
+		t.Fatal("expected automatic profile entry")
+	}
+	if entry.TTL != time.Hour {
+		t.Fatalf("automatic profile TTL = %s, want configured one hour", entry.TTL)
+	}
+}
+
+func TestPromptCacheKiroProfilePreservesClaudeTTL(t *testing.T) {
+	req := &ClaudeRequest{
+		Model: "claude-sonnet-4.6",
+		System: []interface{}{map[string]interface{}{
+			"type": "text",
+			"text": strings.Repeat("stable system instruction ", 500),
+			"cache_control": map[string]interface{}{
+				"type": "ephemeral",
+				"ttl":  "1h",
+			},
+		}},
+		Messages: []ClaudeMessage{{Role: "user", Content: "hello"}},
+	}
+	payload := ClaudeToKiro(req, false)
+	tracker := newPromptCacheTracker(time.Hour)
+	profile := tracker.BuildKiroProfile(payload, estimateKiroPayloadTokens(payload))
+	if profile == nil {
+		t.Fatal("expected translated Claude profile")
+	}
+	tracker.Update("acct-ttl", profile)
+	entry, ok := tracker.entry("acct-ttl", profile.Breakpoints[len(profile.Breakpoints)-1].Fingerprint)
+	if !ok {
+		t.Fatal("expected translated profile entry")
+	}
+	if entry.TTL != time.Hour {
+		t.Fatalf("explicit Claude TTL = %s, want one hour", entry.TTL)
+	}
+}
+
+func TestPromptCacheKiroProfileIgnoresTransportIdentity(t *testing.T) {
+	tracker := newPromptCacheTracker(time.Hour)
+	first := buildKiroCacheTestPayload("claude-sonnet-4.6", strings.Repeat("stable project instruction ", 500), "hello")
+	second := buildKiroCacheTestPayload("claude-sonnet-4.6", strings.Repeat("stable project instruction ", 500), "hello")
+	first.ConversationState.ConversationID = "conversation-a"
+	first.ConversationState.AgentContinuationId = "continuation-a"
+	first.ProfileArn = "arn:aws:codewhisperer:profile/a"
+	second.ConversationState.ConversationID = "conversation-b"
+	second.ConversationState.AgentContinuationId = "continuation-b"
+	second.ProfileArn = "arn:aws:codewhisperer:profile/b"
+	left := tracker.BuildKiroProfile(first, estimateKiroPayloadTokens(first))
+	right := tracker.BuildKiroProfile(second, estimateKiroPayloadTokens(second))
+	if left == nil || right == nil || len(left.Breakpoints) != len(right.Breakpoints) {
+		t.Fatal("expected equivalent profiles")
+	}
+	for i := range left.Breakpoints {
+		if left.Breakpoints[i].Fingerprint != right.Breakpoints[i].Fingerprint {
+			t.Fatalf("transport identity changed cache fingerprint at breakpoint %d", i)
+		}
+	}
+}
+
+func TestPromptCacheKiroProfileKeepsFinalInputCeiling(t *testing.T) {
+	tracker := newPromptCacheTracker(time.Hour)
+	payload := buildKiroCacheTestPayload(
+		"claude-sonnet-4.6",
+		strings.Repeat("stable project instruction ", 500),
+		"current request",
+	)
+	profile := tracker.BuildKiroProfile(payload, 2048)
+	if profile == nil {
+		t.Fatal("expected a bounded profile")
+	}
+	if profile.TotalInputTokens != 2048 {
+		t.Fatalf("profile total input was inflated to %d", profile.TotalInputTokens)
+	}
+	for _, breakpoint := range profile.Breakpoints {
+		if breakpoint.CumulativeTokens > profile.TotalInputTokens {
+			t.Fatalf("breakpoint exceeds final input ceiling: %+v", breakpoint)
+		}
+	}
+	first := tracker.Compute("acct-ceiling", profile)
+	if first.CacheCreationInputTokens <= 0 || first.CacheCreationInputTokens > 2048 {
+		t.Fatalf("unexpected bounded creation usage: %+v", first)
+	}
+}
+
+func TestPromptCacheKiroProfileTokenEstimateMatchesPayload(t *testing.T) {
+	tracker := newPromptCacheTracker(time.Hour)
+	payload := buildKiroCacheTestPayload("claude-sonnet-4.6", strings.Repeat("stable context ", 500), "describe")
+	var tool KiroToolWrapper
+	tool.ToolSpecification.Name = "readFile"
+	tool.ToolSpecification.Description = "Read a file from the workspace."
+	tool.ToolSpecification.InputSchema.JSON = map[string]interface{}{
+		"type":       "object",
+		"properties": map[string]interface{}{"path": map[string]interface{}{"type": "string"}},
+	}
+	current := &payload.ConversationState.CurrentMessage.UserInputMessage
+	current.UserInputMessageContext = &UserInputMessageContext{
+		Tools: []KiroToolWrapper{tool},
+		ToolResults: []KiroToolResult{{
+			ToolUseID: "call-1",
+			Status:    "success",
+			Content:   []KiroResultContent{{Text: strings.Repeat("tool output ", 80)}},
+		}},
+	}
+	payload.ConversationState.History = append(payload.ConversationState.History,
+		KiroHistoryMessage{AssistantResponseMessage: &KiroAssistantResponseMessage{
+			Content: strings.Repeat("assistant context ", 80),
+			ToolUses: []KiroToolUse{{
+				ToolUseID: "call-0",
+				Name:      "readFile",
+				Input:     map[string]interface{}{"path": "README.md"},
+			}},
+		}},
+	)
+	profile := tracker.BuildKiroProfile(payload, estimateKiroPayloadTokens(payload))
+	if profile == nil || len(profile.Breakpoints) == 0 {
+		t.Fatal("expected profile with semantic payload blocks")
+	}
+	last := profile.Breakpoints[len(profile.Breakpoints)-1]
+	want := estimateKiroPayloadTokens(payload)
+	if last.CumulativeTokens != want {
+		t.Fatalf("profile token estimate=%d, payload estimate=%d", last.CumulativeTokens, want)
+	}
+}
+
+func TestPromptCacheKiroProfileFingerprintsModelAndOrigin(t *testing.T) {
+	tracker := newPromptCacheTracker(time.Hour)
+	build := func(model, origin string) *promptCacheProfile {
+		payload := buildKiroCacheTestPayload(model, strings.Repeat("stable context ", 500), "hello")
+		payload.ConversationState.CurrentMessage.UserInputMessage.Origin = origin
+		return tracker.BuildKiroProfile(payload, estimateKiroPayloadTokens(payload))
+	}
+	base := build("claude-sonnet-4.6", "AI_EDITOR")
+	modelVariant := build("claude-opus-4.8", "AI_EDITOR")
+	originVariant := build("claude-sonnet-4.6", "AMAZON_Q")
+	if base == nil || modelVariant == nil || originVariant == nil {
+		t.Fatal("expected all profiles")
+	}
+	if base.Breakpoints[0].Fingerprint == modelVariant.Breakpoints[0].Fingerprint {
+		t.Fatal("model change must split cache fingerprint")
+	}
+	baseLast := base.Breakpoints[len(base.Breakpoints)-1]
+	originLast := originVariant.Breakpoints[len(originVariant.Breakpoints)-1]
+	if baseLast.Fingerprint == originLast.Fingerprint {
+		t.Fatal("origin change must split cache fingerprint")
+	}
+}
+
+func TestPromptCacheBuildKiroProfileCoversOpenAIAndResponsesPayloads(t *testing.T) {
+	tracker := newPromptCacheTracker(time.Hour)
+	long := strings.Repeat("shared coding context ", 500)
+	openAI := &OpenAIRequest{
+		Model: "claude-sonnet-4.6",
+		Messages: []OpenAIMessage{
+			{Role: "system", Content: long},
+			{Role: "user", Content: "hello"},
+		},
+	}
+	chatPayload := OpenAIToKiro(openAI, false)
+	chatProfile := tracker.BuildKiroProfile(chatPayload, estimateKiroPayloadTokens(chatPayload))
+	if chatProfile == nil {
+		t.Fatal("expected OpenAI Chat payload to produce a cache profile")
+	}
+
+	responsesMessages, err := parseResponsesInput(json.RawMessage(`[{
+		"type":"message","role":"system","content":"shared coding context shared coding context"
+	},{"type":"message","role":"user","content":"hello"}]`))
+	if err != nil {
+		t.Fatalf("parse Responses input: %v", err)
+	}
+	responsesMessages[0].Content = long
+	responsesPayload := OpenAIToKiro(&OpenAIRequest{Model: "claude-sonnet-4.6", Messages: responsesMessages}, false)
+	responsesProfile := tracker.BuildKiroProfile(responsesPayload, estimateKiroPayloadTokens(responsesPayload))
+	if responsesProfile == nil {
+		t.Fatal("expected Responses-converted payload to produce a cache profile")
+	}
+}
+
+func TestPromptCacheKiroImageFingerprintDoesNotChargeBase64Length(t *testing.T) {
+	tracker := newPromptCacheTracker(time.Hour)
+	build := func(data string) *KiroPayload {
+		payload := buildKiroCacheTestPayload("claude-sonnet-4.6", strings.Repeat("image context ", 500), "describe")
+		image := KiroImage{Format: "png"}
+		image.Source.Bytes = data
+		payload.ConversationState.CurrentMessage.UserInputMessage.Images = []KiroImage{image}
+		return payload
+	}
+	short := tracker.BuildKiroProfile(build(onePixelPNGBase64), 0)
+	long := tracker.BuildKiroProfile(build(onePixelPNGBase64+strings.Repeat("A", 4096)), 0)
+	if short == nil || long == nil {
+		t.Fatal("expected image payload profiles")
+	}
+	shortLast := short.Breakpoints[len(short.Breakpoints)-1]
+	longLast := long.Breakpoints[len(long.Breakpoints)-1]
+	if shortLast.CumulativeTokens != longLast.CumulativeTokens {
+		t.Fatalf("image Base64 length changed cache token estimate: short=%d long=%d", shortLast.CumulativeTokens, longLast.CumulativeTokens)
+	}
+	if shortLast.Fingerprint == longLast.Fingerprint {
+		t.Fatal("different image bytes must produce different cache fingerprints")
 	}
 }
 
@@ -236,6 +490,90 @@ func TestPromptCacheConcurrentColdPopulationConverges(t *testing.T) {
 	if warm.CacheReadInputTokens <= 0 || warm.CacheCreationInputTokens != 0 {
 		t.Fatalf("warm request did not converge to a read-only hit: %+v", warm)
 	}
+}
+
+func TestPromptCacheConcurrentColdCreationIsReservedOnce(t *testing.T) {
+	tracker := newPromptCacheTracker(time.Hour)
+	var fingerprint [32]byte
+	fingerprint[0] = 0x73
+	profile := &promptCacheProfile{
+		Model:            "claude-sonnet-4.6",
+		TotalInputTokens: 2048,
+		Breakpoints: []promptCacheBreakpoint{{
+			Fingerprint:      fingerprint,
+			CumulativeTokens: 2048,
+			TTL:              time.Hour,
+		}},
+	}
+	const workers = 64
+	start := make(chan struct{})
+	usages := make(chan promptCacheUsage, workers)
+	var group sync.WaitGroup
+	group.Add(workers)
+	for i := 0; i < workers; i++ {
+		go func() {
+			defer group.Done()
+			<-start
+			usage, _ := tracker.ComputeDetailed("account-reservation", profile)
+			usages <- usage
+		}()
+	}
+	close(start)
+	group.Wait()
+	close(usages)
+
+	creationCount := 0
+	reservationCount := 0
+	for usage := range usages {
+		if usage.CacheCreationInputTokens > 0 {
+			creationCount++
+			if usage.CacheCreationInputTokens != 2048 {
+				t.Fatalf("unexpected first creation amount: %+v", usage)
+			}
+		}
+		if usage.reservation != nil {
+			reservationCount++
+		}
+	}
+	if creationCount != 1 || reservationCount != 1 {
+		t.Fatalf("cold concurrent requests reserved creation %d times, reservations=%d", creationCount, reservationCount)
+	}
+
+	tracker.Update("account-reservation", profile)
+	warm := tracker.Compute("account-reservation", profile)
+	if warm.CacheReadInputTokens <= 0 || warm.CacheCreationInputTokens != 0 {
+		t.Fatalf("warm request did not converge: %+v", warm)
+	}
+}
+
+func TestPromptCacheFailedCreationReservationCanBeReleased(t *testing.T) {
+	tracker := newPromptCacheTracker(time.Hour)
+	var fingerprint [32]byte
+	fingerprint[0] = 0x74
+	profile := &promptCacheProfile{
+		Model:            "claude-sonnet-4.6",
+		TotalInputTokens: 2048,
+		Breakpoints: []promptCacheBreakpoint{{
+			Fingerprint:      fingerprint,
+			CumulativeTokens: 2048,
+			TTL:              time.Hour,
+		}},
+	}
+	first, firstDiagnostic := tracker.ComputeDetailed("account-release", profile)
+	if first.CacheCreationInputTokens == 0 || first.reservation == nil || firstDiagnostic.Reason != "empty_namespace" {
+		t.Fatalf("expected initial creation reservation: usage=%+v diagnostic=%+v", first, firstDiagnostic)
+	}
+	second, secondDiagnostic := tracker.ComputeDetailed("account-release", profile)
+	if second.CacheCreationInputTokens != 0 || secondDiagnostic.Reason != "cache_creation_in_flight" {
+		t.Fatalf("expected in-flight miss: usage=%+v diagnostic=%+v", second, secondDiagnostic)
+	}
+
+	tracker.ReleaseReservation(first)
+	retry, retryDiagnostic := tracker.ComputeDetailed("account-release", profile)
+	if retry.CacheCreationInputTokens == 0 || retry.reservation == nil || retryDiagnostic.Reason != "empty_namespace" {
+		t.Fatalf("released reservation did not allow retry: usage=%+v diagnostic=%+v", retry, retryDiagnostic)
+	}
+	tracker.ReleaseReservation(retry)
 }
 
 func TestPromptCacheReadEfficiencyScalesCacheRead(t *testing.T) {

@@ -2063,7 +2063,6 @@ func (h *Handler) handleClaudeMessages(w http.ResponseWriter, r *http.Request) {
 		h.sendClaudeError(w, admissionErr.status, admissionErr.code, admissionErr.message)
 		return
 	}
-	cacheProfile := h.promptCache.BuildClaudeProfile(effectiveReq, estimatedInputTokens)
 
 	if config.GetWebSearchConfig().Enabled {
 		apiKeyID := apiKeyIDFromContext(r.Context())
@@ -2086,6 +2085,13 @@ func (h *Handler) handleClaudeMessages(w http.ResponseWriter, r *http.Request) {
 	kiroPayload.requestContext = r.Context()
 	kiroPayload.contextWindowTokens = contextWindowTokens
 	truncatePayloadToLimit(kiroPayload, kiroPayload.hasSystemPriming)
+	if finalInputTokens := estimateKiroPayloadTokens(kiroPayload); finalInputTokens > 0 {
+		estimatedInputTokens = finalInputTokens
+	}
+	// Build the profile from the normalized, truncated payload. This keeps the
+	// fingerprint aligned with what Kiro actually receives across all Claude
+	// request transformations.
+	cacheProfile := h.promptCache.BuildKiroProfile(kiroPayload, estimatedInputTokens)
 
 	// Stream or non-stream
 	apiKeyID := apiKeyIDFromContext(r.Context())
@@ -2642,6 +2648,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 		}
 		release()
 		if err != nil {
+			h.promptCache.ReleaseReservation(syntheticCacheUsage)
 			lastErr = err
 			excluded[account.ID] = true
 			h.handleAccountFailureForModel(account, model, err)
@@ -3037,6 +3044,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 		}
 		release()
 		if err != nil {
+			h.promptCache.ReleaseReservation(syntheticCacheUsage)
 			lastErr = err
 			excluded[account.ID] = true
 			h.handleAccountFailureForModel(account, model, err)
@@ -3268,18 +3276,22 @@ func (h *Handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 	kiroPayload.requestContext = r.Context()
 	kiroPayload.contextWindowTokens = contextWindowTokens
 	truncatePayloadToLimit(kiroPayload, kiroPayload.hasSystemPriming)
+	if finalInputTokens := estimateKiroPayloadTokens(kiroPayload); finalInputTokens > 0 {
+		estimatedInputTokens = finalInputTokens
+	}
+	cacheProfile := h.promptCache.BuildKiroProfile(kiroPayload, estimatedInputTokens)
 
 	apiKeyID := apiKeyIDFromContext(r.Context())
 	namespaceConversationID(kiroPayload, requestConversationNamespace(r, apiKeyID))
 	if req.Stream {
-		h.handleOpenAIStream(w, kiroPayload, req.Model, thinking, estimatedInputTokens, apiKeyID)
+		h.handleOpenAIStream(w, kiroPayload, req.Model, thinking, estimatedInputTokens, cacheProfile, apiKeyID)
 	} else {
-		h.handleOpenAINonStream(w, kiroPayload, req.Model, thinking, estimatedInputTokens, apiKeyID)
+		h.handleOpenAINonStream(w, kiroPayload, req.Model, thinking, estimatedInputTokens, cacheProfile, apiKeyID)
 	}
 }
 
 // handleOpenAIStream OpenAI 流式响应
-func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int, apiKeyID string) {
+func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int, cacheProfile *promptCacheProfile, apiKeyID string) {
 	startedAt := time.Now()
 	firstContent := payload.beginRequestTiming(startedAt)
 	responseModel := exposedModelID(model)
@@ -3324,6 +3336,9 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 			h.handleAccountFailure(account, err)
 			continue
 		}
+		cacheScope := h.promptCache.ScopeKey(account.ID, apiKeyID)
+		syntheticCacheUsage, cacheDiagnostic := h.promptCache.ComputeDetailed(cacheScope, cacheProfile)
+		payload.setPromptCacheDiagnostic(cacheDiagnostic)
 
 		var toolCalls []ToolCall
 		var toolCallIndex int
@@ -3622,6 +3637,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 		}
 		release()
 		if err != nil {
+			h.promptCache.ReleaseReservation(syntheticCacheUsage)
 			lastErr = err
 			excluded[account.ID] = true
 			h.handleAccountFailureForModel(account, model, err)
@@ -3669,8 +3685,8 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 		} else if inputTokens <= 0 {
 			inputTokens = estimatedInputTokens
 		}
-		cacheUsage, inputTokens := h.promptCache.ResolveUsage(promptCacheUsage{}, upstreamUsage, inputTokens, nil)
-		cacheDiagnostic := finalizePromptCacheDiagnostic(promptCacheDiagnostic{Status: "skipped", Reason: "no_cache_breakpoint", Source: "local"}, upstreamUsage, cacheUsage, inputTokens)
+		cacheUsage, inputTokens := h.promptCache.ResolveUsage(syntheticCacheUsage, upstreamUsage, inputTokens, cacheProfile)
+		cacheDiagnostic = finalizePromptCacheDiagnostic(cacheDiagnostic, upstreamUsage, cacheUsage, inputTokens)
 		payload.setPromptCacheDiagnostic(cacheDiagnostic)
 		outputContent, extractedReasoning := extractThinkingFromContent(rawContentBuilder.String())
 		reasoningOutput := rawReasoningBuilder.String()
@@ -3694,6 +3710,8 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 		h.pool.RecordSuccess(account.ID)
 		h.pool.ClearModelUnavailable(account.ID, model)
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
+		h.promptCache.Update(cacheScope, cacheProfile)
+		h.promptCache.RecordDecision(cacheUsage, cacheDiagnostic)
 		entry := requestLogEntry{
 			Timestamp:                time.Now().Unix(),
 			Protocol:                 "openai.chat.stream",
@@ -3787,7 +3805,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 }
 
 // handleOpenAINonStream OpenAI 非流式响应
-func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int, apiKeyID string) {
+func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int, cacheProfile *promptCacheProfile, apiKeyID string) {
 	startedAt := time.Now()
 	firstContent := payload.beginRequestTiming(startedAt)
 	attempts := h.newAccountAttemptController(payload.requestContext)
@@ -3817,6 +3835,9 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 			h.handleAccountFailure(account, err)
 			continue
 		}
+		cacheScope := h.promptCache.ScopeKey(account.ID, apiKeyID)
+		syntheticCacheUsage, cacheDiagnostic := h.promptCache.ComputeDetailed(cacheScope, cacheProfile)
+		payload.setPromptCacheDiagnostic(cacheDiagnostic)
 
 		var content string
 		var reasoningContent string
@@ -3855,6 +3876,7 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 		}
 		release()
 		if err != nil {
+			h.promptCache.ReleaseReservation(syntheticCacheUsage)
 			lastErr = err
 			excluded[account.ID] = true
 			h.handleAccountFailureForModel(account, model, err)
@@ -3876,8 +3898,8 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 		} else if inputTokens <= 0 {
 			inputTokens = estimatedInputTokens
 		}
-		cacheUsage, inputTokens := h.promptCache.ResolveUsage(promptCacheUsage{}, upstreamUsage, inputTokens, nil)
-		cacheDiagnostic := finalizePromptCacheDiagnostic(promptCacheDiagnostic{Status: "skipped", Reason: "no_cache_breakpoint", Source: "local"}, upstreamUsage, cacheUsage, inputTokens)
+		cacheUsage, inputTokens := h.promptCache.ResolveUsage(syntheticCacheUsage, upstreamUsage, inputTokens, cacheProfile)
+		cacheDiagnostic = finalizePromptCacheDiagnostic(cacheDiagnostic, upstreamUsage, cacheUsage, inputTokens)
 		payload.setPromptCacheDiagnostic(cacheDiagnostic)
 		thinkingTokens := upstreamUsage.ThinkingTokens
 		if thinkingTokens <= 0 {
@@ -3889,6 +3911,8 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 		h.pool.RecordSuccess(account.ID)
 		h.pool.ClearModelUnavailable(account.ID, model)
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
+		h.promptCache.Update(cacheScope, cacheProfile)
+		h.promptCache.RecordDecision(cacheUsage, cacheDiagnostic)
 		h.recordRequestLogForPayload(payload, requestLogEntry{
 			Timestamp:                time.Now().Unix(),
 			Protocol:                 "openai.chat",

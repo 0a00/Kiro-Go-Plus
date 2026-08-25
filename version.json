@@ -1,5 +1,5 @@
 {
-  "version": "1.2.50",
-  "changelog": "Harden development load diagnostics with bounded scheduling, explicit oversized-response classification, CRLF SSE parsing, safe log correlation, duplicate-request detection, and post-load recovery checks.\n增强开发负载诊断：增加有界调度、超大响应明确分类、CRLF SSE 解析、安全日志关联、重复请求检测及压测后恢复检查。",
+  "version": "1.2.51",
+  "changelog": "Align prompt-cache profiles with final Kiro payload token accounting, bound cache usage by real input, and coordinate concurrent cache creation with failure-safe release.\n修复提示缓存 profile 与最终 Kiro payload 的 token 统计不一致问题，限制缓存统计不超过真实输入，并增加并发创建协调和失败释放。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }

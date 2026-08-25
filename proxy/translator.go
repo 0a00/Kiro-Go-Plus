@@ -379,6 +379,7 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 	// 构建 payload
 	payload := &KiroPayload{}
 	payload.hasSystemPriming = systemPrompt != ""
+	payload.promptCacheTTL = promptCacheTTLFromClaudeRequest(req)
 	payload.ToolNameMap = toolNames.restoreMap()
 	payload.toolInputPolicies = toolInputPolicies
 	payload.ConversationState.ChatTriggerType = "MANUAL"

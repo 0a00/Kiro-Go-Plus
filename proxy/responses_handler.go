@@ -236,6 +236,10 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 	kiroPayload.requestContext = r.Context()
 	kiroPayload.contextWindowTokens = contextWindowTokens
 	truncatePayloadToLimit(kiroPayload, kiroPayload.hasSystemPriming)
+	if finalInputTokens := estimateKiroPayloadTokens(kiroPayload); finalInputTokens > 0 {
+		estimatedInputTokens = finalInputTokens
+	}
+	cacheProfile := h.promptCache.BuildKiroProfile(kiroPayload, estimatedInputTokens)
 
 	apiKeyID := apiKeyIDFromContext(r.Context())
 	namespaceConversationID(kiroPayload, requestConversationNamespace(r, apiKeyID))
@@ -244,12 +248,12 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 
 	if req.Stream {
 		h.handleResponsesStream(w, kiroPayload, actualModel, thinking, estimatedInputTokens,
-			apiKeyID, respID, routeKey, &req, storedInputCopy, storeResponse, customTools)
+			cacheProfile, apiKeyID, respID, routeKey, &req, storedInputCopy, storeResponse, customTools)
 		return
 	}
 
 	h.handleResponsesNonStream(w, kiroPayload, actualModel, thinking, estimatedInputTokens,
-		apiKeyID, respID, routeKey, &req, storedInputCopy, storeResponse, customTools)
+		cacheProfile, apiKeyID, respID, routeKey, &req, storedInputCopy, storeResponse, customTools)
 }
 
 func responsesRouteKey(payload *KiroPayload, previousResponseID, responseID string) string {
@@ -266,7 +270,7 @@ func responsesRouteKey(payload *KiroPayload, previousResponseID, responseID stri
 
 func (h *Handler) handleResponsesNonStream(
 	w http.ResponseWriter, payload *KiroPayload, model string, thinking bool,
-	estimatedInputTokens int, apiKeyID, respID, routeKey string,
+	estimatedInputTokens int, cacheProfile *promptCacheProfile, apiKeyID, respID, routeKey string,
 	req *ResponsesRequest, storedInput json.RawMessage, storeResponse bool, customTools responseToolNameSet,
 ) {
 	startedAt := time.Now()
@@ -299,6 +303,9 @@ func (h *Handler) handleResponsesNonStream(
 			h.handleAccountFailure(account, err)
 			continue
 		}
+		cacheScope := h.promptCache.ScopeKey(account.ID, apiKeyID)
+		syntheticCacheUsage, cacheDiagnostic := h.promptCache.ComputeDetailed(cacheScope, cacheProfile)
+		payload.setPromptCacheDiagnostic(cacheDiagnostic)
 
 		var content, reasoningContent string
 		var toolUses []KiroToolUse
@@ -336,6 +343,7 @@ func (h *Handler) handleResponsesNonStream(
 		}
 		release()
 		if err != nil {
+			h.promptCache.ReleaseReservation(syntheticCacheUsage)
 			lastErr = err
 			excluded[account.ID] = true
 			h.handleAccountFailureForModel(account, model, err)
@@ -355,8 +363,8 @@ func (h *Handler) handleResponsesNonStream(
 		} else if inputTokens <= 0 {
 			inputTokens = estimatedInputTokens
 		}
-		cacheUsage, inputTokens := h.promptCache.ResolveUsage(promptCacheUsage{}, upstreamUsage, inputTokens, nil)
-		cacheDiagnostic := finalizePromptCacheDiagnostic(promptCacheDiagnostic{Status: "skipped", Reason: "no_cache_breakpoint", Source: "local"}, upstreamUsage, cacheUsage, inputTokens)
+		cacheUsage, inputTokens := h.promptCache.ResolveUsage(syntheticCacheUsage, upstreamUsage, inputTokens, cacheProfile)
+		cacheDiagnostic = finalizePromptCacheDiagnostic(cacheDiagnostic, upstreamUsage, cacheUsage, inputTokens)
 		payload.setPromptCacheDiagnostic(cacheDiagnostic)
 		thinkingTokens := upstreamUsage.ThinkingTokens
 		if thinkingTokens <= 0 {
@@ -368,6 +376,8 @@ func (h *Handler) handleResponsesNonStream(
 		h.pool.RecordSuccess(account.ID)
 		h.pool.ClearModelUnavailable(account.ID, model)
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
+		h.promptCache.Update(cacheScope, cacheProfile)
+		h.promptCache.RecordDecision(cacheUsage, cacheDiagnostic)
 		entry := requestLogEntry{
 			Timestamp:                time.Now().Unix(),
 			Protocol:                 "openai.responses",
@@ -569,7 +579,7 @@ func responseStopReasonIsIncomplete(reason string) bool {
 
 func (h *Handler) handleResponsesStream(
 	w http.ResponseWriter, payload *KiroPayload, model string, thinking bool,
-	estimatedInputTokens int, apiKeyID, respID, routeKey string,
+	estimatedInputTokens int, cacheProfile *promptCacheProfile, apiKeyID, respID, routeKey string,
 	req *ResponsesRequest, storedInput json.RawMessage, storeResponse bool, customTools responseToolNameSet,
 ) {
 	startedAt := time.Now()
@@ -644,6 +654,9 @@ func (h *Handler) handleResponsesStream(
 			h.handleAccountFailure(account, err)
 			continue
 		}
+		cacheScope := h.promptCache.ScopeKey(account.ID, apiKeyID)
+		syntheticCacheUsage, cacheDiagnostic := h.promptCache.ComputeDetailed(cacheScope, cacheProfile)
+		payload.setPromptCacheDiagnostic(cacheDiagnostic)
 
 		var (
 			fullText           strings.Builder
@@ -892,6 +905,7 @@ func (h *Handler) handleResponsesStream(
 		}
 		release()
 		if err != nil {
+			h.promptCache.ReleaseReservation(syntheticCacheUsage)
 			if !responseStarted {
 				lastErr = err
 				excluded[account.ID] = true
@@ -969,8 +983,8 @@ func (h *Handler) handleResponsesStream(
 		} else if inputTokens <= 0 {
 			inputTokens = estimatedInputTokens
 		}
-		cacheUsage, inputTokens := h.promptCache.ResolveUsage(promptCacheUsage{}, upstreamUsage, inputTokens, nil)
-		cacheDiagnostic := finalizePromptCacheDiagnostic(promptCacheDiagnostic{Status: "skipped", Reason: "no_cache_breakpoint", Source: "local"}, upstreamUsage, cacheUsage, inputTokens)
+		cacheUsage, inputTokens := h.promptCache.ResolveUsage(syntheticCacheUsage, upstreamUsage, inputTokens, cacheProfile)
+		cacheDiagnostic = finalizePromptCacheDiagnostic(cacheDiagnostic, upstreamUsage, cacheUsage, inputTokens)
 		payload.setPromptCacheDiagnostic(cacheDiagnostic)
 		thinkingTokens := upstreamUsage.ThinkingTokens
 		if thinkingTokens <= 0 {
@@ -982,6 +996,8 @@ func (h *Handler) handleResponsesStream(
 		h.pool.RecordSuccess(account.ID)
 		h.pool.ClearModelUnavailable(account.ID, model)
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
+		h.promptCache.Update(cacheScope, cacheProfile)
+		h.promptCache.RecordDecision(cacheUsage, cacheDiagnostic)
 		entry := requestLogEntry{
 			Timestamp:                time.Now().Unix(),
 			Protocol:                 "openai.responses.stream",

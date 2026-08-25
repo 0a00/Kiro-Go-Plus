@@ -230,11 +230,7 @@ func estimateKiroHistoryEntryTokens(entry KiroHistoryMessage) int {
 		total += estimateKiroUserInputTokens(entry.UserInputMessage)
 	}
 	if assistant := entry.AssistantResponseMessage; assistant != nil {
-		total += estimateWireTokens(assistant.Content)
-		for _, toolUse := range assistant.ToolUses {
-			total += estimateWireTokens(toolUse.Name)
-			total += estimateWireJSONTokens(toolUse.Input)
-		}
+		total += estimateKiroAssistantResponseTokens(assistant)
 	}
 	return total
 }
@@ -244,21 +240,59 @@ func estimateKiroUserInputTokens(message *KiroUserInputMessage) int {
 		return 0
 	}
 
-	total := estimateWireTokens(message.Content)
-	total += len(message.Images) * maxImageInputTokens
-	if message.UserInputMessageContext == nil {
-		return total
+	total := estimateKiroUserContentTokens(message)
+	total += estimateKiroToolContextTokens(message.UserInputMessageContext)
+	return total
+}
+
+// The following helpers are shared by payload token estimation and prompt-cache
+// profile construction. Keep protocol metadata (IDs and status values) out of
+// the token charge intentionally: it is fingerprinted for semantic identity,
+// but Kiro's usage accounting is based on the textual/schema content.
+func estimateKiroUserContentTokens(message *KiroUserInputMessage) int {
+	if message == nil {
+		return 0
 	}
-	for _, tool := range message.UserInputMessageContext.Tools {
-		spec := tool.ToolSpecification
-		total += estimateWireTokens(spec.Name)
-		total += estimateWireTokens(spec.Description)
-		total += estimateWireJSONTokens(spec.InputSchema.JSON)
+	return estimateWireTokens(message.Content) + len(message.Images)*maxImageInputTokens
+}
+
+func estimateKiroToolWrapperTokens(tool KiroToolWrapper) int {
+	spec := tool.ToolSpecification
+	return estimateWireTokens(spec.Name) +
+		estimateWireTokens(spec.Description) +
+		estimateWireJSONTokens(spec.InputSchema.JSON)
+}
+
+func estimateKiroToolResultTokens(result KiroToolResult) int {
+	total := 0
+	for _, content := range result.Content {
+		total += estimateWireTokens(content.Text)
 	}
-	for _, result := range message.UserInputMessageContext.ToolResults {
-		for _, content := range result.Content {
-			total += estimateWireTokens(content.Text)
-		}
+	return total
+}
+
+func estimateKiroToolContextTokens(context *UserInputMessageContext) int {
+	if context == nil {
+		return 0
+	}
+	total := 0
+	for _, tool := range context.Tools {
+		total += estimateKiroToolWrapperTokens(tool)
+	}
+	for _, result := range context.ToolResults {
+		total += estimateKiroToolResultTokens(result)
+	}
+	return total
+}
+
+func estimateKiroAssistantResponseTokens(assistant *KiroAssistantResponseMessage) int {
+	if assistant == nil {
+		return 0
+	}
+	total := estimateWireTokens(assistant.Content)
+	for _, toolUse := range assistant.ToolUses {
+		total += estimateWireTokens(toolUse.Name)
+		total += estimateWireJSONTokens(toolUse.Input)
 	}
 	return total
 }

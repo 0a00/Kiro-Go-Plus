@@ -400,12 +400,15 @@ func (h *Handler) callClaudeWebSearchRound(
 	roundReq := *req
 	roundReq.Stream = false
 	estimatedInputTokens := estimateClaudeRequestInputTokens(cloneClaudeRequestForThinking(&roundReq, thinking))
-	cacheProfile := h.promptCache.BuildClaudeProfile(cloneClaudeRequestForThinking(&roundReq, thinking), estimatedInputTokens)
 	payload := ClaudeToKiro(&roundReq, thinking)
 	payload.requestContext = ctx
 	payload.contextWindowTokens = contextWindowTokens
 	payload.attemptBudget = attemptBudget
 	truncatePayloadToLimit(payload, payload.hasSystemPriming)
+	if finalInputTokens := estimateKiroPayloadTokens(payload); finalInputTokens > 0 {
+		estimatedInputTokens = finalInputTokens
+	}
+	cacheProfile := h.promptCache.BuildKiroProfile(payload, estimatedInputTokens)
 	namespaceConversationID(payload, namespace)
 	configureClaudeToolStreaming(payload, &roundReq, thinking, thinkingOpts, config.GetThinkingConfig())
 	payload.beginStreamMetrics(startedAt)
@@ -480,6 +483,7 @@ func (h *Handler) callClaudeWebSearchRound(
 		}
 		release()
 		if err != nil {
+			h.promptCache.ReleaseReservation(syntheticCacheUsage)
 			lastErr = err
 			excluded[account.ID] = true
 			h.handleAccountFailureForModel(account, req.Model, err)
