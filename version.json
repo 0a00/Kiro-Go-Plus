@@ -1,5 +1,5 @@
 {
-  "version": "1.2.51",
-  "changelog": "Align prompt-cache profiles with final Kiro payload token accounting, bound cache usage by real input, and coordinate concurrent cache creation with failure-safe release.\n修复提示缓存 profile 与最终 Kiro payload 的 token 统计不一致问题，限制缓存统计不超过真实输入，并增加并发创建协调和失败释放。",
+  "version": "1.2.53",
+  "changelog": "Harden automatic account refresh: preserve usable Builder ID credentials on optional usage 403s, make refresh concurrency use the active configuration, and keep refresh status counters stable across polls.\n强化账号自动刷新：GetUsageLimits 可选权限 403 时保留可用的 Builder ID 凭据，让刷新并发使用当前配置，并修复状态轮询导致计数累加。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }

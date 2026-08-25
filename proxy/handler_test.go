@@ -557,9 +557,84 @@ func TestAutoRefreshSelectionPrioritizesExpiringTokens(t *testing.T) {
 		{ID: "missing-token", Enabled: true, RefreshToken: "refresh", LastRefresh: now.Unix()},
 	}
 	due := h.dueAutoRefreshAccounts(accounts, autoRefresh)
-	selected := h.nextAutoRefreshAccounts(due, 2)
+	selected := h.nextAutoRefreshAccounts(due, 2, autoRefresh)
 	if len(selected) != 2 || selected[0].ID != "missing-token" || selected[1].ID != "expires-later" {
 		t.Fatalf("expected urgent token refreshes first, got %+v", selected)
+	}
+}
+
+func TestEffectiveAutoRefreshIntervalCapsLegacyUnsafeSettings(t *testing.T) {
+	if got := effectiveAutoRefreshInterval(config.AutoRefreshConfig{
+		IntervalMinutes: 20, TokenRefreshBeforeSeconds: 600, RefreshJitterSeconds: 120,
+	}); got != 450*time.Second {
+		t.Fatalf("legacy unsafe interval = %s, want 7m30s", got)
+	}
+	if got := effectiveAutoRefreshInterval(config.AutoRefreshConfig{
+		IntervalMinutes: 10, TokenRefreshBeforeSeconds: 1800, RefreshJitterSeconds: 30,
+	}); got != 10*time.Minute {
+		t.Fatalf("recommended interval = %s, want 10m", got)
+	}
+}
+
+func TestBoundedRefreshConcurrencyUsesProvidedSetting(t *testing.T) {
+	if got := boundedRefreshConcurrencyFor(12, 2); got != 2 {
+		t.Fatalf("configured refresh concurrency = %d, want 2", got)
+	}
+	if got := boundedRefreshConcurrencyFor(100, 80); got != 50 {
+		t.Fatalf("refresh concurrency upper bound = %d, want 50", got)
+	}
+	if got := boundedRefreshConcurrencyFor(3, 10); got != 3 {
+		t.Fatalf("refresh concurrency should be capped by work size, got %d", got)
+	}
+}
+
+func TestTokenDueBypassesMetadataCooldownButNotTokenFailureCooldown(t *testing.T) {
+	now := time.Now()
+	account := config.Account{
+		ID: "metadata-cooldown", Enabled: true, AccessToken: "access", RefreshToken: "refresh",
+		ExpiresAt: now.Add(time.Minute).Unix(), LastRefresh: now.Unix(),
+	}
+	autoRefresh := config.AutoRefreshConfig{IntervalMinutes: 10, TokenRefreshBeforeSeconds: 1800}
+	h := &Handler{
+		autoRefreshFail: map[string]int64{
+			"metadata-cooldown": now.Add(time.Minute).Unix(),
+			"token-cooldown":    now.Add(time.Minute).Unix(),
+		},
+		autoRefreshStat: autoRefreshStatus{Recent: map[string]autoRefreshAccountStatus{
+			"metadata-cooldown": {Reason: "account info refresh failed"},
+			"token-cooldown":    {Reason: "token refresh failed"},
+		}},
+	}
+	accounts := []config.Account{account, {
+		ID: "token-cooldown", Enabled: true, AccessToken: "access", RefreshToken: "refresh",
+		ExpiresAt: now.Add(time.Minute).Unix(), LastRefresh: now.Unix(),
+	}}
+	due := h.dueAutoRefreshAccounts(accounts, autoRefresh)
+	if len(due) != 1 || due[0].ID != "metadata-cooldown" {
+		t.Fatalf("cooldown classification selected %+v, want metadata-cooldown only", due)
+	}
+}
+
+func TestUrgentRefreshIgnoresTokenFailureCooldown(t *testing.T) {
+	now := time.Now()
+	account := config.Account{
+		ID: "token-cooldown", Enabled: true, AccessToken: "access", RefreshToken: "refresh",
+		ExpiresAt: now.Add(time.Minute).Unix(),
+	}
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	if err := config.AddAccount(account); err != nil {
+		t.Fatalf("config.AddAccount: %v", err)
+	}
+	h := &Handler{
+		autoRefreshFail: map[string]int64{"token-cooldown": now.Add(time.Minute).Unix()},
+		autoRefreshStat: autoRefreshStatus{Recent: map[string]autoRefreshAccountStatus{
+			"token-cooldown": {Reason: "token refresh failed"},
+		}},
+	}
+	if h.hasUrgentAutoRefreshAccount(config.AutoRefreshConfig{TokenRefreshBeforeSeconds: 1800}) {
+		t.Fatal("token-refresh cooldown must suppress urgent scheduler wakeups")
 	}
 }
 
@@ -592,6 +667,12 @@ func TestAutoRefreshStatusCountsDueAndFailedAccounts(t *testing.T) {
 	}
 	if status.FailedCount != 1 || status.CooldownCount != 1 {
 		t.Fatalf("unexpected failure counts: %+v", status)
+	}
+	// Polling the status endpoint repeatedly must be idempotent; derived
+	// counters must not grow on every read.
+	repeated := h.getAutoRefreshStatusSnapshot()
+	if repeated.TokenDueCount != status.TokenDueCount || repeated.StaleCount != status.StaleCount || repeated.FailedCount != status.FailedCount {
+		t.Fatalf("derived status counts accumulated across polls: first=%+v second=%+v", status, repeated)
 	}
 }
 
@@ -651,9 +732,10 @@ func TestNextAutoRefreshAccountsRotatesWhenMaxPerRunSet(t *testing.T) {
 		{ID: "d"},
 	}
 
-	first := h.nextAutoRefreshAccounts(accounts, 2)
-	second := h.nextAutoRefreshAccounts(accounts, 2)
-	third := h.nextAutoRefreshAccounts(accounts, 2)
+	autoRefresh := config.AutoRefreshConfig{IntervalMinutes: 10, TokenRefreshBeforeSeconds: 1800}
+	first := h.nextAutoRefreshAccounts(accounts, 2, autoRefresh)
+	second := h.nextAutoRefreshAccounts(accounts, 2, autoRefresh)
+	third := h.nextAutoRefreshAccounts(accounts, 2, autoRefresh)
 
 	gotIDs := func(items []*config.Account) []string {
 		out := make([]string, 0, len(items))

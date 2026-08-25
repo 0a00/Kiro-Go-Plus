@@ -548,7 +548,8 @@ func TestOperationalConfigDefaults(t *testing.T) {
 		t.Fatalf("unexpected retry defaults: %+v", retry)
 	}
 	refresh := GetAutoRefreshConfig()
-	if refresh.RefreshQueueCapacity != 1000 || refresh.RefreshTaskTimeoutSeconds != 60 || refresh.RefreshJitterSeconds != 30 {
+	if refresh.IntervalMinutes != 10 || refresh.TokenRefreshBeforeSeconds != 1800 ||
+		refresh.RefreshQueueCapacity != 2000 || refresh.RefreshTaskTimeoutSeconds != 120 || refresh.RefreshJitterSeconds != 30 {
 		t.Fatalf("unexpected refresh coordinator defaults: %+v", refresh)
 	}
 	models := GetModelRegistryConfig()
@@ -1034,6 +1035,30 @@ func TestAccountInfoBatchPreservesSubscriptionOnEmptyResponse(t *testing.T) {
 	}
 	if account.LastRefresh != 12345 {
 		t.Fatalf("last refresh = %d, want 12345", account.LastRefresh)
+	}
+}
+
+func TestAccountInfoMetadataUnavailablePreservesExistingUsage(t *testing.T) {
+	if err := Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	if err := AddAccount(Account{
+		ID: "metadata-soft", Enabled: true, AccessToken: "access",
+		SubscriptionType: "POWER", UsageCurrent: 80, UsageLimit: 100,
+		LastRefresh: 10,
+	}); err != nil {
+		t.Fatalf("add account: %v", err)
+	}
+	if err := UpdateAccountInfo("metadata-soft", AccountInfo{
+		LastRefresh:         20,
+		MetadataUnavailable: true,
+	}); err != nil {
+		t.Fatalf("update account info: %v", err)
+	}
+	account := GetAccounts()[0]
+	if account.LastRefresh != 20 || account.SubscriptionType != "POWER" ||
+		account.UsageCurrent != 80 || account.UsageLimit != 100 {
+		t.Fatalf("metadata-only update overwrote existing usage: %+v", account)
 	}
 }
 

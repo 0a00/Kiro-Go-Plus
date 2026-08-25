@@ -455,8 +455,14 @@ func kiroControlPlaneRegionCandidates(account *config.Account) []string {
 	return regions
 }
 
-func shouldTryNextManagementRegion(ctx context.Context, err error) bool {
+func shouldTryNextManagementRegion(ctx context.Context, account *config.Account, err error) bool {
 	if err == nil || (ctx != nil && ctx.Err() != nil) {
+		return false
+	}
+	// Builder ID/IDC identities can legitimately lack the optional usage
+	// permission. Probing every fallback region only repeats the same 403 and
+	// makes an otherwise healthy account look like a slow or failed refresh.
+	if isUsageLimitsUnavailable(account, err) {
 		return false
 	}
 	if upstreamErr, ok := asUpstreamError(err); ok {
@@ -488,7 +494,7 @@ func GetUsageLimitsContext(ctx context.Context, account *config.Account) (*Usage
 			return result, nil
 		}
 		lastErr = err
-		if index+1 >= len(regions) || !shouldTryNextManagementRegion(ctx, err) {
+		if index+1 >= len(regions) || !shouldTryNextManagementRegion(ctx, account, err) {
 			break
 		}
 		logger.Warnf("[GetUsageLimits] region %s failed; trying fallback: %v", region, err)
@@ -553,7 +559,7 @@ func GetUserInfoContext(ctx context.Context, account *config.Account) (*UserInfo
 			return result, nil
 		}
 		lastErr = err
-		if index+1 >= len(regions) || !shouldTryNextManagementRegion(ctx, err) {
+		if index+1 >= len(regions) || !shouldTryNextManagementRegion(ctx, account, err) {
 			break
 		}
 		logger.Warnf("[GetUserInfo] region %s failed; trying fallback: %v", region, err)
@@ -694,7 +700,7 @@ func listAvailableModelsManagementContext(ctx context.Context, account *config.A
 			return models, nil
 		}
 		lastErr = err
-		if !shouldTryNextManagementRegion(ctx, err) {
+		if !shouldTryNextManagementRegion(ctx, account, err) {
 			return nil, err
 		}
 		logger.Debugf("[ListAvailableModels] Management region %s failed; trying fallback: %v", region, err)
@@ -1295,6 +1301,15 @@ func RefreshAccountInfoContext(ctx context.Context, account *config.Account) (*c
 		}
 	}
 	if err != nil {
+		if isUsageLimitsUnavailable(account, err) {
+			// Builder ID accounts can still serve generation requests while the
+			// optional usage endpoint rejects them. Preserve the token and mark
+			// only metadata as unavailable; callers must not cool or disable the
+			// account because of this control-plane limitation.
+			info.MetadataUnavailable = true
+			logger.Debugf("[RefreshAccountInfo] Usage metadata unavailable for %s: %v", accountEmailForLog(account), err)
+			return info, &accountInfoUnavailableError{cause: err}
+		}
 		if upstreamErr, ok := asUpstreamError(err); ok && upstreamErr.Kind == UpstreamErrorSuspended {
 			// 账户被暂时封禁，自动禁用并标记封禁状态
 			logger.Warnf("[RefreshAccountInfo] Account %s is temporarily suspended: %v", account.Email, err)

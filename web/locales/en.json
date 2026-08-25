@@ -256,7 +256,7 @@
   "settings.autoRefreshLastRun": "Last run",
   "settings.autoRefreshRunning": "Running",
   "settings.autoRefreshSelected": "Selected",
-  "settings.autoRefreshResult": "Success/Failed/Skipped",
+  "settings.autoRefreshResult": "Success/Partial/Failed/Skipped",
   "settings.autoRefreshDue": "Due now",
   "settings.autoRefreshTokenDue": "Token due",
   "settings.autoRefreshStale": "Info stale",

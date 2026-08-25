@@ -137,7 +137,7 @@ func hasCredentialIssue(account config.Account, now time.Time) bool {
 	if strings.TrimSpace(account.AccessToken) == "" && refreshToken == "" {
 		return true
 	}
-	return account.ExpiresAt > 0 && now.Unix() > account.ExpiresAt-tokenRefreshSkewSeconds && refreshToken == ""
+	return account.ExpiresAt > 0 && now.Unix() >= account.ExpiresAt-tokenRefreshSafetyWindowSecondsForAccount(&account) && refreshToken == ""
 }
 
 func hasPersistedProfileIssue(reason string) bool {

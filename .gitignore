@@ -16,6 +16,7 @@
 # Credentials and local exports
 /config.json
 /runtime_state.json
+/pool/runtime_state.json
 kiro-accounts-*.json
 *account-export*.json
 *credentials-export*.json

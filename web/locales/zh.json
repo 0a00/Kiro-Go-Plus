@@ -256,7 +256,7 @@
   "settings.autoRefreshLastRun": "上次刷新",
   "settings.autoRefreshRunning": "刷新中",
   "settings.autoRefreshSelected": "本轮账号",
-  "settings.autoRefreshResult": "成功/失败/跳过",
+  "settings.autoRefreshResult": "成功/部分成功/失败/跳过",
   "settings.autoRefreshDue": "当前待刷新",
   "settings.autoRefreshTokenDue": "Token 到期",
   "settings.autoRefreshStale": "信息过期",

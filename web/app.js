@@ -2052,13 +2052,13 @@
     const res = await api('/auto-refresh');
     const d = await res.json();
     $('autoRefreshEnabled').checked = d.enabled !== false;
-    $('autoRefreshIntervalMinutes').value = d.intervalMinutes || 30;
-    $('autoRefreshBeforeSeconds').value = d.tokenRefreshBeforeSeconds || 120;
+    $('autoRefreshIntervalMinutes').value = d.intervalMinutes || 10;
+    $('autoRefreshBeforeSeconds').value = d.tokenRefreshBeforeSeconds || 1800;
     $('autoRefreshMaxAccounts').value = d.maxAccountsPerRun || 0;
     $('autoRefreshConcurrency').value = d.refreshConcurrency || 5;
     $('autoRefreshFailureCooldown').value = d.failureCooldownSeconds || 300;
-    $('autoRefreshQueueCapacity').value = d.refreshQueueCapacity || 1000;
-    $('autoRefreshTaskTimeoutSeconds').value = d.refreshTaskTimeoutSeconds || 60;
+    $('autoRefreshQueueCapacity').value = d.refreshQueueCapacity || 2000;
+    $('autoRefreshTaskTimeoutSeconds').value = d.refreshTaskTimeoutSeconds || 120;
     $('autoRefreshJitterSeconds').value = d.refreshJitterSeconds ?? 30;
     $('autoRefreshModels').checked = d.refreshModels !== false;
     $('autoRefreshModelIntervalMinutes').value = d.modelIntervalMinutes || 60;
@@ -2406,7 +2406,7 @@
     if (!el) return;
     const recent = Object.values(status.recent || {});
     const problemItems = recent
-      .filter(item => item.status === 'failed' || item.cooldownUntil)
+      .filter(item => item.status === 'failed' || item.status === 'partial' || item.cooldownUntil)
       .sort((a, b) => (b.lastFailureAt || b.lastStartedAt || 0) - (a.lastFailureAt || a.lastStartedAt || 0))
       .slice(0, 20);
     const finished = status.lastRunFinishedAt ? formatTime(status.lastRunFinishedAt) : '-';
@@ -2414,7 +2414,7 @@
       '<div class="request-summary auto-refresh-summary">' +
       '<div class="request-summary-item"><span>' + escapeHtml(t('settings.autoRefreshLastRun')) + '</span><strong>' + escapeHtml(status.running ? t('settings.autoRefreshRunning') : finished) + '</strong></div>' +
       '<div class="request-summary-item"><span>' + escapeHtml(t('settings.autoRefreshSelected')) + '</span><strong>' + escapeHtml(String(status.lastRunSelected || 0)) + '</strong></div>' +
-      '<div class="request-summary-item"><span>' + escapeHtml(t('settings.autoRefreshResult')) + '</span><strong>' + escapeHtml((status.lastRunSuccess || 0) + '/' + (status.lastRunFailed || 0) + '/' + (status.lastRunSkipped || 0)) + '</strong></div>' +
+      '<div class="request-summary-item"><span>' + escapeHtml(t('settings.autoRefreshResult')) + '</span><strong>' + escapeHtml((status.lastRunSuccess || 0) + '/' + (status.lastRunPartial || 0) + '/' + (status.lastRunFailed || 0) + '/' + (status.lastRunSkipped || 0)) + '</strong></div>' +
       '<div class="request-summary-item"><span>' + escapeHtml(t('settings.autoRefreshDue')) + '</span><strong>' + escapeHtml(String(status.dueCount || 0)) + '</strong></div>' +
       '<div class="request-summary-item"><span>' + escapeHtml(t('settings.autoRefreshTokenDue')) + '</span><strong>' + escapeHtml(String(status.tokenDueCount || 0)) + '</strong></div>' +
       '<div class="request-summary-item"><span>' + escapeHtml(t('settings.autoRefreshStale')) + '</span><strong>' + escapeHtml(String(status.staleCount || 0)) + '</strong></div>' +

@@ -131,6 +131,7 @@ type autoRefreshStatus struct {
 	LastRunSelected   int                                 `json:"lastRunSelected"`
 	LastRunAttempted  int                                 `json:"lastRunAttempted"`
 	LastRunSuccess    int                                 `json:"lastRunSuccess"`
+	LastRunPartial    int                                 `json:"lastRunPartial"`
 	LastRunFailed     int                                 `json:"lastRunFailed"`
 	LastRunSkipped    int                                 `json:"lastRunSkipped"`
 	Cursor            int                                 `json:"cursor"`
@@ -472,6 +473,38 @@ func (h *Handler) backgroundPromptCacheGC() {
 	}
 }
 
+func configuredTokenRefreshBeforeSeconds() int64 {
+	return tokenRefreshBeforeForConfig(config.GetAutoRefreshConfig())
+}
+
+func tokenRefreshBeforeForConfig(autoRefresh config.AutoRefreshConfig) int64 {
+	configured := autoRefresh.TokenRefreshBeforeSeconds
+	if configured > 0 {
+		return configured
+	}
+	return tokenRefreshSkewSeconds
+}
+
+// effectiveAutoRefreshInterval prevents a legacy configuration with a scan
+// interval longer than its token safety window from skipping an expiry. The
+// cap leaves room for configured jitter and the 30-second scheduler tick.
+func effectiveAutoRefreshInterval(autoRefresh config.AutoRefreshConfig) time.Duration {
+	interval := time.Duration(autoRefresh.IntervalMinutes) * time.Minute
+	if interval <= 0 {
+		interval = 10 * time.Minute
+	}
+	refreshBefore := tokenRefreshBeforeForConfig(autoRefresh)
+	jitter := time.Duration(autoRefresh.RefreshJitterSeconds) * time.Second
+	maxInterval := time.Duration(refreshBefore)*time.Second - jitter - 30*time.Second
+	if maxInterval < 30*time.Second {
+		maxInterval = 30 * time.Second
+	}
+	if interval > maxInterval {
+		return maxInterval
+	}
+	return interval
+}
+
 // backgroundRefresh 后台定时刷新账户信息
 func (h *Handler) backgroundRefresh() {
 	ticker := time.NewTicker(30 * time.Second)
@@ -492,12 +525,12 @@ func (h *Handler) backgroundRefresh() {
 	for {
 		autoRefresh := config.GetAutoRefreshConfig()
 		if autoRefresh.Enabled {
-			interval := time.Duration(autoRefresh.IntervalMinutes) * time.Minute
-			if interval <= 0 {
-				interval = 30 * time.Minute
-			}
-			if lastAccountRun.IsZero() || time.Since(lastAccountRun) >= interval {
-				if autoRefresh.RefreshJitterSeconds > 0 {
+			interval := effectiveAutoRefreshInterval(autoRefresh)
+			urgent := h.hasUrgentAutoRefreshAccount(autoRefresh)
+			if urgent || lastAccountRun.IsZero() || time.Since(lastAccountRun) >= interval {
+				// Jitter regular metadata scans, but never delay an urgent token
+				// refresh that is already inside its configured safety window.
+				if autoRefresh.RefreshJitterSeconds > 0 && !urgent {
 					maxJitter := time.Duration(autoRefresh.RefreshJitterSeconds) * time.Second
 					jitter := time.Duration(time.Now().UnixNano() % int64(maxJitter+1))
 					select {
@@ -536,7 +569,7 @@ func (h *Handler) refreshAllAccounts() {
 func (h *Handler) refreshAllAccountsWithConfig(autoRefresh config.AutoRefreshConfig) {
 	accounts := config.GetAccounts()
 	due := h.dueAutoRefreshAccounts(accounts, autoRefresh)
-	selected := h.nextAutoRefreshAccounts(due, autoRefresh.MaxAccountsPerRun)
+	selected := h.nextAutoRefreshAccounts(due, autoRefresh.MaxAccountsPerRun, autoRefresh)
 	h.refreshSelectedAccounts(selected, autoRefresh)
 }
 
@@ -558,7 +591,7 @@ func (h *Handler) refreshSelectedAccountsLocked(selected []*config.Account, auto
 		return
 	}
 
-	concurrency := boundedRefreshConcurrency(len(selected))
+	concurrency := boundedRefreshConcurrencyFor(len(selected), autoRefresh.RefreshConcurrency)
 
 	jobs := make(chan *config.Account)
 	results := make(chan autoRefreshAccountResult, len(selected))
@@ -612,10 +645,14 @@ func (h *Handler) refreshSelectedAccountsLocked(selected []*config.Account, auto
 }
 
 func boundedRefreshConcurrency(total int) int {
+	return boundedRefreshConcurrencyFor(total, config.GetAutoRefreshConfig().RefreshConcurrency)
+}
+
+func boundedRefreshConcurrencyFor(total, configured int) int {
 	if total <= 0 {
 		return 0
 	}
-	concurrency := config.GetAutoRefreshConfig().RefreshConcurrency
+	concurrency := configured
 	if concurrency <= 0 {
 		concurrency = 5
 	}
@@ -651,14 +688,16 @@ func (h *Handler) refreshOneAccount(account *config.Account, autoRefresh config.
 
 	result.Attempted = true
 	now := time.Now().Unix()
-	tokenRefreshBefore := autoRefresh.TokenRefreshBeforeSeconds
-	if tokenRefreshBefore <= 0 {
-		tokenRefreshBefore = tokenRefreshSkewSeconds
-	}
+	tokenRefreshBefore := tokenRefreshBeforeForConfig(autoRefresh)
 	needsTokenRefresh := !isKiroAPIKeyAccount(account) &&
 		account.RefreshToken != "" &&
-		(account.AccessToken == "" || (account.ExpiresAt > 0 && now > account.ExpiresAt-tokenRefreshBefore))
+		(account.AccessToken == "" || (account.ExpiresAt > 0 && now >= account.ExpiresAt-tokenRefreshBefore))
 	if needsTokenRefresh {
+		if until, blocked := h.tokenRefreshBlockedByCooldown(account.ID, now); blocked {
+			result.Reason = "token refresh failure cooldown"
+			result.CooldownUntil = until
+			return result
+		}
 		if err := h.refreshAccountToken(account); err != nil {
 			if isLocalConfigurationError(err) {
 				logger.Errorf("[BackgroundRefresh] Local IPv6 configuration prevents token refresh: %v", err)
@@ -695,8 +734,29 @@ func (h *Handler) refreshOneAccount(account *config.Account, autoRefresh config.
 		return result
 	}
 
-	info, err := RefreshAccountInfoContext(h.backgroundCtx, account)
+	parent := h.backgroundCtx
+	if parent == nil {
+		parent = context.Background()
+	}
+	taskTimeout := time.Duration(autoRefresh.RefreshTaskTimeoutSeconds) * time.Second
+	if taskTimeout < 10*time.Second {
+		taskTimeout = 120 * time.Second
+	}
+	infoCtx, cancel := context.WithTimeout(parent, taskTimeout)
+	info, err := RefreshAccountInfoContext(infoCtx, account)
+	cancel()
 	if err != nil {
+		if isAccountInfoUnavailableError(err) && info != nil {
+			// The token is healthy; only the optional usage endpoint is
+			// unavailable for this account type. Persist the refresh timestamp,
+			// clear any prior cooldown, and keep the account routable.
+			h.clearAutoRefreshFailure(account.ID)
+			result.Status = "partial"
+			result.Reason = "usage metadata unavailable"
+			result.Info = info
+			result.Err = err
+			return result
+		}
 		logger.Warnf("[BackgroundRefresh] Failed to refresh %s: %v", account.Email, err)
 		result.Status = "failed"
 		result.Reason = "account info refresh failed"
@@ -727,16 +787,13 @@ func (h *Handler) dueAutoRefreshAccounts(accounts []config.Account, autoRefresh 
 	now := time.Now()
 	baseInterval := time.Duration(autoRefresh.IntervalMinutes) * time.Minute
 	if baseInterval <= 0 {
-		baseInterval = 30 * time.Minute
+		baseInterval = 10 * time.Minute
 	}
-	refreshBefore := autoRefresh.TokenRefreshBeforeSeconds
-	if refreshBefore <= 0 {
-		refreshBefore = tokenRefreshSkewSeconds
-	}
+	refreshBefore := tokenRefreshBeforeForConfig(autoRefresh)
 
 	due := make([]config.Account, 0, len(accounts))
 	for _, account := range accounts {
-		if !account.Enabled || h.isAutoRefreshCooling(account.ID, now.Unix()) {
+		if !account.Enabled {
 			continue
 		}
 		if account.AccessToken == "" && account.RefreshToken == "" && account.KiroApiKey == "" {
@@ -745,7 +802,15 @@ func (h *Handler) dueAutoRefreshAccounts(accounts []config.Account, autoRefresh 
 
 		tokenDue, _ := tokenRefreshUrgency(account, now.Unix(), refreshBefore)
 		if tokenDue {
+			// A metadata failure must not hide an expiring token. Token-refresh
+			// failures still honor their own cooldown to avoid hammering the IdP.
+			if _, blocked := h.tokenRefreshBlockedByCooldown(account.ID, now.Unix()); blocked {
+				continue
+			}
 			due = append(due, account)
+			continue
+		}
+		if h.isAutoRefreshCooling(account.ID, now.Unix()) {
 			continue
 		}
 
@@ -774,6 +839,27 @@ func (h *Handler) dueAutoRefreshAccounts(accounts []config.Account, autoRefresh 
 	return due
 }
 
+func (h *Handler) hasUrgentAutoRefreshAccount(autoRefresh config.AutoRefreshConfig) bool {
+	accounts := config.GetAccounts()
+	refreshBefore := tokenRefreshBeforeForConfig(autoRefresh)
+	now := time.Now().Unix()
+	for _, account := range accounts {
+		if !account.Enabled || (account.AccessToken == "" && account.RefreshToken == "") {
+			continue
+		}
+		// A token-refresh failure cooldown is an intentional backoff. Do not
+		// treat that account as urgent or the scheduler will launch an empty
+		// refresh pass on every 30-second tick until the cooldown expires.
+		if _, blocked := h.tokenRefreshBlockedByCooldown(account.ID, now); blocked {
+			continue
+		}
+		if urgent, _ := tokenRefreshUrgency(account, now, refreshBefore); urgent {
+			return true
+		}
+	}
+	return false
+}
+
 func tokenRefreshUrgency(account config.Account, now, refreshBefore int64) (bool, int64) {
 	if isKiroAPIKeyAccount(&account) || strings.TrimSpace(account.RefreshToken) == "" {
 		return false, 0
@@ -787,7 +873,7 @@ func tokenRefreshUrgency(account config.Account, now, refreshBefore int64) (bool
 	return false, 0
 }
 
-func (h *Handler) nextAutoRefreshAccounts(accounts []config.Account, max int) []*config.Account {
+func (h *Handler) nextAutoRefreshAccounts(accounts []config.Account, max int, autoRefresh config.AutoRefreshConfig) []*config.Account {
 	if len(accounts) == 0 {
 		return nil
 	}
@@ -796,11 +882,7 @@ func (h *Handler) nextAutoRefreshAccounts(accounts []config.Account, max int) []
 	}
 
 	out := make([]*config.Account, 0, max)
-	autoRefresh := config.GetAutoRefreshConfig()
-	refreshBefore := autoRefresh.TokenRefreshBeforeSeconds
-	if refreshBefore <= 0 {
-		refreshBefore = tokenRefreshSkewSeconds
-	}
+	refreshBefore := tokenRefreshBeforeForConfig(autoRefresh)
 	now := time.Now().Unix()
 	urgentEnd := 0
 	for urgentEnd < len(accounts) {
@@ -857,6 +939,24 @@ func (h *Handler) isAutoRefreshCooling(accountID string, now int64) bool {
 	return h.autoRefreshCooldownUntil(accountID, now) > 0
 }
 
+// tokenRefreshBlockedByCooldown keeps retryable token failures on their
+// configured backoff, but lets a later token-due pass through a cooldown that
+// came from a metadata-only failure. This prevents an account from reaching
+// expiry merely because GetUsageLimits had a transient outage.
+func (h *Handler) tokenRefreshBlockedByCooldown(accountID string, now int64) (int64, bool) {
+	until := h.autoRefreshCooldownUntil(accountID, now)
+	if until <= 0 {
+		return 0, false
+	}
+	h.autoRefreshMu.Lock()
+	recent := h.autoRefreshStat.Recent[accountID]
+	h.autoRefreshMu.Unlock()
+	if recent.Reason == "account info refresh failed" || recent.Reason == "usage metadata unavailable" {
+		return until, false
+	}
+	return until, true
+}
+
 func (h *Handler) markAutoRefreshFailure(accountID string, cooldownSeconds int64) int64 {
 	if cooldownSeconds <= 0 {
 		cooldownSeconds = 300
@@ -896,6 +996,7 @@ func (h *Handler) beginAutoRefreshRun(startedAt int64, selected int) {
 	h.autoRefreshStat.LastRunSelected = selected
 	h.autoRefreshStat.LastRunAttempted = 0
 	h.autoRefreshStat.LastRunSuccess = 0
+	h.autoRefreshStat.LastRunPartial = 0
 	h.autoRefreshStat.LastRunFailed = 0
 	h.autoRefreshStat.LastRunSkipped = 0
 	h.autoRefreshStat.Cursor = h.autoRefreshNext
@@ -914,6 +1015,7 @@ func (h *Handler) finishAutoRefreshRun(startedAt time.Time, results []autoRefres
 	h.autoRefreshStat.LastRunDurationMs = time.Since(startedAt).Milliseconds()
 	h.autoRefreshStat.LastRunAttempted = 0
 	h.autoRefreshStat.LastRunSuccess = 0
+	h.autoRefreshStat.LastRunPartial = 0
 	h.autoRefreshStat.LastRunFailed = 0
 	h.autoRefreshStat.LastRunSkipped = 0
 	for _, result := range results {
@@ -923,6 +1025,8 @@ func (h *Handler) finishAutoRefreshRun(startedAt time.Time, results []autoRefres
 		switch result.Status {
 		case "success":
 			h.autoRefreshStat.LastRunSuccess++
+		case "partial":
+			h.autoRefreshStat.LastRunPartial++
 		case "failed":
 			h.autoRefreshStat.LastRunFailed++
 		default:
@@ -944,7 +1048,7 @@ func (h *Handler) finishAutoRefreshRun(startedAt time.Time, results []autoRefres
 			next.Email = prev.Email
 		}
 		switch result.Status {
-		case "success":
+		case "success", "partial":
 			next.LastSuccessAt = result.FinishedAt
 			if prev.Status == "failed" && h.alerts != nil {
 				h.alerts.Notify("account_recovered", map[string]interface{}{
@@ -1013,11 +1117,14 @@ func (h *Handler) populateAutoRefreshCounts(snapshot *autoRefreshStatus, now int
 	if snapshot == nil {
 		return
 	}
+	// These values are derived from the current account/config snapshot. The
+	// status object is reused between polls, so they must not accumulate across
+	// calls to /auto-refresh/status.
+	snapshot.TokenDueCount = 0
+	snapshot.StaleCount = 0
+	snapshot.FailedCount = 0
 	autoRefresh := config.GetAutoRefreshConfig()
-	refreshBefore := autoRefresh.TokenRefreshBeforeSeconds
-	if refreshBefore <= 0 {
-		refreshBefore = tokenRefreshSkewSeconds
-	}
+	refreshBefore := tokenRefreshBeforeForConfig(autoRefresh)
 	due := h.dueAutoRefreshAccounts(config.GetAccounts(), autoRefresh)
 	snapshot.DueCount = len(due)
 	for _, account := range due {
@@ -4027,7 +4134,7 @@ func (h *Handler) ensureValidTokenContext(ctx context.Context, account *config.A
 		return nil
 	}
 
-	if tokenStillValid(account, tokenRefreshSkewSeconds) {
+	if tokenStillValid(account, configuredTokenRefreshBeforeSeconds()) {
 		return nil
 	}
 	startedAt := time.Now()
@@ -6362,7 +6469,7 @@ func (h *Handler) apiRunAutoRefresh(w http.ResponseWriter, r *http.Request) {
 	var selected []*config.Account
 	switch req.Mode {
 	case "due":
-		selected = h.nextAutoRefreshAccounts(h.dueAutoRefreshAccounts(accounts, autoRefresh), autoRefresh.MaxAccountsPerRun)
+		selected = h.nextAutoRefreshAccounts(h.dueAutoRefreshAccounts(accounts, autoRefresh), autoRefresh.MaxAccountsPerRun, autoRefresh)
 	case "failed":
 		status := h.getAutoRefreshStatusSnapshot()
 		for i := range accounts {
@@ -7270,7 +7377,7 @@ func (h *Handler) apiRefreshAccount(w http.ResponseWriter, r *http.Request, id s
 	}
 
 	// 检查 token 是否快过期，先刷新
-	if account.ExpiresAt > 0 && time.Now().Unix() > account.ExpiresAt-tokenRefreshSkewSeconds {
+	if account.ExpiresAt > 0 && time.Now().Unix() >= account.ExpiresAt-configuredTokenRefreshBeforeSeconds() {
 		if err := refreshTokenIfNeeded(); err != nil {
 			w.WriteHeader(500)
 			json.NewEncoder(w).Encode(map[string]string{"error": "Token refresh failed: " + err.Error()})
@@ -7281,6 +7388,22 @@ func (h *Handler) apiRefreshAccount(w http.ResponseWriter, r *http.Request, id s
 	// 获取账户信息
 	info, err := RefreshAccountInfoContext(r.Context(), account)
 	if err != nil {
+		if isAccountInfoUnavailableError(err) && info != nil {
+			// Usage/subscription metadata is optional for some IDC/Builder ID
+			// identities. Persist the refresh timestamp without treating the
+			// otherwise usable credential as failed.
+			if updateErr := config.UpdateAccountInfo(id, *info); updateErr != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				_ = json.NewEncoder(w).Encode(map[string]string{"error": updateErr.Error()})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"success":             true,
+				"metadataUnavailable": true,
+				"info":                info,
+			})
+			return
+		}
 		// 检查是否为封禁相关错误
 		if pool.IsSuspensionError(err) {
 			// 封禁状态已在 RefreshAccountInfo 中处理，静默返回成功

@@ -515,6 +515,10 @@ type AccountInfo struct {
 	TrialUsagePercent float64
 	TrialStatus       string
 	TrialExpiresAt    int64
+	// MetadataUnavailable means the credentials are usable but the optional
+	// usage/subscription endpoint rejected this account type. Persist callers
+	// should update only LastRefresh and identity fields in this case.
+	MetadataUnavailable bool
 }
 
 const (
@@ -525,7 +529,7 @@ const (
 )
 
 // Version current version
-const Version = "1.2.51"
+const Version = "1.2.53"
 
 var (
 	cfg           *Config
@@ -1038,13 +1042,13 @@ func normalizeRoutingLocked() {
 func defaultAutoRefreshConfig() AutoRefreshConfig {
 	return AutoRefreshConfig{
 		Enabled:                   true,
-		IntervalMinutes:           30,
-		TokenRefreshBeforeSeconds: 120,
+		IntervalMinutes:           10,
+		TokenRefreshBeforeSeconds: 1800,
 		MaxAccountsPerRun:         0,
 		FailureCooldownSeconds:    300,
 		RefreshConcurrency:        5,
-		RefreshQueueCapacity:      1000,
-		RefreshTaskTimeoutSeconds: 60,
+		RefreshQueueCapacity:      2000,
+		RefreshTaskTimeoutSeconds: 120,
 		RefreshJitterSeconds:      30,
 		RefreshModels:             true,
 		ModelIntervalMinutes:      60,
@@ -1053,59 +1057,66 @@ func defaultAutoRefreshConfig() AutoRefreshConfig {
 	}
 }
 
-func normalizeAutoRefreshLocked() {
+func normalizeAutoRefreshConfigValues(autoRefresh *AutoRefreshConfig) {
+	if autoRefresh == nil {
+		return
+	}
 	defaults := defaultAutoRefreshConfig()
-	if cfg.AutoRefresh.IntervalMinutes <= 0 {
-		cfg.AutoRefresh.IntervalMinutes = defaults.IntervalMinutes
+	if autoRefresh.IntervalMinutes <= 0 {
+		autoRefresh.IntervalMinutes = defaults.IntervalMinutes
 	}
-	if cfg.AutoRefresh.TokenRefreshBeforeSeconds <= 0 {
-		cfg.AutoRefresh.TokenRefreshBeforeSeconds = defaults.TokenRefreshBeforeSeconds
+	if autoRefresh.TokenRefreshBeforeSeconds <= 0 {
+		autoRefresh.TokenRefreshBeforeSeconds = defaults.TokenRefreshBeforeSeconds
 	}
-	if cfg.AutoRefresh.FailureCooldownSeconds <= 0 {
-		cfg.AutoRefresh.FailureCooldownSeconds = defaults.FailureCooldownSeconds
+	if autoRefresh.FailureCooldownSeconds <= 0 {
+		autoRefresh.FailureCooldownSeconds = defaults.FailureCooldownSeconds
 	}
-	if cfg.AutoRefresh.MaxAccountsPerRun < 0 {
-		cfg.AutoRefresh.MaxAccountsPerRun = 0
+	if autoRefresh.MaxAccountsPerRun < 0 {
+		autoRefresh.MaxAccountsPerRun = 0
 	}
-	if cfg.AutoRefresh.RefreshConcurrency <= 0 {
-		cfg.AutoRefresh.RefreshConcurrency = defaults.RefreshConcurrency
+	if autoRefresh.RefreshConcurrency <= 0 {
+		autoRefresh.RefreshConcurrency = defaults.RefreshConcurrency
 	}
-	if cfg.AutoRefresh.RefreshConcurrency > 50 {
-		cfg.AutoRefresh.RefreshConcurrency = 50
+	if autoRefresh.RefreshConcurrency > 50 {
+		autoRefresh.RefreshConcurrency = 50
 	}
-	if cfg.AutoRefresh.RefreshQueueCapacity <= 0 {
-		cfg.AutoRefresh.RefreshQueueCapacity = defaults.RefreshQueueCapacity
+	if autoRefresh.RefreshQueueCapacity <= 0 {
+		autoRefresh.RefreshQueueCapacity = defaults.RefreshQueueCapacity
 	}
-	if cfg.AutoRefresh.RefreshQueueCapacity > 100000 {
-		cfg.AutoRefresh.RefreshQueueCapacity = 100000
+	if autoRefresh.RefreshQueueCapacity > 100000 {
+		autoRefresh.RefreshQueueCapacity = 100000
 	}
-	if cfg.AutoRefresh.RefreshTaskTimeoutSeconds < 10 {
-		cfg.AutoRefresh.RefreshTaskTimeoutSeconds = defaults.RefreshTaskTimeoutSeconds
+	if autoRefresh.RefreshTaskTimeoutSeconds < 10 {
+		autoRefresh.RefreshTaskTimeoutSeconds = defaults.RefreshTaskTimeoutSeconds
 	}
-	if cfg.AutoRefresh.RefreshTaskTimeoutSeconds > 600 {
-		cfg.AutoRefresh.RefreshTaskTimeoutSeconds = 600
+	if autoRefresh.RefreshTaskTimeoutSeconds > 600 {
+		autoRefresh.RefreshTaskTimeoutSeconds = 600
 	}
-	if cfg.AutoRefresh.RefreshJitterSeconds < 0 {
-		cfg.AutoRefresh.RefreshJitterSeconds = 0
+	if autoRefresh.RefreshJitterSeconds < 0 {
+		autoRefresh.RefreshJitterSeconds = 0
 	}
-	if cfg.AutoRefresh.RefreshJitterSeconds > 3600 {
-		cfg.AutoRefresh.RefreshJitterSeconds = 3600
+	if autoRefresh.RefreshJitterSeconds > 3600 {
+		autoRefresh.RefreshJitterSeconds = 3600
 	}
-	if cfg.AutoRefresh.ModelIntervalMinutes < 30 {
-		cfg.AutoRefresh.ModelIntervalMinutes = defaults.ModelIntervalMinutes
+	if autoRefresh.ModelIntervalMinutes < 30 {
+		autoRefresh.ModelIntervalMinutes = defaults.ModelIntervalMinutes
 	}
-	if cfg.AutoRefresh.ModelIntervalMinutes > 10080 {
-		cfg.AutoRefresh.ModelIntervalMinutes = 10080
+	if autoRefresh.ModelIntervalMinutes > 10080 {
+		autoRefresh.ModelIntervalMinutes = 10080
 	}
-	if cfg.AutoRefresh.MaxModelsPerRun < 0 {
-		cfg.AutoRefresh.MaxModelsPerRun = 0
+	if autoRefresh.MaxModelsPerRun < 0 {
+		autoRefresh.MaxModelsPerRun = 0
 	}
-	if cfg.AutoRefresh.ModelRefreshConcurrency < 1 {
-		cfg.AutoRefresh.ModelRefreshConcurrency = defaults.ModelRefreshConcurrency
+	if autoRefresh.ModelRefreshConcurrency < 1 {
+		autoRefresh.ModelRefreshConcurrency = defaults.ModelRefreshConcurrency
 	}
-	if cfg.AutoRefresh.ModelRefreshConcurrency > 20 {
-		cfg.AutoRefresh.ModelRefreshConcurrency = 20
+	if autoRefresh.ModelRefreshConcurrency > 20 {
+		autoRefresh.ModelRefreshConcurrency = 20
 	}
+}
+
+func normalizeAutoRefreshLocked() {
+	normalizeAutoRefreshConfigValues(&cfg.AutoRefresh)
 }
 
 func defaultRetryConfig() RetryConfig {
@@ -1820,43 +1831,7 @@ func GetAutoRefreshConfig() AutoRefreshConfig {
 		return defaultAutoRefreshConfig()
 	}
 	out := cfg.AutoRefresh
-	defaults := defaultAutoRefreshConfig()
-	if out.IntervalMinutes <= 0 {
-		out.IntervalMinutes = defaults.IntervalMinutes
-	}
-	if out.TokenRefreshBeforeSeconds <= 0 {
-		out.TokenRefreshBeforeSeconds = defaults.TokenRefreshBeforeSeconds
-	}
-	if out.FailureCooldownSeconds <= 0 {
-		out.FailureCooldownSeconds = defaults.FailureCooldownSeconds
-	}
-	if out.MaxAccountsPerRun < 0 {
-		out.MaxAccountsPerRun = 0
-	}
-	if out.RefreshConcurrency <= 0 {
-		out.RefreshConcurrency = defaults.RefreshConcurrency
-	}
-	if out.RefreshConcurrency > 50 {
-		out.RefreshConcurrency = 50
-	}
-	if out.RefreshQueueCapacity <= 0 {
-		out.RefreshQueueCapacity = defaults.RefreshQueueCapacity
-	}
-	if out.RefreshTaskTimeoutSeconds < 10 {
-		out.RefreshTaskTimeoutSeconds = defaults.RefreshTaskTimeoutSeconds
-	}
-	if out.RefreshJitterSeconds < 0 {
-		out.RefreshJitterSeconds = 0
-	}
-	if out.ModelIntervalMinutes < 30 {
-		out.ModelIntervalMinutes = defaults.ModelIntervalMinutes
-	}
-	if out.MaxModelsPerRun < 0 {
-		out.MaxModelsPerRun = 0
-	}
-	if out.ModelRefreshConcurrency < 1 {
-		out.ModelRefreshConcurrency = defaults.ModelRefreshConcurrency
-	}
+	normalizeAutoRefreshConfigValues(&out)
 	return out
 }
 
@@ -3016,6 +2991,10 @@ func applyAccountInfo(account *Account, info AccountInfo) {
 	if info.UserId != "" {
 		account.UserId = info.UserId
 	}
+	account.LastRefresh = info.LastRefresh
+	if info.MetadataUnavailable {
+		return
+	}
 	if info.SubscriptionType != "" {
 		account.SubscriptionType = info.SubscriptionType
 	}
@@ -3027,7 +3006,6 @@ func applyAccountInfo(account *Account, info AccountInfo) {
 	account.UsageLimit = info.UsageLimit
 	account.UsagePercent = info.UsagePercent
 	account.NextResetDate = info.NextResetDate
-	account.LastRefresh = info.LastRefresh
 	account.TrialUsageCurrent = info.TrialUsageCurrent
 	account.TrialUsageLimit = info.TrialUsageLimit
 	account.TrialUsagePercent = info.TrialUsagePercent

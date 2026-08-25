@@ -520,7 +520,28 @@ func accountTokenNeedsRefresh(acc *config.Account, now time.Time) bool {
 	if strings.TrimSpace(acc.RefreshToken) != "" && strings.TrimSpace(acc.AccessToken) == "" {
 		return true
 	}
-	return acc.ExpiresAt > 0 && now.Unix() > acc.ExpiresAt-tokenRefreshSkewSeconds
+	return acc.ExpiresAt > 0 && now.Unix() >= acc.ExpiresAt-tokenRefreshSafetyWindowSecondsForAccount(acc)
+}
+
+// tokenRefreshSafetyWindowSeconds keeps pool selection aligned with the
+// operator's configured refresh lead. The fixed constant remains the fallback
+// for defensive use before configuration has been initialized.
+func tokenRefreshSafetyWindowSeconds() int64 {
+	configured := config.GetAutoRefreshConfig().TokenRefreshBeforeSeconds
+	if configured > 0 {
+		return configured
+	}
+	return tokenRefreshSkewSeconds
+}
+
+func tokenRefreshSafetyWindowSecondsForAccount(acc *config.Account) int64 {
+	// A credential without a refresh token cannot be renewed proactively. Keep
+	// it routable until the short legacy safety window, while refreshable OAuth
+	// accounts use the operator's larger lead and can be renewed in the pool.
+	if acc == nil || strings.TrimSpace(acc.RefreshToken) == "" {
+		return tokenRefreshSkewSeconds
+	}
+	return tokenRefreshSafetyWindowSeconds()
 }
 
 func (p *AccountPool) accountTokenRoutableLocked(acc *config.Account, now time.Time) bool {
@@ -997,7 +1018,7 @@ func (p *AccountPool) AvailableCount() int {
 		if cooldown, ok := p.cooldowns[acc.ID]; ok && now.Before(cooldown) {
 			continue
 		}
-		if acc.ExpiresAt > 0 && now.Unix() > acc.ExpiresAt-tokenRefreshSkewSeconds {
+		if acc.ExpiresAt > 0 && now.Unix() >= acc.ExpiresAt-tokenRefreshSafetyWindowSecondsForAccount(&acc) {
 			continue
 		}
 		if isQuotaBlocked(acc, allowOverUsage) {
