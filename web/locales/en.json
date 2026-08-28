@@ -470,7 +470,7 @@
   "settings.toolStreamLive": "Live",
   "settings.toolStreamBalanced": "Balanced",
   "settings.toolStreamSafe": "Safe buffer",
-  "settings.toolStreamModeHint": "Adaptive keeps ordinary tools live but buffers high-risk Write/Edit/Bash-like calls so truncation can retry. Live forwards every tool argument immediately. Balanced buffers all tool arguments, while Safe also defers guarded text for maximum retry coverage. Explicit tool_choice remains strictly validated.",
+  "settings.toolStreamModeHint": "Adaptive keeps ordinary tools live but buffers high-risk Write/Edit/Bash-like arguments so truncation can retry. Live forwards every tool argument immediately. Balanced buffers all tool arguments, while Safe protects tool arguments and incomplete calls while forwarding validated visible text immediately. Explicit tool_choice remains strictly validated.",
   "settings.enforceAgentToolUse": "Require tools for workspace actions",
   "settings.enforceAgentToolUseHint": "For detected file creation, code edits, or command execution, require a real tool call instead of code-only output or a description of the next step.",
   "settings.thinkingBudgetInvalid": "Invalid thinking budget; the default cannot exceed a non-zero cap",

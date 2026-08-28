@@ -470,7 +470,7 @@
   "settings.toolStreamLive": "实时流",
   "settings.toolStreamBalanced": "平衡模式",
   "settings.toolStreamSafe": "安全缓冲",
-  "settings.toolStreamModeHint": "自适应模式让普通工具保持实时，但对 Write/Edit/Bash 等高风险工具先缓冲，截断时仍可重试；实时流会立即转发全部工具参数；平衡模式缓冲全部工具参数；安全缓冲还会延后受保护正文，以保留最大重试能力。显式 tool_choice 始终严格校验。",
+  "settings.toolStreamModeHint": "自适应模式让普通工具保持实时，但对 Write/Edit/Bash 等高风险工具参数先缓冲，截断时仍可重试；实时流会立即转发全部工具参数；平衡模式缓冲全部工具参数；安全缓冲保护工具参数和未完成工具调用，正文通过校验后立即转发。显式 tool_choice 始终严格校验。",
   "settings.enforceAgentToolUse": "工作区操作强制调用工具",
   "settings.enforceAgentToolUseHint": "检测到创建文件、修改代码、运行命令等任务时，必须真正调用工具，不接受只输出代码或只描述下一步。",
   "settings.thinkingBudgetInvalid": "思考预算范围无效，默认预算不得超过非零上限",

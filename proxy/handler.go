@@ -2102,7 +2102,10 @@ func configureClaudeToolStreaming(payload *KiroPayload, req *ClaudeRequest, thin
 
 	payload.requireActionableOutput = (len(req.Tools) > 0 || thinking) && (!req.Stream || guardActionableStream)
 	payload.toolUsePolicy = req.ToolUsePolicy
-	payload.deferTextUntilComplete = guardActionableStream && useSafeBehavior && req.ToolUsePolicy == toolUsePolicyInferred
+	// Client-visible text must be committed as soon as it is validated. Deferring
+	// the whole inferred-tool response until EOF makes a live Claude stream look
+	// stalled; incomplete tool arguments remain protected by the upstream gate.
+	payload.deferTextUntilComplete = false
 	payload.streamThinkingPrecommit = guardActionableStream && thinking && !thinkingOpts.OmitDisplay
 	payload.streamToolUseDeltas = req.Stream && len(req.Tools) > 0 && useLiveBehavior
 	// Inferred workspace intent adds strong tool guidance, but only an explicit
@@ -2299,12 +2302,10 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 		sseMu.Unlock()
 		h.sendClaudeError(w, status, errorType, message)
 	}
-	if payload.requireActionableOutput {
-		// A guarded tool stream may spend a long time generating a complete tool
-		// payload. Start the standard Anthropic stream immediately while keeping
-		// account and endpoint retries safe until actual content is committed.
-		ensureMessageStart()
-	}
+	// Establish the downstream SSE lifecycle before account selection or the
+	// upstream connection. The heartbeat can then keep long pre-response waits
+	// observable without fabricating model output.
+	ensureMessageStart()
 	heartbeatDone := make(chan struct{})
 	var heartbeatWG sync.WaitGroup
 	heartbeatWG.Add(1)
@@ -2429,6 +2430,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 
 		var textBuffer string
 		var inThinkingBlock bool
+		var thinkingCloseTag string
 		var dropTagThinking bool
 		var thinkingSource thinkingStreamSource
 		var thinkingStarted bool
@@ -2550,31 +2552,32 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 
 			for {
 				if !inThinkingBlock {
-					thinkingStart := strings.Index(textBuffer, "<thinking>")
+					thinkingStart, thinkingOpenTag, closeTag := nextThinkingTag(textBuffer, 0)
 					if thinkingStart != -1 {
 						if thinkingStart > 0 {
 							sendText(textBuffer[:thinkingStart], 0)
 						}
-						textBuffer = textBuffer[thinkingStart+10:]
+						textBuffer = textBuffer[thinkingStart+len(thinkingOpenTag):]
 						inThinkingBlock = true
+						thinkingCloseTag = closeTag
 						dropTagThinking = !allowTagSource(&thinkingSource)
 						thinkingStarted = false
-					} else if forceFlush || len([]rune(textBuffer)) > 50 {
-						runes := []rune(textBuffer)
-						safeLen := len(runes)
+					} else {
+						safeLen := len(textBuffer)
 						if !forceFlush {
-							safeLen = max(0, len(runes)-15)
+							safeLen -= trailingThinkingTagPrefix(textBuffer)
 						}
 						if safeLen > 0 {
-							sendText(string(runes[:safeLen]), 0)
-							textBuffer = string(runes[safeLen:])
+							sendText(textBuffer[:safeLen], 0)
+							textBuffer = textBuffer[safeLen:]
 						}
-						break
-					} else {
 						break
 					}
 				} else {
-					thinkingEnd := strings.Index(textBuffer, "</thinking>")
+					if thinkingCloseTag == "" {
+						thinkingCloseTag = "</thinking>"
+					}
+					thinkingEnd := strings.Index(textBuffer, thinkingCloseTag)
 					if thinkingEnd != -1 {
 						content := textBuffer[:thinkingEnd]
 						if !dropTagThinking {
@@ -2585,8 +2588,9 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 								sendText(content, 3)
 							}
 						}
-						textBuffer = textBuffer[thinkingEnd+11:]
+						textBuffer = textBuffer[thinkingEnd+len(thinkingCloseTag):]
 						inThinkingBlock = false
+						thinkingCloseTag = ""
 						dropTagThinking = false
 						thinkingStarted = false
 					} else if forceFlush {
@@ -2602,24 +2606,25 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 							textBuffer = ""
 						}
 						inThinkingBlock = false
+						thinkingCloseTag = ""
 						dropTagThinking = false
 						thinkingStarted = false
 						break
 					} else {
-						runes := []rune(textBuffer)
-						if len(runes) > 20 {
-							safeLen := len(runes) - 15
-							if safeLen > 0 {
-								if !dropTagThinking {
-									if !thinkingStarted {
-										sendText(string(runes[:safeLen]), 1)
-										thinkingStarted = true
-									} else {
-										sendText(string(runes[:safeLen]), 2)
-									}
+						safeLen := len(textBuffer)
+						if !forceFlush {
+							safeLen -= trailingTagPrefix(textBuffer, thinkingCloseTag)
+						}
+						if safeLen > 0 {
+							if !dropTagThinking {
+								if !thinkingStarted {
+									sendText(textBuffer[:safeLen], 1)
+									thinkingStarted = true
+								} else {
+									sendText(textBuffer[:safeLen], 2)
 								}
-								textBuffer = string(runes[safeLen:])
 							}
+							textBuffer = textBuffer[safeLen:]
 						}
 						break
 					}
@@ -2777,6 +2782,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 			startInputTokens = initialStartInputTokens
 			textBuffer = ""
 			inThinkingBlock = false
+			thinkingCloseTag = ""
 			dropTagThinking = false
 			thinkingSource = thinkingSourceUnknown
 			thinkingStarted = false

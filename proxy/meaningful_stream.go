@@ -428,8 +428,15 @@ func nextThinkingTag(text string, offset int) (int, string, string) {
 }
 
 func trailingThinkingTagPrefix(text string) int {
+	return trailingTagPrefix(text, "<thinking>", "<think>")
+}
+
+func trailingTagPrefix(text string, tags ...string) int {
 	maxLen := 0
-	for _, tag := range []string{"<thinking>", "<think>"} {
+	for _, tag := range tags {
+		if tag == "" {
+			continue
+		}
 		limit := min(len(text), len(tag)-1)
 		for size := 1; size <= limit; size++ {
 			if strings.HasSuffix(text, tag[:size]) && size > maxLen {

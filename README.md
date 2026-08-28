@@ -49,7 +49,7 @@ Open `/admin` to manage:
 
 Settings apply immediately unless the panel explicitly reports that a process restart is required.
 
-Tool stream modes trade retry coverage for latency: **Adaptive** keeps ordinary tools live but buffers high-risk `Write`/`Edit`/`Bash`-style calls so an incomplete JSON tail can be retried; **Live** forwards every tool argument delta immediately; **Balanced** buffers all tool arguments; **Safe** also defers guarded text for maximum retry coverage. Explicit `tool_choice` requests remain strictly validated in every mode.
+Tool stream modes trade retry coverage for latency: **Adaptive** keeps ordinary tools live but buffers high-risk `Write`/`Edit`/`Bash`-style arguments so an incomplete JSON tail can be retried; **Live** forwards every tool argument delta immediately; **Balanced** buffers all tool arguments; **Safe** protects tool arguments and incomplete tool calls while forwarding validated visible text immediately. Explicit `tool_choice` requests remain strictly validated in every mode.
 
 Pre-output stream retry defaults to one same-endpoint retry after 700 ms. It applies only when an HTTP 200 stream fails before any text, thinking, or tool output reaches the client; cancellation and timeout failures are not replayed. Every retry consumes the shared upstream-attempt and duration budgets.
 

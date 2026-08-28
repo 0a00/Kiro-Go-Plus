@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bufio"
 	"encoding/json"
 	"kiro-go/config"
 	accountpool "kiro-go/pool"
@@ -8,6 +9,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -184,6 +186,82 @@ func TestClaudeStreamDoesNotReplayAfterActionableOutput(t *testing.T) {
 	}
 	if strings.Contains(body, `"stop_reason":"end_turn"`) || strings.Contains(body, "message_stop") {
 		t.Fatalf("truncated stream was reported as normal completion: %s", body)
+	}
+}
+
+func TestClaudeToolStreamEmitsTextBeforeUpstreamCompletion(t *testing.T) {
+	releaseUpstream := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseUpstream) }) }
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{
+			"content": "stream now",
+		}))
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		select {
+		case <-releaseUpstream:
+		case <-r.Context().Done():
+			return
+		}
+		_, _ = w.Write(awsEventStreamFrame(t, "metadataEvent", map[string]interface{}{"stopReason": "end_turn"}))
+	}))
+	defer upstream.Close()
+	defer release()
+	h := setupStreamIntegrityPathTest(t, upstream)
+	server := httptest.NewServer(h)
+	defer server.Close()
+
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Post(server.URL+"/v1/messages", "application/json", strings.NewReader(`{
+		"model":"claude-sonnet-4.5",
+		"stream":true,
+		"max_tokens":256,
+		"messages":[{"role":"user","content":"create a file"}],
+		"tools":[{"name":"Write","description":"write a file","input_schema":{"type":"object","properties":{"file_path":{"type":"string"},"content":{"type":"string"}}}}]
+	}`))
+	if err != nil {
+		t.Fatalf("start stream: %v", err)
+	}
+	defer resp.Body.Close()
+
+	firstText := make(chan struct{})
+	bodyDone := make(chan string, 1)
+	go func() {
+		reader := bufio.NewReader(resp.Body)
+		var body strings.Builder
+		textSeen := false
+		for {
+			line, readErr := reader.ReadString('\n')
+			body.WriteString(line)
+			if !textSeen && strings.Contains(body.String(), "stream now") {
+				textSeen = true
+				close(firstText)
+			}
+			if readErr != nil {
+				bodyDone <- body.String()
+				return
+			}
+		}
+	}()
+
+	select {
+	case <-firstText:
+		// The upstream is deliberately held open. Seeing this event here proves
+		// the proxy did not wait for EOF before forwarding visible text.
+	case <-time.After(750 * time.Millisecond):
+		t.Fatal("visible text was held until upstream completion")
+	}
+
+	release()
+	body := <-bodyDone
+	if !strings.Contains(body, "stream now") {
+		t.Fatalf("completed stream lost visible text: %s", body)
+	}
+	if !strings.Contains(body, "event: message_stop") {
+		t.Fatalf("completed stream is missing message_stop: %s", body)
 	}
 }
 

@@ -1,5 +1,5 @@
 {
-  "version": "1.2.54",
-  "changelog": "Recover transport-clean truncated streams with bounded same-account retries, preserve SSE event integrity, and avoid penalizing healthy accounts for soft stream failures.\n修复上游连接正常但流提前截断的问题：在有限次数内重试同一账号，保证 SSE 事件完整，并避免因软性流错误误伤健康账号。",
+  "version": "1.2.55",
+  "changelog": "Restore incremental Claude text streaming for guarded tool requests, reduce tag-parser buffering to incomplete tag fragments, and keep malformed tool JSON protected from unsafe replay.\n修复带工具 Claude 请求正文被延迟到上游结束后才输出的问题：正文校验通过后立即流式转发，仅保留未完成标签和工具 JSON 保护，避免不安全重放。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }

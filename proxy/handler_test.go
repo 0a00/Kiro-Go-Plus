@@ -45,8 +45,8 @@ func TestConfigureClaudeToolStreamingModes(t *testing.T) {
 		requireExplicitTool bool
 		toolName            string
 	}{
-		{name: "safe inferred", mode: config.ToolStreamModeSafe, policy: toolUsePolicyInferred, requireActionable: true, deferText: true, streamThinking: true},
-		{name: "adaptive high risk", mode: config.ToolStreamModeAdaptive, policy: toolUsePolicyInferred, requireActionable: true, deferText: true, streamThinking: true, toolName: "Write"},
+		{name: "safe inferred", mode: config.ToolStreamModeSafe, policy: toolUsePolicyInferred, requireActionable: true, streamThinking: true},
+		{name: "adaptive high risk", mode: config.ToolStreamModeAdaptive, policy: toolUsePolicyInferred, requireActionable: true, streamThinking: true, toolName: "Write"},
 		{name: "adaptive low risk", mode: config.ToolStreamModeAdaptive, policy: toolUsePolicyInferred, streamToolDeltas: true, toolName: "WebSearch"},
 		{name: "balanced inferred", mode: config.ToolStreamModeBalanced, policy: toolUsePolicyInferred},
 		{name: "live inferred", mode: config.ToolStreamModeLive, policy: toolUsePolicyInferred, streamToolDeltas: true},
@@ -1462,7 +1462,64 @@ func TestClaudePlainStreamEmitsIndependentHeartbeatBeforeContent(t *testing.T) {
 	}
 }
 
-func TestClaudeInferredToolStreamRetriesAfterPreambleTransportFailure(t *testing.T) {
+func TestClaudeStreamEmitsHeartbeatWhileWaitingForAccount(t *testing.T) {
+	t.Setenv("ALLOW_UNAUTHENTICATED_API", "true")
+	oldHeartbeatInterval := claudeStreamHeartbeatInterval
+	claudeStreamHeartbeatInterval = 10 * time.Millisecond
+	defer func() { claudeStreamHeartbeatInterval = oldHeartbeatInterval }()
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	retry := config.GetRetryConfig()
+	retry.MaxAccountAttempts = 0
+	if err := config.UpdateRetryConfig(retry); err != nil {
+		t.Fatalf("UpdateRetryConfig: %v", err)
+	}
+
+	p := accountpool.GetPool()
+	p.Reload()
+	h := &Handler{pool: p, promptCache: newPromptCacheTracker(defaultPromptCacheTTL), requestLog: newRequestLog(defaultRequestLogLimit)}
+	server := httptest.NewServer(h)
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL+"/v1/messages", strings.NewReader(`{
+		"model":"claude-sonnet-5",
+		"stream":true,
+		"max_tokens":256,
+		"messages":[{"role":"user","content":"wait for an account"}]
+	}`))
+	if err != nil {
+		t.Fatalf("create request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := (&http.Client{}).Do(req)
+	if err != nil {
+		t.Fatalf("stream did not start before account selection: %v", err)
+	}
+	defer resp.Body.Close()
+
+	reader := bufio.NewReader(resp.Body)
+	var preamble strings.Builder
+	for !strings.Contains(preamble.String(), "event: ping") {
+		line, readErr := reader.ReadString('\n')
+		if readErr != nil {
+			t.Fatalf("read account-selection heartbeat: %v body=%s", readErr, preamble.String())
+		}
+		preamble.WriteString(line)
+	}
+	if !strings.Contains(preamble.String(), "event: message_start") {
+		t.Fatalf("heartbeat arrived without message_start: %s", preamble.String())
+	}
+
+	// Stop the intentionally unavailable request so the polling goroutine does
+	// not keep the test server alive after the assertion.
+	cancel()
+	_ = resp.Body.Close()
+}
+
+func TestClaudeInferredToolStreamDoesNotReplayAfterVisiblePreambleFailure(t *testing.T) {
 	t.Setenv("ALLOW_UNAUTHENTICATED_API", "true")
 	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatalf("config.Init: %v", err)
@@ -1531,20 +1588,23 @@ func TestClaudeInferredToolStreamRetriesAfterPreambleTransportFailure(t *testing
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 	body := rec.Body.String()
-	if upstreamCalls != 2 {
-		t.Fatalf("upstream calls = %d, want 2", upstreamCalls)
+	if upstreamCalls != 1 {
+		t.Fatalf("upstream calls = %d, want 1 after visible output", upstreamCalls)
 	}
 	if strings.Count(body, "event: message_start") != 1 {
 		t.Fatalf("expected one immediate message_start, body=%s", body)
 	}
-	if strings.Contains(body, "I will create the requested file now") {
-		t.Fatalf("failed-attempt preamble leaked downstream: %s", body)
+	if !strings.Contains(body, "I will create the requested file now") {
+		t.Fatalf("visible preamble was not streamed before failure: %s", body)
 	}
 	if !strings.Contains(body, "reasoning from the failed attempt") {
-		t.Fatalf("retryable thinking was not streamed downstream: %s", body)
+		t.Fatalf("thinking output was not streamed downstream: %s", body)
 	}
-	if !strings.Contains(body, `"type":"tool_use"`) || !strings.Contains(body, "event: message_stop") {
-		t.Fatalf("retried tool stream is incomplete: %s", body)
+	if strings.Contains(body, `"type":"tool_use"`) || strings.Contains(body, "event: message_stop") {
+		t.Fatalf("failed stream was reported as a recovered success: %s", body)
+	}
+	if !strings.Contains(body, `"type":"error"`) {
+		t.Fatalf("expected an SSE error after the visible stream was truncated: %s", body)
 	}
 }
 
