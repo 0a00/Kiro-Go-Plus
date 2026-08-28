@@ -298,29 +298,33 @@ type KiroPayload struct {
 	// client schemas before Kiro compatibility sanitization removes them.
 	toolInputPolicies map[string]toolInputPolicy
 
-	requestContext          context.Context
-	attemptBudget           *upstreamAttemptBudget
-	contextWindowTokens     int
-	hasSystemPriming        bool
-	requireActionableOutput bool
-	requireToolUse          bool
-	deferTextUntilComplete  bool
-	streamThinkingPrecommit bool
-	streamToolUseDeltas     bool
-	toolUsePolicy           string
-	tokenRefreshMu          sync.Mutex
-	tokenRefreshAttempts    map[string]int
-	apiKeyRegionAttempts    map[string]int
-	streamMetricsMu         sync.Mutex
-	streamMetricsEnabled    bool
-	streamMetricsStartedAt  time.Time
-	firstUpstreamActivityMs int64
-	maxToolAssemblyMs       int64
-	maxToolArgumentBytes    int
-	maxToolFragmentCount    int
-	toolTruncationCount     int
-	toolRecoveryAttempts    int
-	toolRecoveryHintApplied bool
+	requestContext context.Context
+	attemptBudget  *upstreamAttemptBudget
+	// allowCoolingEndpointRetry is enabled only while replaying a soft stream
+	// integrity failure on the same account. It is internal request state and is
+	// intentionally not serialized to the upstream payload.
+	allowCoolingEndpointRetry bool
+	contextWindowTokens       int
+	hasSystemPriming          bool
+	requireActionableOutput   bool
+	requireToolUse            bool
+	deferTextUntilComplete    bool
+	streamThinkingPrecommit   bool
+	streamToolUseDeltas       bool
+	toolUsePolicy             string
+	tokenRefreshMu            sync.Mutex
+	tokenRefreshAttempts      map[string]int
+	apiKeyRegionAttempts      map[string]int
+	streamMetricsMu           sync.Mutex
+	streamMetricsEnabled      bool
+	streamMetricsStartedAt    time.Time
+	firstUpstreamActivityMs   int64
+	maxToolAssemblyMs         int64
+	maxToolArgumentBytes      int
+	maxToolFragmentCount      int
+	toolTruncationCount       int
+	toolRecoveryAttempts      int
+	toolRecoveryHintApplied   bool
 	// promptCacheTTL preserves an explicit Claude cache-control TTL across
 	// translation. It is intentionally not serialized to the Kiro API.
 	promptCacheTTL        time.Duration
@@ -842,7 +846,11 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 	}
 	modelKey := endpointRouteModel(payload)
 	var routeErr error
-	endpoints, routeErr = sharedAccountEndpointRoutes.availableEndpoints(accountID, modelKey, preferredEndpoint, endpoints)
+	if payload != nil && payload.allowCoolingEndpointRetry {
+		endpoints, routeErr = sharedAccountEndpointRoutes.availableEndpointsForIntegrityRetry(accountID, modelKey, preferredEndpoint, endpoints)
+	} else {
+		endpoints, routeErr = sharedAccountEndpointRoutes.availableEndpoints(accountID, modelKey, preferredEndpoint, endpoints)
+	}
 	if routeErr != nil {
 		return routeErr
 	}

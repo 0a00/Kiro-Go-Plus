@@ -2339,6 +2339,9 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 		if account == nil {
 			break
 		}
+		// Keep per-account diagnostics isolated when a failed account is followed
+		// by another candidate in the same request.
+		rawThinkingBuilder.Reset()
 		release := func() {
 			if guard != nil {
 				guard.Release()
@@ -2356,6 +2359,8 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 		syntheticCacheUsage, cacheDiagnostic := h.promptCache.ComputeDetailed(cacheScope, cacheProfile)
 		payload.setPromptCacheDiagnostic(cacheDiagnostic)
 		messageStartUsage, startInputTokens = h.promptCache.ResolveUsage(syntheticCacheUsage, KiroTokenUsage{}, estimatedInputTokens, cacheProfile)
+		initialMessageStartUsage := messageStartUsage
+		initialStartInputTokens := startInputTokens
 
 		var inputTokens, outputTokens int
 		var credits float64
@@ -2364,7 +2369,10 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 		var upstreamStopReason string
 		var toolUses []KiroToolUse
 		var rawContentBuilder strings.Builder
-		actionableCommitted := false
+		// Safe-mode thinking may be flushed as a provisional heartbeat before a
+		// tool call. Keep the retry boundary separate from raw SSE output: only
+		// committed text/tool output makes replay unsafe.
+		var actionableCommitted atomic.Bool
 		activeBlockIndex := -1
 		activeBlockType := ""
 		type streamedClaudeTool struct {
@@ -2431,7 +2439,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 				if text == "" {
 					return
 				}
-				actionableCommitted = true
+				actionableCommitted.Store(true)
 				startContentBlock("text")
 				sendSSE("content_block_delta", map[string]interface{}{
 					"type":  "content_block_delta",
@@ -2444,8 +2452,9 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 			if !thinking {
 				return
 			}
-			if strings.TrimSpace(text) != "" && (!payload.streamThinkingPrecommit || payload.streamToolUseDeltas) {
-				actionableCommitted = true
+			provisionalThinking := payload.streamThinkingPrecommit && thinkingFormat == "thinking" && !payload.streamToolUseDeltas
+			if strings.TrimSpace(text) != "" && !provisionalThinking {
+				actionableCommitted.Store(true)
 			}
 
 			switch thinkingFormat {
@@ -2625,7 +2634,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 			firstContent.MarkToolOutput()
 			processClaudeText("", false, true)
 			ensureMessageStart()
-			actionableCommitted = true
+			actionableCommitted.Store(true)
 			closeActiveBlock()
 
 			idx := nextContentIndex
@@ -2718,7 +2727,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 					return
 				}
 				lastThinkingHeartbeatAt = time.Now()
-				if payload.streamThinkingPrecommit && !actionableCommitted && thinkingFormat == "thinking" {
+				if payload.streamThinkingPrecommit && !actionableCommitted.Load() && thinkingFormat == "thinking" {
 					startContentBlock("thinking")
 					sendSSE("content_block_delta", map[string]interface{}{
 						"type":  "content_block_delta",
@@ -2749,7 +2758,38 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 			callback.OnToolUseStop = stopToolUse
 		}
 
-		err := h.callKiroAPIWithHealth(account, payload, callback)
+		resetAttempt := func() {
+			// A precommit thinking block is only a keepalive artifact. Close it
+			// before replaying so the client never receives an unbalanced block.
+			closeActiveBlock()
+			eventThinkingOpen = false
+			thinkingStarted = false
+			rawContentBuilder.Reset()
+			rawThinkingBuilder.Reset()
+			toolUses = nil
+			inputTokens = 0
+			outputTokens = 0
+			credits = 0
+			realInputTokens = 0
+			upstreamUsage = KiroTokenUsage{}
+			upstreamStopReason = ""
+			messageStartUsage = initialMessageStartUsage
+			startInputTokens = initialStartInputTokens
+			textBuffer = ""
+			inThinkingBlock = false
+			dropTagThinking = false
+			thinkingSource = thinkingSourceUnknown
+			thinkingStarted = false
+			eventThinkingOpen = false
+			actionableCommitted.Store(false)
+			activeBlockIndex = -1
+			activeBlockType = ""
+			streamedTools = make(map[string]*streamedClaudeTool)
+		}
+
+		err := runKiroWithIntegrityRetry(payload.requestContext, account, payload,
+			func() error { return h.callKiroAPIWithHealth(account, payload, callback) },
+			resetAttempt, func() bool { return !actionableCommitted.Load() })
 		if err == nil {
 			h.pool.RecordUpstreamSuccess(account.ID, account.ProfileArn, model)
 		}
@@ -2758,8 +2798,10 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 			h.promptCache.ReleaseReservation(syntheticCacheUsage)
 			lastErr = err
 			excluded[account.ID] = true
-			h.handleAccountFailureForModel(account, model, err)
-			if !actionableCommitted {
+			if !isStreamIntegrityError(err) {
+				h.handleAccountFailureForModel(account, model, err)
+			}
+			if !actionableCommitted.Load() {
 				if eventThinkingOpen {
 					sendText("", 3)
 					eventThinkingOpen = false
@@ -3145,7 +3187,24 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 			},
 		}
 
-		err := h.callKiroAPIWithHealth(account, payload, callback)
+		resetAttempt := func() {
+			content = ""
+			thinkingContent = ""
+			toolUses = nil
+			inputTokens = 0
+			outputTokens = 0
+			credits = 0
+			realInputTokens = 0
+			upstreamUsage = KiroTokenUsage{}
+			upstreamStopReason = ""
+		}
+
+		// This path is fully buffered; no callback writes to the downstream
+		// response before the attempt completes, so replaying a truncated stream
+		// cannot duplicate client-visible content.
+		err := runKiroWithIntegrityRetry(payload.requestContext, account, payload,
+			func() error { return h.callKiroAPIWithHealth(account, payload, callback) },
+			resetAttempt, nil)
 		if err == nil {
 			h.pool.RecordUpstreamSuccess(account.ID, account.ProfileArn, model)
 		}
@@ -3154,7 +3213,9 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 			h.promptCache.ReleaseReservation(syntheticCacheUsage)
 			lastErr = err
 			excluded[account.ID] = true
-			h.handleAccountFailureForModel(account, model, err)
+			if !isStreamIntegrityError(err) {
+				h.handleAccountFailureForModel(account, model, err)
+			}
 			if !shouldRetryAcrossAccounts(err) {
 				break
 			}
@@ -3738,7 +3799,32 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 			},
 		}
 
-		err := h.callKiroAPIWithHealth(account, payload, callback)
+		resetAttempt := func() {
+			rawContentBuilder.Reset()
+			rawReasoningBuilder.Reset()
+			toolCalls = nil
+			toolCallIndex = 0
+			inputTokens = 0
+			outputTokens = 0
+			credits = 0
+			realInputTokens = 0
+			upstreamUsage = KiroTokenUsage{}
+			upstreamStopReason = ""
+			textBuffer = ""
+			inThinkingBlock = false
+			dropTagThinking = false
+			thinkingSource = thinkingSourceUnknown
+			thinkingStarted = false
+			eventThinkingOpen = false
+			responseStarted = false
+		}
+
+		// The helper retries only before an SSE chunk has been written. Reset all
+		// parser and accounting state so the discarded attempt cannot leak into
+		// the recovered response.
+		err := runKiroWithIntegrityRetry(payload.requestContext, account, payload,
+			func() error { return h.callKiroAPIWithHealth(account, payload, callback) },
+			resetAttempt, func() bool { return !responseStarted })
 		if err == nil {
 			h.pool.RecordUpstreamSuccess(account.ID, account.ProfileArn, model)
 		}
@@ -3747,7 +3833,9 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 			h.promptCache.ReleaseReservation(syntheticCacheUsage)
 			lastErr = err
 			excluded[account.ID] = true
-			h.handleAccountFailureForModel(account, model, err)
+			if !isStreamIntegrityError(err) {
+				h.handleAccountFailureForModel(account, model, err)
+			}
 			if !responseStarted {
 				if !shouldRetryAcrossAccounts(err) {
 					break
@@ -3977,7 +4065,23 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 			},
 		}
 
-		err := h.callKiroAPIWithHealth(account, payload, callback)
+		resetAttempt := func() {
+			content = ""
+			reasoningContent = ""
+			toolUses = nil
+			inputTokens = 0
+			outputTokens = 0
+			credits = 0
+			realInputTokens = 0
+			upstreamUsage = KiroTokenUsage{}
+			upstreamStopReason = ""
+		}
+
+		// This path is fully buffered, so a truncated upstream stream can be
+		// replayed on the same account without duplicating downstream output.
+		err := runKiroWithIntegrityRetry(payload.requestContext, account, payload,
+			func() error { return h.callKiroAPIWithHealth(account, payload, callback) },
+			resetAttempt, nil)
 		if err == nil {
 			h.pool.RecordUpstreamSuccess(account.ID, account.ProfileArn, model)
 		}
@@ -3986,7 +4090,9 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 			h.promptCache.ReleaseReservation(syntheticCacheUsage)
 			lastErr = err
 			excluded[account.ID] = true
-			h.handleAccountFailureForModel(account, model, err)
+			if !isStreamIntegrityError(err) {
+				h.handleAccountFailureForModel(account, model, err)
+			}
 			if !shouldRetryAcrossAccounts(err) {
 				break
 			}

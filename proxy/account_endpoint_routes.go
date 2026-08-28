@@ -251,6 +251,18 @@ func normalizeEndpointRoutePart(value string) string {
 // availableEndpoints removes account-specific cooling endpoints and, in auto
 // mode, starts with the endpoint that most recently succeeded for this model.
 func (r *accountEndpointRouteRegistry) availableEndpoints(accountID, model, preferred string, endpoints []kiroEndpoint) ([]kiroEndpoint, error) {
+	return r.availableEndpointsWithOptions(accountID, model, preferred, endpoints, false)
+}
+
+// availableEndpointsForIntegrityRetry lets a bounded same-account replay probe
+// an endpoint that was cooled by the just-failed stream. Normal requests keep
+// the cooldown filter; this escape hatch is deliberately narrow so a transient
+// clean-EOF does not become a false account-level 429 before the replay can run.
+func (r *accountEndpointRouteRegistry) availableEndpointsForIntegrityRetry(accountID, model, preferred string, endpoints []kiroEndpoint) ([]kiroEndpoint, error) {
+	return r.availableEndpointsWithOptions(accountID, model, preferred, endpoints, true)
+}
+
+func (r *accountEndpointRouteRegistry) availableEndpointsWithOptions(accountID, model, preferred string, endpoints []kiroEndpoint, allowCooling bool) ([]kiroEndpoint, error) {
 	if r == nil || strings.TrimSpace(accountID) == "" || strings.TrimSpace(model) == "" || len(endpoints) == 0 {
 		return append([]kiroEndpoint(nil), endpoints...), nil
 	}
@@ -272,6 +284,7 @@ func (r *accountEndpointRouteRegistry) availableEndpoints(accountID, model, pref
 	}
 
 	available := make([]kiroEndpoint, 0, len(ordered))
+	cooling := make([]kiroEndpoint, 0, len(ordered))
 	var retryAfter time.Duration
 	for _, endpoint := range ordered {
 		key := accountEndpointRouteKey{accountID: accountID, model: model, endpoint: normalizeEndpointRoutePart(endpoint.Key)}
@@ -279,6 +292,9 @@ func (r *accountEndpointRouteRegistry) availableEndpoints(accountID, model, pref
 		if !ok || !state.cooldownUntil.After(now) {
 			available = append(available, endpoint)
 			continue
+		}
+		if allowCooling {
+			cooling = append(cooling, endpoint)
 		}
 		state.lastAccess = now
 		r.routes[key] = state
@@ -291,6 +307,9 @@ func (r *accountEndpointRouteRegistry) availableEndpoints(accountID, model, pref
 
 	if len(available) > 0 {
 		return available, nil
+	}
+	if allowCooling && len(cooling) > 0 {
+		return cooling, nil
 	}
 	return nil, &UpstreamError{
 		Kind:                UpstreamErrorRateLimit,

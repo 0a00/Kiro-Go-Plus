@@ -337,7 +337,23 @@ func (h *Handler) handleResponsesNonStream(
 			},
 		}
 
-		err := h.callKiroAPIWithHealth(account, payload, callback)
+		resetAttempt := func() {
+			content = ""
+			reasoningContent = ""
+			toolUses = nil
+			inputTokens = 0
+			outputTokens = 0
+			credits = 0
+			realInputTokens = 0
+			upstreamUsage = KiroTokenUsage{}
+			upstreamStopReason = ""
+		}
+
+		// Responses non-stream is fully buffered, so replaying a truncated
+		// upstream attempt cannot duplicate anything sent to the client.
+		err := runKiroWithIntegrityRetry(payload.requestContext, account, payload,
+			func() error { return h.callKiroAPIWithHealth(account, payload, callback) },
+			resetAttempt, nil)
 		if err == nil {
 			h.pool.RecordUpstreamSuccess(account.ID, account.ProfileArn, model)
 		}
@@ -346,7 +362,9 @@ func (h *Handler) handleResponsesNonStream(
 			h.promptCache.ReleaseReservation(syntheticCacheUsage)
 			lastErr = err
 			excluded[account.ID] = true
-			h.handleAccountFailureForModel(account, model, err)
+			if !isStreamIntegrityError(err) {
+				h.handleAccountFailureForModel(account, model, err)
+			}
 			if !shouldRetryAcrossAccounts(err) {
 				break
 			}
@@ -899,7 +917,28 @@ func (h *Handler) handleResponsesStream(
 			},
 		}
 
-		err := h.callKiroAPIWithHealth(account, payload, callback)
+		resetAttempt := func() {
+			fullText.Reset()
+			reasoningText.Reset()
+			toolUses = nil
+			inputTokens = 0
+			outputTokens = 0
+			credits = 0
+			realInputTokens = 0
+			upstreamUsage = KiroTokenUsage{}
+			upstreamStopReason = ""
+			messageStarted = false
+			reasoningStarted = false
+			outputIndex = 0
+			contentIndex = 0
+			responseStarted = false
+		}
+
+		// Retry only before responseStarted becomes true. The reset prevents a
+		// discarded attempt from contaminating the next Responses event sequence.
+		err := runKiroWithIntegrityRetry(payload.requestContext, account, payload,
+			func() error { return h.callKiroAPIWithHealth(account, payload, callback) },
+			resetAttempt, func() bool { return !responseStarted })
 		if err == nil {
 			h.pool.RecordUpstreamSuccess(account.ID, account.ProfileArn, model)
 		}
@@ -909,7 +948,9 @@ func (h *Handler) handleResponsesStream(
 			if !responseStarted {
 				lastErr = err
 				excluded[account.ID] = true
-				h.handleAccountFailureForModel(account, model, err)
+				if !isStreamIntegrityError(err) {
+					h.handleAccountFailureForModel(account, model, err)
+				}
 				if !shouldRetryAcrossAccounts(err) {
 					break
 				}
