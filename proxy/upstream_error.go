@@ -391,9 +391,9 @@ func isStreamIntegrityError(err error) bool {
 }
 
 func newToolAssemblyTimeoutError(endpoint, toolName string, argumentBytes int, timeout time.Duration) *UpstreamError {
-	message := fmt.Sprintf("tool call had no argument activity for %s", timeout.Round(time.Second))
+	message := fmt.Sprintf("tool call had no argument activity for %s", timeout)
 	if strings.TrimSpace(toolName) != "" {
-		message = fmt.Sprintf("tool %q had no argument activity for %s", toolName, timeout.Round(time.Second))
+		message = fmt.Sprintf("tool %q had no argument activity for %s", toolName, timeout)
 	}
 	if argumentBytes > 0 {
 		message += fmt.Sprintf(" after %d argument bytes", argumentBytes)
@@ -411,7 +411,7 @@ func newActionableOutputTimeoutError(endpoint string, timeout time.Duration) *Up
 	return &UpstreamError{
 		Kind:                 UpstreamErrorActionableTimeout,
 		Endpoint:             endpoint,
-		Message:              fmt.Sprintf("upstream was idle for %s before producing actionable text or a complete tool call", timeout.Round(time.Second)),
+		Message:              fmt.Sprintf("upstream was idle for %s before producing actionable text or a complete tool call", timeout),
 		Cause:                context.DeadlineExceeded,
 		RetryAcrossEndpoints: true,
 		RetryAcrossAccounts:  true,

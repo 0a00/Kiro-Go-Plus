@@ -383,7 +383,7 @@ func TestCallKiroAPIStopsToolStreamThatNeverCompletes(t *testing.T) {
 	if !ok || upstreamErr.Kind != UpstreamErrorToolAssemblyTimeout || !upstreamErr.RetryAcrossAccounts {
 		t.Fatalf("expected retryable tool assembly timeout, got %#v", err)
 	}
-	if !strings.Contains(upstreamErr.Error(), `tool "Write" did not complete`) {
+	if !strings.Contains(upstreamErr.Error(), `tool "Write" had no argument activity`) {
 		t.Fatalf("unexpected tool timeout error: %v", upstreamErr)
 	}
 }
