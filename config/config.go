@@ -256,12 +256,14 @@ type RetryConfig struct {
 	PreOutputRetryBackoffMs        int  `json:"preOutputRetryBackoffMs"`
 	FirstTokenTimeoutSeconds       int  `json:"firstTokenTimeoutSeconds"`
 	StreamIdleTimeoutSeconds       int  `json:"streamIdleTimeoutSeconds"`
-	ToolAssemblyTimeoutSeconds     int  `json:"toolAssemblyTimeoutSeconds"`
-	EmptyResponseRetries           int  `json:"emptyResponseRetries"`
-	EndpointFailureThreshold       int  `json:"endpointFailureThreshold"`
-	EndpointCircuitCooldownSeconds int  `json:"endpointCircuitCooldownSeconds"`
-	ProxyFailureThreshold          int  `json:"proxyFailureThreshold"`
-	ProxyCircuitCooldownSeconds    int  `json:"proxyCircuitCooldownSeconds"`
+	// ToolAssemblyTimeoutSeconds is the allowed idle interval while a tool call
+	// is being assembled. It is not a total tool-call duration limit.
+	ToolAssemblyTimeoutSeconds     int `json:"toolAssemblyTimeoutSeconds"`
+	EmptyResponseRetries           int `json:"emptyResponseRetries"`
+	EndpointFailureThreshold       int `json:"endpointFailureThreshold"`
+	EndpointCircuitCooldownSeconds int `json:"endpointCircuitCooldownSeconds"`
+	ProxyFailureThreshold          int `json:"proxyFailureThreshold"`
+	ProxyCircuitCooldownSeconds    int `json:"proxyCircuitCooldownSeconds"`
 }
 
 // LongToolConfig protects large file/command tool calls from upstream
@@ -529,7 +531,7 @@ const (
 )
 
 // Version current version
-const Version = "1.2.55"
+const Version = "1.2.56"
 
 var (
 	cfg           *Config

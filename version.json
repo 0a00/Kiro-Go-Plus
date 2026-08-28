@@ -1,5 +1,5 @@
 {
-  "version": "1.2.55",
-  "changelog": "Restore incremental Claude text streaming for guarded tool requests, reduce tag-parser buffering to incomplete tag fragments, and keep malformed tool JSON protected from unsafe replay.\n修复带工具 Claude 请求正文被延迟到上游结束后才输出的问题：正文校验通过后立即流式转发，仅保留未完成标签和工具 JSON 保护，避免不安全重放。",
+  "version": "1.2.56",
+  "changelog": "Make long-tool and actionable-output protection activity-aware so sustained thinking, progress, and tool fragments do not trigger false timeouts; retain idle protection for genuinely stalled streams.\n修复长工具和可提交输出保护误把持续思考、进度及工具分片当成超时的问题：改为空闲感知看门狗，持续有活动时不打断，真正无活动时仍按配置保护并重试。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }

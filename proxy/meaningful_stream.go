@@ -53,6 +53,7 @@ type meaningfulStreamCallback struct {
 	deferTextUntilComplete  bool
 	streamThinkingPrecommit bool
 	streamToolFrames        bool
+	onLiveness              func()
 	activity                atomic.Bool
 	actionable              atomic.Bool
 	emitted                 atomic.Bool
@@ -81,6 +82,9 @@ func wrapMeaningfulStreamCallback(target *KiroStreamCallback, onActivity func(),
 		OnResponseStart: target.OnResponseStart,
 		OnText: func(text string, isThinking bool) {
 			if strings.TrimSpace(text) == "" {
+				// Whitespace is not meaningful first output, but it still proves
+				// that the upstream stream is active.
+				gate.touchLiveness()
 				return
 			}
 			gate.markActivity()
@@ -123,6 +127,7 @@ func wrapMeaningfulStreamCallback(target *KiroStreamCallback, onActivity func(),
 			}
 		},
 		OnToolUseStop: func(toolUseID string) {
+			gate.touchLiveness()
 			if target.detailTrace != nil {
 				target.detailTrace.recordToolUseStop(toolUseID)
 			}
@@ -131,27 +136,35 @@ func wrapMeaningfulStreamCallback(target *KiroStreamCallback, onActivity func(),
 			}
 		},
 		OnComplete: func(input, output int) {
+			gate.touchLiveness()
 			gate.handleEvent(pendingStreamEvent{kind: pendingComplete, input: input, output: output})
 		},
 		OnUsage: func(usage KiroTokenUsage) {
+			gate.touchLiveness()
 			gate.handleEvent(pendingStreamEvent{kind: pendingUsage, usage: usage})
 		},
 		OnTruncated: func(reason string) {
+			gate.touchLiveness()
 			gate.handleEvent(pendingStreamEvent{kind: pendingTruncated, text: reason})
 		},
 		OnError: func(err error) {
+			gate.touchLiveness()
 			gate.handleEvent(pendingStreamEvent{kind: pendingError, err: err})
 		},
 		OnCredits: func(credits float64) {
+			gate.touchLiveness()
 			gate.handleEvent(pendingStreamEvent{kind: pendingCredits, credits: credits})
 		},
 		OnContextUsage: func(percentage float64) {
+			gate.touchLiveness()
 			gate.handleEvent(pendingStreamEvent{kind: pendingContextUsage, percentage: percentage})
 		},
 		OnStopReason: func(reason string) {
+			gate.touchLiveness()
 			gate.handleEvent(pendingStreamEvent{kind: pendingStopReason, text: reason})
 		},
 		OnProgress: func() {
+			gate.touchLiveness()
 			if target.detailTrace != nil {
 				target.detailTrace.recordProgress()
 			}
@@ -164,11 +177,30 @@ func wrapMeaningfulStreamCallback(target *KiroStreamCallback, onActivity func(),
 }
 
 func (g *meaningfulStreamCallback) markActivity() {
-	if g == nil || g.activity.Swap(true) {
+	if g == nil {
+		return
+	}
+	g.touchLiveness()
+	if g.activity.Swap(true) {
 		return
 	}
 	if g.onActivity != nil {
 		g.onActivity()
+	}
+}
+
+// setLivenessHook is installed before parsing starts. Unlike onActivity, this
+// hook runs for every semantic event and for progress frames, while preserving
+// the distinction that progress is not a meaningful first response.
+func (g *meaningfulStreamCallback) setLivenessHook(hook func()) {
+	if g != nil {
+		g.onLiveness = hook
+	}
+}
+
+func (g *meaningfulStreamCallback) touchLiveness() {
+	if g != nil && g.onLiveness != nil {
+		g.onLiveness()
 	}
 }
 

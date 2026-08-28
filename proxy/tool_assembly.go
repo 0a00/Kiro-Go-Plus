@@ -27,13 +27,14 @@ type toolAssemblyMonitor struct {
 }
 
 type toolAssemblyActive struct {
-	toolUseID  string
-	name       string
-	startedAt  time.Time
-	bytes      int
-	fragments  int
-	generation uint64
-	timer      *time.Timer
+	toolUseID      string
+	name           string
+	startedAt      time.Time
+	lastActivityAt time.Time
+	bytes          int
+	fragments      int
+	generation     uint64
+	timer          *time.Timer
 }
 
 func wrapToolAssemblyMonitor(target *KiroStreamCallback, timeout time.Duration, onTimeout func(toolAssemblySnapshot)) (*KiroStreamCallback, *toolAssemblyMonitor) {
@@ -91,6 +92,7 @@ func (m *toolAssemblyMonitor) start(toolUseID, name string) {
 		if name != "" {
 			existing.name = name
 		}
+		m.touchLocked(existing)
 		return
 	}
 	if toolUseID != "" {
@@ -102,6 +104,7 @@ func (m *toolAssemblyMonitor) start(toolUseID, name string) {
 			placeholder.toolUseID = toolUseID
 			placeholder.name = name
 			m.active[toolUseID] = placeholder
+			m.touchLocked(placeholder)
 			m.armLocked(placeholder)
 			return
 		}
@@ -113,19 +116,34 @@ func (m *toolAssemblyMonitor) addActiveLocked(toolUseID, name string, startedAt 
 	if m.active == nil {
 		m.active = make(map[string]*toolAssemblyActive)
 	}
-	state := &toolAssemblyActive{toolUseID: toolUseID, name: name, startedAt: startedAt}
+	state := &toolAssemblyActive{
+		toolUseID:      toolUseID,
+		name:           name,
+		startedAt:      startedAt,
+		lastActivityAt: startedAt,
+	}
 	m.active[toolUseID] = state
 	m.armLocked(state)
 	return state
+}
+
+func (m *toolAssemblyMonitor) touchLocked(state *toolAssemblyActive) {
+	if state == nil {
+		return
+	}
+	state.lastActivityAt = time.Now()
 }
 
 func (m *toolAssemblyMonitor) armLocked(state *toolAssemblyActive) {
 	if state == nil || m.timeout <= 0 {
 		return
 	}
+	if state.lastActivityAt.IsZero() {
+		state.lastActivityAt = time.Now()
+	}
 	m.nextGen++
 	state.generation = m.nextGen
-	remaining := m.timeout - time.Since(state.startedAt)
+	remaining := m.timeout - time.Since(state.lastActivityAt)
 	if remaining < 0 {
 		remaining = 0
 	}
@@ -148,6 +166,7 @@ func (m *toolAssemblyMonitor) stateForInputLocked(toolUseID string) *toolAssembl
 			}
 			placeholder.toolUseID = toolUseID
 			m.active[toolUseID] = placeholder
+			m.touchLocked(placeholder)
 			m.armLocked(placeholder)
 			return placeholder
 		}
@@ -176,6 +195,7 @@ func (m *toolAssemblyMonitor) add(toolUseID, input string) {
 	if state.fragments > m.maxFragments {
 		m.maxFragments = state.fragments
 	}
+	m.touchLocked(state)
 }
 
 func (m *toolAssemblyMonitor) activity() {
@@ -192,6 +212,10 @@ func (m *toolAssemblyMonitor) activity() {
 	}
 	if len(m.active) == 0 {
 		m.addActiveLocked("", "", time.Now())
+		return
+	}
+	for _, state := range m.active {
+		m.touchLocked(state)
 	}
 }
 
@@ -265,6 +289,15 @@ func (m *toolAssemblyMonitor) fire(toolUseID string, generation uint64) {
 	m.mu.Lock()
 	state := m.active[toolUseID]
 	if state == nil || state.generation != generation || m.timedOut != nil {
+		m.mu.Unlock()
+		return
+	}
+	idleFor := time.Since(state.lastActivityAt)
+	if idleFor < 0 {
+		idleFor = 0
+	}
+	if idleFor < m.timeout {
+		m.armLocked(state)
 		m.mu.Unlock()
 		return
 	}

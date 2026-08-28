@@ -55,6 +55,8 @@ Pre-output stream retry defaults to one same-endpoint retry after 700 ms. It app
 
 Long-tool protection is enabled by default with one recovery retry and an 8192-token guidance limit. Optional preflight model fallback is disabled by default because model availability differs between accounts.
 
+Timeouts are activity-based where labeled as idle: tool-fragment assembly and high-risk actionable-output windows reset when thinking, progress, or tool fragments arrive, so they do not cap a sustained request's total duration. The stream idle timeout still applies when no upstream bytes arrive, and the request retry-duration budget remains the overall upper bound.
+
 Complete request logging is disabled by default. When enabled, it captures inference routes only and writes bounded details to `data/request_details.json` with mode `0600` and a 64 MiB total cap. Authorization headers and credentials are excluded; image/document Base64 and tool arguments are represented only by type, byte count, and SHA-256. Prompts and model output are still sensitive, so enable this mode only while diagnosing issues and clear it afterward.
 
 Unlisted-model pass-through is disabled by default. Enable it only when Kiro has released a model that is not yet in the local registry; IDs are syntax-checked locally, while upstream Kiro remains the final availability validator.

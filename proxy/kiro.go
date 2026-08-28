@@ -1028,19 +1028,20 @@ endpointLoop:
 			})
 			var actionableOutputTimedOut atomic.Bool
 			actionableOutputTimeout := resolveLongToolActionableOutputTimeout(payload)
-			var actionableOutputTimer *time.Timer
-			if firstTokenTimeout > 0 {
-				firstTokenTimer = time.AfterFunc(firstTokenTimeout, func() {
-					firstTokenTimedOut.Store(true)
-					cancelRequest()
-				})
-			}
+			var actionableOutputWatchdog *activityWatchdog
 			if actionableOutputTimeout > 0 {
-				actionableOutputTimer = time.AfterFunc(actionableOutputTimeout, func() {
+				actionableOutputWatchdog = newActivityWatchdog(actionableOutputTimeout, func() {
 					if meaningfulGate.hasActionableOutput() {
 						return
 					}
 					actionableOutputTimedOut.Store(true)
+					cancelRequest()
+				})
+				meaningfulGate.setLivenessHook(actionableOutputWatchdog.Touch)
+			}
+			if firstTokenTimeout > 0 {
+				firstTokenTimer = time.AfterFunc(firstTokenTimeout, func() {
+					firstTokenTimedOut.Store(true)
 					cancelRequest()
 				})
 			}
@@ -1051,8 +1052,8 @@ endpointLoop:
 				if firstTokenTimer != nil {
 					firstTokenTimer.Stop()
 				}
-				if actionableOutputTimer != nil {
-					actionableOutputTimer.Stop()
+				if actionableOutputWatchdog != nil {
+					actionableOutputWatchdog.Stop()
 				}
 				cancelRequest()
 				if requestContext.Err() != nil {
@@ -1103,8 +1104,8 @@ endpointLoop:
 				if firstTokenTimer != nil {
 					firstTokenTimer.Stop()
 				}
-				if actionableOutputTimer != nil {
-					actionableOutputTimer.Stop()
+				if actionableOutputWatchdog != nil {
+					actionableOutputWatchdog.Stop()
 				}
 				cancelRequest()
 				classifiedErr := classifyUpstreamHTTPError(resp.StatusCode, ep.Name, errBody)
@@ -1154,8 +1155,8 @@ endpointLoop:
 				if firstTokenTimer != nil {
 					defer firstTokenTimer.Stop()
 				}
-				if actionableOutputTimer != nil {
-					defer actionableOutputTimer.Stop()
+				if actionableOutputWatchdog != nil {
+					defer actionableOutputWatchdog.Stop()
 				}
 				defer cancelRequest()
 				return parseAndCloseEventStreamWithOptions(resp.Body, idleTimeout, func() {

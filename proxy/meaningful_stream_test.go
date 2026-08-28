@@ -63,6 +63,41 @@ func TestMeaningfulStreamProgressDoesNotCountAsActivity(t *testing.T) {
 	}
 }
 
+func TestMeaningfulStreamLivenessHookSeesProgressAndRepeatedEvents(t *testing.T) {
+	livenessCalls := 0
+	wrapper, gate := wrapMeaningfulStreamCallback(&KiroStreamCallback{}, nil, true, false, false, false)
+	gate.setLivenessHook(func() { livenessCalls++ })
+
+	wrapper.OnProgress()
+	wrapper.OnProgress()
+	if livenessCalls != 2 || gate.hasActivity() {
+		t.Fatalf("progress liveness was not isolated from meaningful activity: calls=%d activity=%v", livenessCalls, gate.hasActivity())
+	}
+	wrapper.OnText("first", true)
+	wrapper.OnText("second", true)
+	if livenessCalls != 4 || !gate.hasActivity() {
+		t.Fatalf("repeated semantic events did not reach liveness hook: calls=%d activity=%v", livenessCalls, gate.hasActivity())
+	}
+}
+
+func TestMeaningfulStreamLivenessHookSeesNonMeaningfulStreamEvents(t *testing.T) {
+	livenessCalls := 0
+	wrapper, gate := wrapMeaningfulStreamCallback(&KiroStreamCallback{}, nil, true, false, false, false)
+	gate.setLivenessHook(func() { livenessCalls++ })
+
+	wrapper.OnText("   ", false)
+	wrapper.OnToolUseStop("toolu_done")
+	wrapper.OnUsage(KiroTokenUsage{InputTokens: 1})
+	wrapper.OnContextUsage(10)
+	wrapper.OnStopReason("end_turn")
+	if livenessCalls != 5 {
+		t.Fatalf("non-meaningful stream events did not refresh liveness: calls=%d", livenessCalls)
+	}
+	if gate.hasActivity() {
+		t.Fatal("non-meaningful stream events were incorrectly counted as first activity")
+	}
+}
+
 func TestMeaningfulStreamToolFramesCountAsActivity(t *testing.T) {
 	tests := []struct {
 		name string

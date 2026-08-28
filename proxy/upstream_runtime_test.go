@@ -364,19 +364,9 @@ func TestCallKiroAPIStopsToolStreamThatNeverCompletes(t *testing.T) {
 		if flusher, ok := w.(http.Flusher); ok {
 			flusher.Flush()
 		}
-		ticker := time.NewTicker(50 * time.Millisecond)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-r.Context().Done():
-				return
-			case <-ticker.C:
-				_, _ = w.Write(awsEventStreamFrame(t, "toolUseInputEvent", map[string]interface{}{"input": "x"}))
-				if flusher, ok := w.(http.Flusher); ok {
-					flusher.Flush()
-				}
-			}
-		}
+		// The watchdog is an idle timeout. Keep this fixture genuinely idle
+		// after the partial argument so a stalled tool is still rejected.
+		<-r.Context().Done()
 	}))
 	defer server.Close()
 	oldEndpoints := kiroEndpoints
@@ -395,6 +385,77 @@ func TestCallKiroAPIStopsToolStreamThatNeverCompletes(t *testing.T) {
 	}
 	if !strings.Contains(upstreamErr.Error(), `tool "Write" did not complete`) {
 		t.Fatalf("unexpected tool timeout error: %v", upstreamErr)
+	}
+}
+
+func TestCallKiroAPIAllowsToolAssemblyThatKeepsReceivingFragments(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	retry := config.GetRetryConfig()
+	retry.MaxAccountAttempts = 1
+	retry.MaxUpstreamAttempts = 1
+	retry.MaxRetryDurationSeconds = 5
+	retry.FirstTokenTimeoutSeconds = 5
+	retry.StreamIdleTimeoutSeconds = 5
+	retry.ToolAssemblyTimeoutSeconds = 1
+	if err := config.UpdateRetryConfig(retry); err != nil {
+		t.Fatalf("update retry config: %v", err)
+	}
+	_ = config.UpdatePreferredEndpoint("runtime")
+	_ = config.UpdateEndpointFallback(false)
+
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusOK)
+		flusher, _ := w.(http.Flusher)
+		writeFrame := func(eventType string, payload map[string]interface{}) {
+			_, _ = w.Write(awsEventStreamFrame(t, eventType, payload))
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+		writeFrame("toolUseEvent", map[string]interface{}{
+			"toolUseId": "toolu_growing",
+			"name":      "Write",
+			"input":     `{"content":"`,
+		})
+		for i := 0; i < 12; i++ {
+			time.Sleep(100 * time.Millisecond)
+			writeFrame("toolUseInputEvent", map[string]interface{}{"input": "x"})
+		}
+		writeFrame("toolUseInputEvent", map[string]interface{}{"input": `"}`})
+		writeFrame("toolUseStopEvent", map[string]interface{}{})
+		writeFrame("contextUsageEvent", map[string]interface{}{"contextUsagePercentage": 1.0})
+	}))
+	defer server.Close()
+	oldEndpoints := kiroEndpoints
+	kiroEndpoints = []kiroEndpoint{{Key: "runtime", URL: server.URL, Name: "Kiro Runtime"}}
+	t.Cleanup(func() { kiroEndpoints = oldEndpoints })
+
+	payload := &KiroPayload{requireActionableOutput: true, requireToolUse: true}
+	payload.ConversationState.CurrentMessage.UserInputMessage.ModelID = "claude-sonnet-4.6"
+	var tool KiroToolWrapper
+	tool.ToolSpecification.Name = "Write"
+	payload.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext = &UserInputMessageContext{Tools: []KiroToolWrapper{tool}}
+
+	var toolUses []KiroToolUse
+	startedAt := time.Now()
+	err := CallKiroAPI(&config.Account{ID: "growing-tool-account", AccessToken: "token"}, payload, &KiroStreamCallback{
+		OnToolUse: func(toolUse KiroToolUse) { toolUses = append(toolUses, toolUse) },
+	})
+	if err != nil {
+		t.Fatalf("active tool stream failed: %v", err)
+	}
+	if requests.Load() != 1 {
+		t.Fatalf("active tool stream was retried: %d requests", requests.Load())
+	}
+	if elapsed := time.Since(startedAt); elapsed < 1*time.Second {
+		t.Fatalf("fixture did not exercise a long tool stream: %s", elapsed)
+	}
+	if len(toolUses) != 1 || toolUses[0].Name != "Write" || toolUses[0].Input["content"] != "xxxxxxxxxxxx" {
+		t.Fatalf("unexpected long tool result: %+v", toolUses)
 	}
 }
 
@@ -541,6 +602,74 @@ func TestCallKiroAPIRotatesEndpointAfterActionableOutputTimeout(t *testing.T) {
 	cooldowns, _ := status["cooldowns"].([]accountEndpointRouteSnapshot)
 	if len(cooldowns) != 1 || cooldowns[0].Workload != "long-tool" || cooldowns[0].Endpoint != "Kiro IDE" {
 		t.Fatalf("actionable timeout did not cool only the long-tool route: %+v", status)
+	}
+}
+
+func TestCallKiroAPIKeepsActionableWatchdogAliveDuringThinking(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	retry := config.GetRetryConfig()
+	retry.MaxAccountAttempts = 1
+	retry.MaxUpstreamAttempts = 1
+	retry.MaxRetryDurationSeconds = 5
+	retry.FirstTokenTimeoutSeconds = 5
+	retry.StreamIdleTimeoutSeconds = 5
+	retry.ToolAssemblyTimeoutSeconds = 1
+	if err := config.UpdateRetryConfig(retry); err != nil {
+		t.Fatalf("update retry config: %v", err)
+	}
+	_ = config.UpdatePreferredEndpoint("runtime")
+	_ = config.UpdateEndpointFallback(false)
+
+	const actionableTimeout = 250 * time.Millisecond
+	oldTimeoutResolver := resolveLongToolActionableOutputTimeout
+	resolveLongToolActionableOutputTimeout = func(*KiroPayload) time.Duration { return actionableTimeout }
+	t.Cleanup(func() { resolveLongToolActionableOutputTimeout = oldTimeoutResolver })
+
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusOK)
+		flusher, _ := w.(http.Flusher)
+		writeFrame := func(eventType string, payload map[string]interface{}) {
+			_, _ = w.Write(awsEventStreamFrame(t, eventType, payload))
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+		for i := 0; i < 8; i++ {
+			writeFrame("reasoningContentEvent", map[string]interface{}{"text": "planning"})
+			time.Sleep(40 * time.Millisecond)
+		}
+		writeFrame("toolUseEvent", map[string]interface{}{
+			"toolUseId": "toolu_after_thinking",
+			"name":      "Write",
+			"input":     `{"file_path":"index.html","content":"ok"}`,
+			"stop":      true,
+		})
+		writeFrame("contextUsageEvent", map[string]interface{}{"contextUsagePercentage": 1.0})
+	}))
+	defer server.Close()
+	oldEndpoints := kiroEndpoints
+	kiroEndpoints = []kiroEndpoint{{Key: "runtime", URL: server.URL, Name: "Kiro Runtime"}}
+	t.Cleanup(func() { kiroEndpoints = oldEndpoints })
+
+	payload := &KiroPayload{requireActionableOutput: true, requireToolUse: true, deferTextUntilComplete: true}
+	payload.ConversationState.CurrentMessage.UserInputMessage.ModelID = "claude-sonnet-4.6"
+	var tool KiroToolWrapper
+	tool.ToolSpecification.Name = "Write"
+	payload.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext = &UserInputMessageContext{Tools: []KiroToolWrapper{tool}}
+
+	var toolUses []KiroToolUse
+	err := CallKiroAPI(&config.Account{ID: "thinking-tool-account", AccessToken: "token"}, payload, &KiroStreamCallback{
+		OnToolUse: func(toolUse KiroToolUse) { toolUses = append(toolUses, toolUse) },
+	})
+	if err != nil {
+		t.Fatalf("thinking activity was treated as an actionable timeout: %v", err)
+	}
+	if requests.Load() != 1 || len(toolUses) != 1 || toolUses[0].Input["content"] != "ok" {
+		t.Fatalf("unexpected thinking/tool result: requests=%d tools=%+v", requests.Load(), toolUses)
 	}
 }
 
