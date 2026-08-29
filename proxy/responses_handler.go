@@ -7,6 +7,7 @@ import (
 	"kiro-go/config"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -603,24 +604,61 @@ func (h *Handler) handleResponsesStream(
 	startedAt := time.Now()
 	firstContent := payload.beginRequestTiming(startedAt)
 	responseModel := exposedModelID(model)
-	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
+	prepareSSEHeaders(w)
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		h.sendOpenAIError(w, 500, "server_error", "Streaming not supported")
 		return
 	}
+	var sseMu sync.Mutex
+	doneSent := false
 
-	send := func(eventName string, payload interface{}) {
+	writeEventLocked := func(eventName string, payload interface{}) bool {
 		data, err := json.Marshal(payload)
 		if err != nil {
-			return
+			return false
 		}
 		firstContent.MarkSSEEvent(false)
-		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", eventName, string(data))
+		_, _ = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", eventName, string(data))
 		flusher.Flush()
+		return true
+	}
+	writeDoneLocked := func() {
+		firstContent.MarkSSEEvent(false)
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	}
+	send := func(eventName string, payload interface{}) {
+		sseMu.Lock()
+		defer sseMu.Unlock()
+		if doneSent {
+			return
+		}
+		writeEventLocked(eventName, payload)
+	}
+	sendTerminal := func(eventName string, payload interface{}) {
+		sseMu.Lock()
+		defer sseMu.Unlock()
+		if doneSent {
+			return
+		}
+		_ = writeEventLocked(eventName, payload)
+		doneSent = true
+		writeDoneLocked()
+	}
+	sendFailure := func(errorType, message string) {
+		sendTerminal("response.failed", map[string]interface{}{
+			"type": "response.failed",
+			"response": map[string]interface{}{
+				"id":     respID,
+				"status": "failed",
+				"error": map[string]string{
+					"type":    errorType,
+					"message": message,
+				},
+			},
+		})
 	}
 
 	createdAt := time.Now().Unix()
@@ -643,6 +681,16 @@ func (h *Handler) handleResponsesStream(
 		"type":     "response.in_progress",
 		"response": initial,
 	})
+	stopHeartbeat := startSSECommentHeartbeat(payload.requestContext, claudeStreamHeartbeatInterval, func() {
+		sseMu.Lock()
+		defer sseMu.Unlock()
+		if doneSent {
+			return
+		}
+		firstContent.MarkSSEEvent(true)
+		writeSSEComment(w, flusher, "keep-alive")
+	})
+	defer stopHeartbeat()
 
 	attempts := h.newAccountAttemptController(payload.requestContext)
 	excluded := attempts.excluded
@@ -957,17 +1005,7 @@ func (h *Handler) handleResponsesStream(
 				continue
 			}
 			mapped := mapDownstreamError(err)
-			send("response.failed", map[string]interface{}{
-				"type": "response.failed",
-				"response": map[string]interface{}{
-					"id":     respID,
-					"status": "failed",
-					"error": map[string]string{
-						"type":    mapped.OpenAIType,
-						"message": err.Error(),
-					},
-				},
-			})
+			sendFailure(mapped.OpenAIType, err.Error())
 			h.recordFailure()
 			h.recordRequestLogForPayload(payload, requestLogEntry{
 				Timestamp:      time.Now().Unix(),
@@ -1081,13 +1119,10 @@ func (h *Handler) handleResponsesStream(
 		if responseStopReasonIsIncomplete(upstreamStopReason) {
 			completionEvent = "response.incomplete"
 		}
-		send(completionEvent, map[string]interface{}{
+		sendTerminal(completionEvent, map[string]interface{}{
 			"type":     completionEvent,
 			"response": respObj,
 		})
-		firstContent.MarkSSEEvent(false)
-		fmt.Fprintf(w, "data: [DONE]\n\n")
-		flusher.Flush()
 		entry.DurationMs = requestDurationMs(startedAt)
 		h.recordRequestLogForPayload(payload, entry)
 		return
@@ -1114,32 +1149,12 @@ func (h *Handler) handleResponsesStream(
 				Error:          busyErr.Error(),
 			}
 			h.recordDiagnosticFailureForPayload("openai.responses.stream", model, nil, 429, busyErr, payload)
-			send("response.failed", map[string]interface{}{
-				"type": "response.failed",
-				"response": map[string]interface{}{
-					"id":     respID,
-					"status": "failed",
-					"error": map[string]string{
-						"type":    "rate_limit_error",
-						"message": busyErr.Error(),
-					},
-				},
-			})
+			sendFailure("rate_limit_error", busyErr.Error())
 			entry.DurationMs = requestDurationMs(startedAt)
 			h.recordRequestLogForPayload(payload, entry)
 			return
 		}
-		send("response.failed", map[string]interface{}{
-			"type": "response.failed",
-			"response": map[string]interface{}{
-				"id":     respID,
-				"status": "failed",
-				"error": map[string]string{
-					"type":    "server_error",
-					"message": "No available accounts",
-				},
-			},
-		})
+		sendFailure("server_error", "No available accounts")
 		return
 	}
 	mapped := mapDownstreamError(lastErr)
@@ -1155,17 +1170,7 @@ func (h *Handler) handleResponsesStream(
 		Error:          lastErr.Error(),
 	}
 	h.recordDiagnosticFailureForPayload("openai.responses.stream", model, nil, mapped.Status, lastErr, payload)
-	send("response.failed", map[string]interface{}{
-		"type": "response.failed",
-		"response": map[string]interface{}{
-			"id":     respID,
-			"status": "failed",
-			"error": map[string]string{
-				"type":    mapped.OpenAIType,
-				"message": lastErr.Error(),
-			},
-		},
-	})
+	sendFailure(mapped.OpenAIType, lastErr.Error())
 	entry.DurationMs = requestDurationMs(startedAt)
 	h.recordRequestLogForPayload(payload, entry)
 }

@@ -2220,9 +2220,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 	startedAt := time.Now()
 	firstContent := payload.beginRequestTiming(startedAt)
 	responseModel := exposedModelID(model)
-	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
+	prepareSSEHeaders(w)
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -2567,6 +2565,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 						if !forceFlush {
 							safeLen -= trailingThinkingTagPrefix(textBuffer)
 						}
+						safeLen = safeUTF8PrefixBytes(textBuffer, safeLen)
 						if safeLen > 0 {
 							sendText(textBuffer[:safeLen], 0)
 							textBuffer = textBuffer[safeLen:]
@@ -2615,6 +2614,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 						if !forceFlush {
 							safeLen -= trailingTagPrefix(textBuffer, thinkingCloseTag)
 						}
+						safeLen = safeUTF8PrefixBytes(textBuffer, safeLen)
 						if safeLen > 0 {
 							if !dropTagThinking {
 								if !thinkingStarted {
@@ -3469,14 +3469,35 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 	startedAt := time.Now()
 	firstContent := payload.beginRequestTiming(startedAt)
 	responseModel := exposedModelID(model)
-	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
+	prepareSSEHeaders(w)
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		h.sendOpenAIError(w, 500, "server_error", "Streaming not supported")
 		return
+	}
+	var sseMu sync.Mutex
+	writeKeepalive := func() {
+		sseMu.Lock()
+		defer sseMu.Unlock()
+		firstContent.MarkSSEEvent(true)
+		writeSSEComment(w, flusher, "keep-alive")
+	}
+	// Flush a comment immediately so a proxy commits the stream headers even
+	// while account selection or the first upstream response is pending.
+	writeKeepalive()
+	stopHeartbeat := startSSECommentHeartbeat(payload.requestContext, claudeStreamHeartbeatInterval, writeKeepalive)
+	defer stopHeartbeat()
+	sendTerminalOpenAIStreamError := func(errType, message string) {
+		data, _ := json.Marshal(map[string]interface{}{
+			"error": map[string]string{"type": errType, "message": message},
+		})
+		sseMu.Lock()
+		firstContent.MarkSSEEvent(false)
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", string(data))
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+		flusher.Flush()
+		sseMu.Unlock()
 	}
 
 	// 获取 thinking 输出格式配置
@@ -3525,11 +3546,36 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 		var rawReasoningBuilder strings.Builder
 		var textBuffer string
 		var inThinkingBlock bool
+		var thinkingCloseTag string
 		var dropTagThinking bool
 		var thinkingSource thinkingStreamSource
 		var thinkingStarted bool
 		var eventThinkingOpen bool
 		responseStarted := false
+		writeOpenAIData := func(data []byte, semantic bool) {
+			sseMu.Lock()
+			defer sseMu.Unlock()
+			firstContent.MarkSSEEvent(false)
+			_, _ = fmt.Fprintf(w, "data: %s\n\n", string(data))
+			flusher.Flush()
+			if semantic {
+				responseStarted = true
+			}
+		}
+		writeOpenAIDone := func() {
+			sseMu.Lock()
+			defer sseMu.Unlock()
+			firstContent.MarkSSEEvent(false)
+			_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+			flusher.Flush()
+		}
+		sendOpenAIStreamError := func(errType, message string) {
+			data, _ := json.Marshal(map[string]interface{}{
+				"error": map[string]string{"type": errType, "message": message},
+			})
+			writeOpenAIData(data, true)
+			writeOpenAIDone()
+		}
 
 		sendChunk := func(content string, thinkingState int) {
 			if content == "" && thinkingState == 2 {
@@ -3624,10 +3670,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 				}
 			}
 			data, _ := json.Marshal(chunk)
-			firstContent.MarkSSEEvent(false)
-			fmt.Fprintf(w, "data: %s\n\n", string(data))
-			flusher.Flush()
-			responseStarted = true
+			writeOpenAIData(data, true)
 		}
 
 		processText := func(text string, isThinking bool, forceFlush bool) {
@@ -3659,31 +3702,33 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 
 			for {
 				if !inThinkingBlock {
-					thinkingStart := strings.Index(textBuffer, "<thinking>")
+					thinkingStart, thinkingOpenTag, closeTag := nextThinkingTag(textBuffer, 0)
 					if thinkingStart != -1 {
 						if thinkingStart > 0 {
 							sendChunk(textBuffer[:thinkingStart], 0)
 						}
-						textBuffer = textBuffer[thinkingStart+10:]
+						textBuffer = textBuffer[thinkingStart+len(thinkingOpenTag):]
 						inThinkingBlock = true
+						thinkingCloseTag = closeTag
 						dropTagThinking = !allowTagSource(&thinkingSource)
 						thinkingStarted = false
-					} else if forceFlush || len([]rune(textBuffer)) > 50 {
-						runes := []rune(textBuffer)
-						safeLen := len(runes)
-						if !forceFlush {
-							safeLen = max(0, len(runes)-15)
-						}
-						if safeLen > 0 {
-							sendChunk(string(runes[:safeLen]), 0)
-							textBuffer = string(runes[safeLen:])
-						}
-						break
 					} else {
+						safeLen := len(textBuffer)
+						if !forceFlush {
+							safeLen -= trailingThinkingTagPrefix(textBuffer)
+						}
+						safeLen = safeUTF8PrefixBytes(textBuffer, safeLen)
+						if safeLen > 0 {
+							sendChunk(textBuffer[:safeLen], 0)
+							textBuffer = textBuffer[safeLen:]
+						}
 						break
 					}
 				} else {
-					thinkingEnd := strings.Index(textBuffer, "</thinking>")
+					if thinkingCloseTag == "" {
+						thinkingCloseTag = "</thinking>"
+					}
+					thinkingEnd := strings.Index(textBuffer, thinkingCloseTag)
 					if thinkingEnd != -1 {
 						content := textBuffer[:thinkingEnd]
 						if !dropTagThinking {
@@ -3694,8 +3739,9 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 								sendChunk(content, 3)
 							}
 						}
-						textBuffer = textBuffer[thinkingEnd+11:]
+						textBuffer = textBuffer[thinkingEnd+len(thinkingCloseTag):]
 						inThinkingBlock = false
+						thinkingCloseTag = ""
 						dropTagThinking = false
 						thinkingStarted = false
 					} else if forceFlush {
@@ -3711,24 +3757,26 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 							textBuffer = ""
 						}
 						inThinkingBlock = false
+						thinkingCloseTag = ""
 						dropTagThinking = false
 						thinkingStarted = false
 						break
 					} else {
-						runes := []rune(textBuffer)
-						if len(runes) > 20 {
-							safeLen := len(runes) - 15
-							if safeLen > 0 {
-								if !dropTagThinking {
-									if !thinkingStarted {
-										sendChunk(string(runes[:safeLen]), 1)
-										thinkingStarted = true
-									} else {
-										sendChunk(string(runes[:safeLen]), 2)
-									}
+						safeLen := len(textBuffer)
+						if !forceFlush {
+							safeLen -= trailingTagPrefix(textBuffer, thinkingCloseTag)
+						}
+						safeLen = safeUTF8PrefixBytes(textBuffer, safeLen)
+						if safeLen > 0 {
+							if !dropTagThinking {
+								if !thinkingStarted {
+									sendChunk(textBuffer[:safeLen], 1)
+									thinkingStarted = true
+								} else {
+									sendChunk(textBuffer[:safeLen], 2)
 								}
-								textBuffer = string(runes[safeLen:])
 							}
+							textBuffer = textBuffer[safeLen:]
 						}
 						break
 					}
@@ -3784,10 +3832,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 				}
 				toolCallIndex++
 				data, _ := json.Marshal(chunk)
-				firstContent.MarkSSEEvent(false)
-				fmt.Fprintf(w, "data: %s\n\n", string(data))
-				flusher.Flush()
-				responseStarted = true
+				writeOpenAIData(data, true)
 			},
 			OnComplete: func(inTok, outTok int) {
 				inputTokens = inTok
@@ -3818,6 +3863,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 			upstreamStopReason = ""
 			textBuffer = ""
 			inThinkingBlock = false
+			thinkingCloseTag = ""
 			dropTagThinking = false
 			thinkingSource = thinkingSourceUnknown
 			thinkingStarted = false
@@ -3863,14 +3909,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 				Error:          err.Error(),
 			}
 			h.recordDiagnosticFailureForPayload("openai.chat.stream", model, account, mapped.Status, err, payload)
-			chunk, _ := json.Marshal(map[string]interface{}{
-				"error": map[string]string{"type": mapped.OpenAIType, "message": err.Error()},
-			})
-			firstContent.MarkSSEEvent(false)
-			fmt.Fprintf(w, "data: %s\n\n", chunk)
-			firstContent.MarkSSEEvent(false)
-			fmt.Fprint(w, "data: [DONE]\n\n")
-			flusher.Flush()
+			sendOpenAIStreamError(mapped.OpenAIType, err.Error())
 			entry.DurationMs = requestDurationMs(startedAt)
 			h.recordRequestLogForPayload(payload, entry)
 			return
@@ -3949,11 +3988,8 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 			"usage": buildOpenAIUsageMap(inputTokens, outputTokens, thinkingTokens, cacheUsage),
 		}
 		data, _ := json.Marshal(chunk)
-		firstContent.MarkSSEEvent(false)
-		fmt.Fprintf(w, "data: %s\n\n", string(data))
-		firstContent.MarkSSEEvent(false)
-		fmt.Fprintf(w, "data: [DONE]\n\n")
-		flusher.Flush()
+		writeOpenAIData(data, false)
+		writeOpenAIDone()
 		entry.DurationMs = requestDurationMs(startedAt)
 		h.recordRequestLogForPayload(payload, entry)
 		return
@@ -3981,10 +4017,10 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 			})
 			h.recordDiagnosticFailureForPayload("openai.chat.stream", model, nil, 429, busyErr, payload)
 			w.Header().Set("Retry-After", "1")
-			h.sendOpenAIError(w, 429, "rate_limit_error", busyErr.Error())
+			sendTerminalOpenAIStreamError("rate_limit_error", busyErr.Error())
 			return
 		}
-		h.sendOpenAIError(w, 503, "server_error", "No available accounts")
+		sendTerminalOpenAIStreamError("server_error", "No available accounts")
 		return
 	}
 
@@ -4002,7 +4038,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 	})
 	h.recordDiagnosticFailureForPayload("openai.chat.stream", model, nil, mapped.Status, lastErr, payload)
 	applyDownstreamErrorHeaders(w, mapped)
-	h.sendOpenAIError(w, mapped.Status, mapped.OpenAIType, lastErr.Error())
+	sendTerminalOpenAIStreamError(mapped.OpenAIType, lastErr.Error())
 }
 
 // handleOpenAINonStream OpenAI 非流式响应

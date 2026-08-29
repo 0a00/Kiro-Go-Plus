@@ -661,6 +661,12 @@ func TestResponsesStreamSSE(t *testing.T) {
 	if !strings.Contains(bodyStr, `"model":"claude-sonnet-4-5"`) {
 		t.Fatalf("expected official model name in stream, got:\n%s", bodyStr)
 	}
+	if count := strings.Count(bodyStr, "data: [DONE]"); count != 1 {
+		t.Fatalf("expected one Responses stream terminator, got %d:\n%s", count, bodyStr)
+	}
+	if !strings.HasSuffix(strings.TrimSpace(bodyStr), "data: [DONE]") {
+		t.Fatalf("expected [DONE] to be the final stream record:\n%s", bodyStr)
+	}
 }
 
 func TestResponsesEmitsReasoningOutputAndStreamEvents(t *testing.T) {

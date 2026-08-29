@@ -587,9 +587,7 @@ func (h *Handler) sendWebSearchSSE(w http.ResponseWriter, model, query string, r
 
 func (h *Handler) sendWebSearchSSEWithTiming(w http.ResponseWriter, model, query string, results *webSearchResults, inputTokens, outputTokens int, timing *requestFirstContentTimer) {
 	responseModel := exposedModelID(model)
-	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
+	prepareSSEHeaders(w)
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		h.sendClaudeError(w, 500, "api_error", "Streaming not supported")

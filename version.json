@@ -1,5 +1,5 @@
 {
-  "version": "1.2.56",
+  "version": "1.2.57",
   "changelog": "Make long-tool and actionable-output protection activity-aware so sustained thinking, progress, and tool fragments do not trigger false timeouts; retain idle protection for genuinely stalled streams.\n修复长工具和可提交输出保护误把持续思考、进度及工具分片当成超时的问题：改为空闲感知看门狗，持续有活动时不打断，真正无活动时仍按配置保护并重试。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }

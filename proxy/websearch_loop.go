@@ -713,9 +713,7 @@ func newWebSearchSSESession(ctx context.Context, handler *Handler, w http.Respon
 	if !ok {
 		return nil, fmt.Errorf("streaming not supported")
 	}
-	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
+	prepareSSEHeaders(w)
 	responseModel := exposedModelID(model)
 	session := &webSearchSSESession{
 		ctx: ctx, handler: handler, w: w, flusher: flusher, model: model,

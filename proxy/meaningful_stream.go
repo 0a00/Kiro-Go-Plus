@@ -5,6 +5,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"unicode"
+	"unicode/utf8"
 )
 
 const maxActionableProbeBytes = 1 << 20
@@ -461,6 +462,23 @@ func nextThinkingTag(text string, offset int) (int, string, string) {
 
 func trailingThinkingTagPrefix(text string) int {
 	return trailingTagPrefix(text, "<thinking>", "<think>")
+}
+
+// safeUTF8PrefixBytes backs a byte boundary up to the previous UTF-8 rune
+// boundary. Tag look-ahead is byte-based, so a non-ASCII rune immediately
+// before a partial thinking tag must not be split when the visible prefix is
+// flushed.
+func safeUTF8PrefixBytes(text string, length int) int {
+	if length <= 0 {
+		return 0
+	}
+	if length >= len(text) {
+		return len(text)
+	}
+	for length > 0 && !utf8.RuneStart(text[length]) {
+		length--
+	}
+	return length
 }
 
 func trailingTagPrefix(text string, tags ...string) int {
