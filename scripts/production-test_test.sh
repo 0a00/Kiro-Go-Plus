@@ -79,4 +79,22 @@ assert_fails "zero phase timeout" \
   --dry-run --skip-web-search --skip-matrix --skip-load --skip-client-e2e >/dev/null
 [[ ! -e "$NETWORK_MARKER" ]] || fail "opted-in dry-run invoked curl"
 
+CLIENT_FAKE_BIN="$TMP_DIR/client-bin"
+mkdir -p "$CLIENT_FAKE_BIN"
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'set -Eeuo pipefail' \
+  'args=("$@")' \
+  '(( ${#args[@]} >= 2 )) || exit 42' \
+  'last=$((${#args[@]} - 1))' \
+  'separator=$((${#args[@]} - 2))' \
+  '[[ "${args[$separator]}" == "--" ]] || exit 42' \
+  '[[ "${args[$last]}" == "Reply exactly CLIENT_TEXT_STREAM_OK." ]] || exit 42' \
+  'printf "%s\\n" '\''{"type":"result","is_error":false,"result":"CLIENT_TEXT_STREAM_OK"}'\''' \
+  >"$CLIENT_FAKE_BIN/claude"
+chmod 700 "$CLIENT_FAKE_BIN/claude"
+env KIRO_DEV_API_KEY=test-key KIRO_DEV_BASE_URL=http://127.0.0.1:8080 \
+  PATH="$CLIENT_FAKE_BIN:$PATH" bash "$SCRIPT_DIR/client-e2e.sh" \
+  --scenarios text-stream --timeout 1s >/dev/null
+
 printf 'production-test regression checks passed\n'

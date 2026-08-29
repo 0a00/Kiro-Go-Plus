@@ -306,7 +306,7 @@ run_cli() {
       claude --bare --print --verbose --include-partial-messages \
         --setting-sources project --add-dir "$workspace" --model "$model" \
         --no-session-persistence --max-budget-usd "$MAX_BUDGET" \
-        --output-format stream-json "$@" "$prompt"
+        --output-format stream-json "$@" -- "$prompt"
   ) >"$output" 2>&1
 }
 
