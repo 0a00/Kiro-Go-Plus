@@ -102,6 +102,26 @@ check_compose() {
   fi
 }
 
+DOCKER_RESTART_NAME=""
+DOCKER_RESTART_IMAGE=""
+DOCKER_RESTART_DATA_DIR=""
+
+cleanup_docker_restart() {
+  if [[ -n "${DOCKER_RESTART_NAME:-}" ]]; then
+    docker rm -f "$DOCKER_RESTART_NAME" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "${DOCKER_RESTART_IMAGE:-}" ]]; then
+    docker image rm "$DOCKER_RESTART_IMAGE" >/dev/null 2>&1 || true
+  fi
+  if [[ -n "${DOCKER_RESTART_DATA_DIR:-}" ]]; then
+    rm -rf -- "$DOCKER_RESTART_DATA_DIR"
+  fi
+  DOCKER_RESTART_NAME=""
+  DOCKER_RESTART_IMAGE=""
+  DOCKER_RESTART_DATA_DIR=""
+  return 0
+}
+
 run_quick() {
   command -v go >/dev/null 2>&1 || die "go is required"
   info "verifying Go module checksums"
@@ -110,6 +130,14 @@ run_quick() {
   go test -shuffle=on -timeout=10m ./...
   info "running go vet"
   go vet ./...
+
+  info "checking Go formatting"
+  local unformatted
+  unformatted="$(gofmt -l .)"
+  if [[ -n "$unformatted" ]]; then
+    printf '%s\n' "$unformatted" >&2
+    die "Go files are not formatted; run gofmt -w on the listed files"
+  fi
 
   local tmp_dir
   tmp_dir="$(mktemp -d)"
@@ -170,15 +198,13 @@ run_docker_restart() {
   local image="kiro-go-plus-restart:${BASHPID}"
   local data_dir
   local master_key
+  DOCKER_RESTART_NAME="$name"
+  DOCKER_RESTART_IMAGE="$image"
   data_dir="$(mktemp -d)"
+  DOCKER_RESTART_DATA_DIR="$data_dir"
+  trap cleanup_docker_restart EXIT
   master_key="$(openssl rand -base64 32)"
   chmod 0777 "$data_dir"
-  cleanup_docker_restart() {
-    docker rm -f "$name" >/dev/null 2>&1 || true
-    docker image rm "$image" >/dev/null 2>&1 || true
-    rm -rf "$data_dir"
-  }
-  trap cleanup_docker_restart EXIT
 
   info "building isolated restart image"
   docker build --tag "$image" .

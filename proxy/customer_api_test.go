@@ -192,9 +192,9 @@ func TestCustomerLogsRejectInvalidLimit(t *testing.T) {
 func TestCustomerEndpointClassIsAllowlisted(t *testing.T) {
 	tests := map[string]string{
 		"https://runtime.eu.example.invalid/generateAssistantResponse?token=secret": "runtime",
-		"CodeWhisperer":                           "codewhisperer",
-		"amazon q":                                "amazonq",
-		"https://kiro.example.invalid":            "kiro",
+		"CodeWhisperer":                "codewhisperer",
+		"amazon q":                     "amazonq",
+		"https://kiro.example.invalid": "kiro",
 		"https://unknown.example.invalid/private": "",
 	}
 	for endpoint, want := range tests {
