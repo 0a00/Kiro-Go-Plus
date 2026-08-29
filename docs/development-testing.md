@@ -61,6 +61,45 @@ built-in tools, permits only the fixture tool, applies a small client budget,
 and deletes all temporary files. Set `KIRO_DEV_ALLOW_REMOTE=1` explicitly for a
 non-loopback `KIRO_DEV_BASE_URL`.
 
+## Production Verification
+
+`production-test.sh` is the protected end-to-end entry point for a deployed
+instance. It requires an explicit confirmation flag and reads the API key only
+from `KIRO_PROD_API_KEY`; remote targets additionally require
+`--allow-remote`. The dry run performs no network request and does not require a
+key:
+
+```bash
+bash scripts/production-test.sh --dry-run
+```
+
+Run the complete default suite with a dedicated, quota-limited production key:
+
+```bash
+read -rsp 'Production test API key: ' KIRO_PROD_API_KEY; printf '\n'
+export KIRO_PROD_API_KEY
+bash scripts/production-test.sh \
+  --base-url https://api.example.invalid --allow-remote --confirm-production
+unset KIRO_PROD_API_KEY
+```
+
+The phases are: liveness and read-only surface checks; authenticated
+observability, model, and `count_tokens` probes; all full protocol scenarios;
+every discovered Claude model over Anthropic, Chat Completions, and Responses
+in stream and non-stream modes; a bounded realistic mixed load; and the actual
+Claude Code harness. Claude Code cases cover plain streaming, thinking,
+isolated file Read/Write/Edit, Skills, parameterized and zero-argument MCP,
+repeated MCP calls, long streams, cancellation/recovery, and concurrent
+clients. Reports and logs are written to a private directory and are removed
+from the command's temporary workspace on exit.
+
+The default matrix and realistic load consume quota. For a low-impact
+preflight use `--skip-matrix --skip-load --skip-web-search`; use
+`--staircase` or `--soak` only as separate, explicitly bounded stress runs.
+`--keep-artifacts` preserves raw Claude Code streams for diagnosis and should
+be treated as sensitive. A phase failure is recorded without hiding later
+independent phases, and the final exit status is non-zero when any phase fails.
+
 ## Model, Load, and Soak Checks
 
 ```bash

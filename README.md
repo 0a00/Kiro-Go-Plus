@@ -216,6 +216,23 @@ closed-loop, fixed-rate, ramp, and realistic mixed-protocol load tests, plus
 bounded soak and post-load recovery checks. See
 [Local Development Testing](docs/development-testing.md).
 
+For a deployed service, run the protected complete verification entry point:
+
+```bash
+read -rsp 'Production test API key: ' KIRO_PROD_API_KEY; printf '\n'; export KIRO_PROD_API_KEY
+bash scripts/production-test.sh --base-url https://api.example.invalid \
+  --allow-remote --confirm-production
+unset KIRO_PROD_API_KEY
+```
+
+It exercises the supported API surfaces, authentication and observability,
+all discovered Claude models, stream/non-stream protocol paths, realistic
+bounded load, WebSearch, and real Claude Code Skill/MCP/file-tool,
+thinking, cancellation, and concurrency scenarios. Use
+`bash scripts/production-test.sh --dry-run` to inspect the plan without a key
+or network access. The default run consumes quota; reports are kept in a
+private temporary directory unless `--report-dir` is supplied.
+
 ## Per-account IPv6 Egress
 
 Admin Settings can bind direct account traffic to addresses from a routed IPv6 prefix:

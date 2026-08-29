@@ -214,6 +214,22 @@ go build -o kiro-go .
 闭环/固定速率/ramp/真实混合负载、有限额 soak 以及压测后恢复检查。完整用法与测试边界见
 [本地开发测试说明](docs/development-testing.md)。
 
+生产环境使用受保护的完整测试入口。API Key 只从环境变量读取，远程地址必须显式
+确认：
+
+```bash
+read -rsp '生产测试 API Key: ' KIRO_PROD_API_KEY; printf '\n'; export KIRO_PROD_API_KEY
+bash scripts/production-test.sh --base-url https://api.example.invalid \
+  --allow-remote --confirm-production
+unset KIRO_PROD_API_KEY
+```
+
+该测试会检查健康与只读接口、鉴权和统计、所有已发现 Claude 模型的三协议流/非流路径、
+真实混合负载、WebSearch，以及 Claude Code 的 Skill、MCP（含零参数和重复调用）、文件工具、
+思考、长流、取消恢复和并发场景。默认会消耗额度；先用
+`bash scripts/production-test.sh --dry-run` 检查计划，或用 `--skip-matrix --skip-load --skip-web-search`
+执行低影响预检。报告保存在私有临时目录，`--keep-artifacts` 保存的原始流可能包含敏感提示词。
+
 ## 每账号 IPv6 出口
 
 后台设置支持从服务器已路由的 IPv6 地址段为直连账号分配出口：

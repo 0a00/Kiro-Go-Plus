@@ -4,7 +4,7 @@ set -Eeuo pipefail
 usage() {
   cat <<'EOF'
 Usage:
-  bash scripts/dev-test.sh [quick|full|fault|pressure|docker-restart|fuzz|bench|live|live-full|client-e2e|matrix|load|staircase|soak|all] [options]
+  bash scripts/dev-test.sh [quick|full|fault|pressure|docker-restart|fuzz|bench|live|live-full|client-e2e|production|matrix|load|staircase|soak|all] [options]
 
 Modes:
   quick       Offline unit tests, vet, build, JavaScript, shell, and Compose checks.
@@ -18,6 +18,7 @@ Modes:
   live        Run the smoke suite against a local service.
   live-full   Run reasoning, Skills, tools/MCP, cache, images, long streams, and cancellation.
   client-e2e  Use Claude Code to discover a disposable Skill and execute a local MCP fixture.
+  production  Run the protected production functional, model, load, and Claude Code suite.
   matrix      Test selected models across Anthropic, Chat Completions, and Responses.
   load        Run bounded mixed-protocol stream/non-stream requests (default: 5 workers, 10 requests).
   staircase   Run concurrency levels 1,5,10,20,50,100 (explicitly quota-consuming).
@@ -27,7 +28,13 @@ Modes:
 Live modes require KIRO_DEV_API_KEY in the environment. Optional variables:
   KIRO_DEV_BASE_URL, KIRO_DEV_MODEL, KIRO_DEV_THINKING_MODEL, KIRO_DEV_MODELS,
   KIRO_DEV_FUZZ_TIME. client-e2e also accepts KIRO_DEV_ALLOW_REMOTE,
-  KIRO_DEV_CLIENT_TIMEOUT, and KIRO_DEV_MAX_BUDGET_USD.
+  KIRO_DEV_CLIENT_TIMEOUT, KIRO_DEV_CLIENT_CANCEL_AFTER,
+  KIRO_DEV_CLIENT_CONCURRENCY, and KIRO_DEV_MAX_BUDGET_USD.
+
+Production mode requires KIRO_PROD_API_KEY and --confirm-production. Use
+KIRO_PROD_BASE_URL, KIRO_PROD_ALLOW_REMOTE, KIRO_PROD_MODEL,
+KIRO_PROD_THINKING_MODEL, KIRO_PROD_CLIENT_SCENARIOS, and KIRO_PROD_REPORT_DIR
+to configure the target and report location. It is intentionally quota-consuming.
 
 Load controls:
   --load-profile marker|realistic, --load-max-tokens N, --warmup-requests N,
@@ -43,6 +50,7 @@ Examples:
   bash scripts/dev-test.sh quick
   bash scripts/dev-test.sh live-full --web-search
   bash scripts/dev-test.sh client-e2e
+  KIRO_PROD_API_KEY=... bash scripts/dev-test.sh production --confirm-production
   bash scripts/dev-test.sh matrix --models claude-sonnet-5,claude-sonnet-5-thinking
   bash scripts/dev-test.sh load --concurrency 20 --requests 100
   bash scripts/dev-test.sh load --load-profile realistic --load-max-tokens 256 \
@@ -160,6 +168,8 @@ run_quick() {
 
   info "checking shell syntax and tracked sensitive paths"
   bash -n scripts/*.sh
+  info "checking production test safety gates"
+  bash scripts/production-test_test.sh
   check_sensitive_paths
   check_compose
 }
@@ -288,6 +298,9 @@ case "$MODE" in
     ;;
   client-e2e)
     bash scripts/client-e2e.sh "$@"
+    ;;
+  production)
+    bash scripts/production-test.sh "$@"
     ;;
   matrix)
     run_live matrix "$@"

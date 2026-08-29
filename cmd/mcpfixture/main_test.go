@@ -47,6 +47,39 @@ func TestMCPFixtureInitializeListCallAndAudit(t *testing.T) {
 	}
 }
 
+func TestMCPFixtureSupportsZeroArgumentAndRepeatedCalls(t *testing.T) {
+	auditPath := filepath.Join(t.TempDir(), "audit.log")
+	t.Setenv("KIRO_MCP_FIXTURE_AUDIT", auditPath)
+
+	zeroArgument := handleRequest(rpcRequest{
+		JSONRPC: "2.0", ID: json.RawMessage("1"), Method: "tools/call",
+		Params: json.RawMessage(`{"name":"devcheck_no_args","arguments":{}}`),
+	})
+	encoded, _ := json.Marshal(zeroArgument.Result)
+	if zeroArgument.Error != nil || !containsJSONText(encoded, "MCP_NO_ARGS_OK") {
+		t.Fatalf("zero-argument tool response: %s error=%v", encoded, zeroArgument.Error)
+	}
+
+	for id, value := range map[string]string{"2": "A", "3": "B"} {
+		call := handleRequest(rpcRequest{
+			JSONRPC: "2.0", ID: json.RawMessage(id), Method: "tools/call",
+			Params: json.RawMessage(`{"name":"devcheck_repeat","arguments":{"value":"` + value + `"}}`),
+		})
+		encoded, _ = json.Marshal(call.Result)
+		if call.Error != nil || !containsJSONText(encoded, value) {
+			t.Fatalf("repeated tool response: %s error=%v", encoded, call.Error)
+		}
+	}
+
+	audit, err := os.ReadFile(auditPath)
+	if err != nil {
+		t.Fatalf("read audit: %v", err)
+	}
+	if string(audit) != fixtureNoArgToolName+"\n"+fixtureRepeatToolName+"\n"+fixtureRepeatToolName+"\n" {
+		t.Fatalf("audit = %q", audit)
+	}
+}
+
 func TestMCPFixtureRejectsBadCallsAndUnknownMethods(t *testing.T) {
 	badCall := handleRequest(rpcRequest{JSONRPC: "2.0", ID: json.RawMessage("1"), Method: "tools/call", Params: json.RawMessage(`{"name":"wrong"}`)})
 	encoded, _ := json.Marshal(badCall.Result)

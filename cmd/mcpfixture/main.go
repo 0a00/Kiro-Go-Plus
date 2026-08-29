@@ -9,7 +9,11 @@ import (
 	"strings"
 )
 
-const fixtureToolName = "devcheck_echo"
+const (
+	fixtureToolName       = "devcheck_echo"
+	fixtureNoArgToolName  = "devcheck_no_args"
+	fixtureRepeatToolName = "devcheck_repeat"
+)
 
 type rpcRequest struct {
 	JSONRPC string          `json:"jsonrpc"`
@@ -79,34 +83,72 @@ func handleRequest(request rpcRequest) *rpcResponse {
 	case "ping":
 		response.Result = map[string]interface{}{}
 	case "tools/list":
-		response.Result = map[string]interface{}{"tools": []interface{}{map[string]interface{}{
-			"name": fixtureToolName, "description": "Return a deterministic value for Kiro-Go Plus client testing.",
-			"inputSchema": map[string]interface{}{
-				"type": "object", "properties": map[string]interface{}{"value": map[string]interface{}{"type": "string"}},
-				"required": []string{"value"}, "additionalProperties": false,
-			},
-		}}}
+		response.Result = map[string]interface{}{"tools": fixtureTools()}
 	case "tools/call":
 		var params struct {
-			Name      string `json:"name"`
-			Arguments struct {
-				Value string `json:"value"`
-			} `json:"arguments"`
+			Name      string          `json:"name"`
+			Arguments json.RawMessage `json:"arguments"`
 		}
-		if json.Unmarshal(request.Params, &params) != nil || params.Name != fixtureToolName || params.Arguments.Value == "" {
+		if json.Unmarshal(request.Params, &params) != nil {
 			response.Result = map[string]interface{}{
 				"content": []interface{}{map[string]interface{}{"type": "text", "text": "invalid fixture tool call"}}, "isError": true,
 			}
 			break
 		}
-		recordToolCall()
-		response.Result = map[string]interface{}{
-			"content": []interface{}{map[string]interface{}{"type": "text", "text": params.Arguments.Value}}, "isError": false,
-		}
+		response.Result = handleToolCall(params.Name, params.Arguments)
 	default:
 		return errorResponse(request.ID, -32601, "method not found")
 	}
 	return response
+}
+
+func fixtureTools() []interface{} {
+	valueSchema := map[string]interface{}{
+		"type": "object", "properties": map[string]interface{}{"value": map[string]interface{}{"type": "string"}},
+		"required": []string{"value"}, "additionalProperties": false,
+	}
+	return []interface{}{
+		map[string]interface{}{"name": fixtureToolName, "description": "Return a deterministic value for Kiro-Go Plus client testing.", "inputSchema": valueSchema},
+		map[string]interface{}{"name": fixtureNoArgToolName, "description": "Return a deterministic value without accepting arguments.", "inputSchema": map[string]interface{}{
+			"type": "object", "properties": map[string]interface{}{}, "additionalProperties": false,
+		}},
+		map[string]interface{}{"name": fixtureRepeatToolName, "description": "Return a value and record repeated tool dispatches.", "inputSchema": valueSchema},
+	}
+}
+
+func handleToolCall(name string, rawArguments json.RawMessage) map[string]interface{} {
+	arguments := strings.TrimSpace(string(rawArguments))
+	switch name {
+	case fixtureToolName, fixtureRepeatToolName:
+		var input struct {
+			Value string `json:"value"`
+		}
+		if arguments == "" || json.Unmarshal(rawArguments, &input) != nil || strings.TrimSpace(input.Value) == "" {
+			return fixtureToolError("invalid fixture tool call")
+		}
+		recordNamedToolCall(name)
+		return fixtureToolResult(input.Value)
+	case fixtureNoArgToolName:
+		if arguments != "" && arguments != "{}" && arguments != "null" {
+			return fixtureToolError("zero-argument tool received input")
+		}
+		recordNamedToolCall(name)
+		return fixtureToolResult("MCP_NO_ARGS_OK")
+	default:
+		return fixtureToolError("unknown fixture tool")
+	}
+}
+
+func fixtureToolResult(value string) map[string]interface{} {
+	return map[string]interface{}{
+		"content": []interface{}{map[string]interface{}{"type": "text", "text": value}}, "isError": false,
+	}
+}
+
+func fixtureToolError(message string) map[string]interface{} {
+	return map[string]interface{}{
+		"content": []interface{}{map[string]interface{}{"type": "text", "text": message}}, "isError": true,
+	}
 }
 
 func errorResponse(id json.RawMessage, code int, message string) *rpcResponse {
@@ -117,6 +159,10 @@ func errorResponse(id json.RawMessage, code int, message string) *rpcResponse {
 }
 
 func recordToolCall() {
+	recordNamedToolCall(fixtureToolName)
+}
+
+func recordNamedToolCall(name string) {
 	path := strings.TrimSpace(os.Getenv("KIRO_MCP_FIXTURE_AUDIT"))
 	if path == "" {
 		return
@@ -126,6 +172,6 @@ func recordToolCall() {
 		return
 	}
 	_ = file.Chmod(0o600)
-	_, _ = file.WriteString(fixtureToolName + "\n")
+	_, _ = file.WriteString(name + "\n")
 	_ = file.Close()
 }
