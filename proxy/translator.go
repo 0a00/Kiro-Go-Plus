@@ -2050,7 +2050,64 @@ func sanitizeKiroHistory(history []KiroHistoryMessage, currentToolResultIDs map[
 
 	// Dropping hollow assistant turns can leave history starting with an
 	// assistant message; re-trim so it begins with a user turn.
-	return trimLeadingAssistantHistory(cleaned)
+	cleaned = trimLeadingAssistantHistory(cleaned)
+
+	// Final invariant pass: upstream rejects the whole request with
+	// TOOL_USE_RESULT_MISMATCH when any history tool_result lacks a matching
+	// tool_use in the immediately preceding assistant turn. Earlier passes can
+	// still leave such an orphan behind (for example an image-bearing tool result
+	// turn keeps its structured results while the assistant turn that produced
+	// them was flattened). Narrate any orphan as text instead of shipping it.
+	narrateOrphanedHistoryToolResults(cleaned, toolNames)
+
+	return cleaned
+}
+
+// narrateOrphanedHistoryToolResults enforces the upstream pairing invariant:
+// a structured tool_result may only survive in history when the previous entry
+// is an assistant turn whose structured toolUses cover every result ID.
+func narrateOrphanedHistoryToolResults(history []KiroHistoryMessage, toolNames map[string]string) {
+	for i := range history {
+		user := history[i].UserInputMessage
+		if user == nil || user.UserInputMessageContext == nil {
+			continue
+		}
+		ctx := user.UserInputMessageContext
+		if len(ctx.ToolResults) == 0 {
+			continue
+		}
+
+		paired := false
+		if i > 0 {
+			if prev := history[i-1].AssistantResponseMessage; prev != nil && len(prev.ToolUses) > 0 {
+				available := make(map[string]bool, len(prev.ToolUses))
+				for _, tu := range prev.ToolUses {
+					available[tu.ToolUseID] = true
+				}
+				paired = true
+				for _, tr := range ctx.ToolResults {
+					if !available[tr.ToolUseID] {
+						paired = false
+						break
+					}
+				}
+			}
+		}
+		if paired {
+			continue
+		}
+
+		narrated := narrateToolResults(ctx.ToolResults, toolNames)
+		user.Content = joinHistoryText(user.Content, narrated)
+		if strings.TrimSpace(user.Content) == "" && len(user.Images) == 0 {
+			user.Content = minimalFallbackUserContent
+		}
+		ctx.ToolResults = nil
+		ctx.Tools = nil
+		if len(ctx.Tools) == 0 && len(ctx.ToolResults) == 0 {
+			user.UserInputMessageContext = nil
+		}
+	}
 }
 
 // stripTextualThinkingBlocks removes proxy-style reasoning tags replayed as

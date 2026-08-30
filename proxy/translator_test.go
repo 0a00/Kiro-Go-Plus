@@ -803,14 +803,31 @@ func TestOpenAIToolResultImageCarriedWhenFollowedByUser(t *testing.T) {
 	payload := OpenAIToKiro(req, false)
 
 	var toolHistImages int
-	for _, h := range payload.ConversationState.History {
-		if h.UserInputMessage != nil && h.UserInputMessage.UserInputMessageContext != nil &&
-			len(h.UserInputMessage.UserInputMessageContext.ToolResults) > 0 {
-			toolHistImages += len(h.UserInputMessage.Images)
+	var orphanToolResults int
+	for i, h := range payload.ConversationState.History {
+		if h.UserInputMessage == nil {
+			continue
+		}
+		toolHistImages += len(h.UserInputMessage.Images)
+		ctx := h.UserInputMessage.UserInputMessageContext
+		if ctx == nil || len(ctx.ToolResults) == 0 {
+			continue
+		}
+		paired := false
+		if i > 0 {
+			if prev := payload.ConversationState.History[i-1].AssistantResponseMessage; prev != nil {
+				paired = len(prev.ToolUses) > 0
+			}
+		}
+		if !paired {
+			orphanToolResults++
 		}
 	}
 	if toolHistImages != 1 {
 		t.Fatalf("expected tool image carried on the flushed tool-result history entry, got %d", toolHistImages)
+	}
+	if orphanToolResults != 0 {
+		t.Fatalf("expected no orphaned structured tool results in history, got %d", orphanToolResults)
 	}
 
 	cur := payload.ConversationState.CurrentMessage.UserInputMessage
