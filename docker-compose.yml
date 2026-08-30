@@ -21,6 +21,7 @@ services:
       - KIRO_MASTER_KEY=${KIRO_MASTER_KEY:-}
       - KIRO_SSO_CALLBACK_BIND=0.0.0.0
       - KIRO_PROFILE_REGIONS=${KIRO_PROFILE_REGIONS:-us-east-1,eu-central-1}
+      - KIRO_MAX_PAYLOAD_BYTES=${KIRO_MAX_PAYLOAD_BYTES:-921600}
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:$${HEALTHCHECK_PORT:-8080}/health || exit 1"]
       interval: 30s

@@ -68,9 +68,17 @@ const toolResultTruncatedNote = "[Tool result omitted to fit the model's input l
 // payload exceeds this size we drop the oldest history turns (keeping the
 // system priming, the most recent turns, the active tool turn, and the current
 // message) and insert a placeholder note so the model knows context was elided.
-// The limit is kept conservatively below the observed upstream threshold to
-// leave room for headers and minor serialization overhead.
-const maxPayloadBytes = 900 * 1024
+// The default is kept conservatively below the observed upstream threshold to
+// leave room for headers and minor serialization overhead; a deployment that
+// measured its own threshold can override it with KIRO_MAX_PAYLOAD_BYTES, or
+// set that variable to 0 to rely on token limits alone.
+var maxPayloadBytes = config.MaxPayloadBytes()
+
+// payloadExceedsByteCap reports whether a serialized size is over the ceiling.
+// A ceiling of 0 disables the byte check; the token budget still applies.
+func payloadExceedsByteCap(size int) bool {
+	return maxPayloadBytes > 0 && size > maxPayloadBytes
+}
 
 // truncationPlaceholder is inserted in history where older turns were dropped to
 // fit within maxPayloadBytes.
@@ -2108,7 +2116,7 @@ func truncatePayloadToLimit(payload *KiroPayload, hasPriming bool) {
 		runningBytes += entryBytes[i]
 		runningTokens += entryTokens[i]
 		kept := len(conversation) - i
-		overLimit := runningBytes > maxPayloadBytes || (tokenLimit > 0 && runningTokens > tokenLimit)
+		overLimit := payloadExceedsByteCap(runningBytes) || (tokenLimit > 0 && runningTokens > tokenLimit)
 		if overLimit && kept > minRecentHistoryTurns {
 			break
 		}
@@ -2147,7 +2155,7 @@ func truncatePayloadToLimit(payload *KiroPayload, hasPriming bool) {
 		bytesWithoutActive := payloadByteSize(payload) - historyEntryByteSize(activeEntry)
 		tokensWithoutActive := estimateKiroPayloadTokens(payload) - estimateKiroHistoryEntryTokens(activeEntry)
 		tokenFits := tokenLimit == 0 || tokensWithoutActive <= tokenLimit-tokenBudgetSlack
-		if bytesWithoutActive <= maxPayloadBytes && tokenFits {
+		if !payloadExceedsByteCap(bytesWithoutActive) && tokenFits {
 			keepFrom = len(conversation)
 			rebuild(keepFrom)
 			detachOrphanedToolResults(payload)
@@ -2195,7 +2203,7 @@ func payloadInputTokenLimit(payload *KiroPayload) int {
 }
 
 func payloadFitsInputLimits(payload *KiroPayload, tokenLimit int) bool {
-	if payloadByteSize(payload) > maxPayloadBytes {
+	if payloadExceedsByteCap(payloadByteSize(payload)) {
 		return false
 	}
 	return tokenLimit <= 0 || estimateKiroPayloadTokens(payload) <= tokenLimit
@@ -2313,7 +2321,7 @@ func truncateCurrentMessage(payload *KiroPayload, tokenLimit int) {
 
 func fitPayloadTextBytes(payload *KiroPayload, text string) string {
 	size := payloadByteSize(payload)
-	if text == "" || size <= maxPayloadBytes {
+	if text == "" || !payloadExceedsByteCap(size) {
 		return text
 	}
 	target := len(text) - (size - maxPayloadBytes) - 16
