@@ -501,11 +501,7 @@ func (h *Handler) callClaudeWebSearchRound(
 		if !thinking {
 			finalThinking = ""
 		}
-		if realInputTokens > 0 {
-			inputTokens = realInputTokens
-		} else if inputTokens <= 0 {
-			inputTokens = estimatedInputTokens
-		}
+		inputTokens = resolveInputTokenCount(inputTokens, upstreamUsage, realInputTokens, estimatedInputTokens)
 		cacheUsage, inputTokens := h.promptCache.ResolveUsage(syntheticCacheUsage, upstreamUsage, inputTokens, cacheProfile)
 		cacheDiagnostic = finalizePromptCacheDiagnostic(cacheDiagnostic, upstreamUsage, cacheUsage, inputTokens)
 		payload.setPromptCacheDiagnostic(cacheDiagnostic)
@@ -653,17 +649,21 @@ func buildWebSearchLoopResponse(model string, result *webSearchLoopResult) *Clau
 	if result == nil {
 		return nil
 	}
+	inputTokens := maxInt(result.inputTokens, 0)
+	outputTokens := maxInt(result.outputTokens, 0)
+	thinkingTokens := maxInt(result.thinkingTokens, 0)
+	cacheUsage := reconcilePromptCacheUsage(result.cacheUsage, inputTokens)
 	return &ClaudeResponse{
 		ID: "msg_" + uuid.New().String(), Type: "message", Role: "assistant", Content: result.content,
 		Model: exposedModelID(model), StopReason: result.stopReason,
 		Usage: ClaudeUsage{
-			InputTokens:  billedClaudeInputTokens(result.inputTokens, result.cacheUsage),
-			OutputTokens: result.outputTokens, ThinkingTokens: result.thinkingTokens,
-			CacheCreationInputTokens: result.cacheUsage.CacheCreationInputTokens,
-			CacheReadInputTokens:     result.cacheUsage.CacheReadInputTokens,
+			InputTokens:  billedClaudeInputTokens(inputTokens, cacheUsage),
+			OutputTokens: outputTokens, ThinkingTokens: thinkingTokens,
+			CacheCreationInputTokens: cacheUsage.CacheCreationInputTokens,
+			CacheReadInputTokens:     cacheUsage.CacheReadInputTokens,
 			CacheCreation: &ClaudeCacheCreationUsage{
-				Ephemeral5mInputTokens: result.cacheUsage.CacheCreation5mInputTokens,
-				Ephemeral1hInputTokens: result.cacheUsage.CacheCreation1hInputTokens,
+				Ephemeral5mInputTokens: cacheUsage.CacheCreation5mInputTokens,
+				Ephemeral1hInputTokens: cacheUsage.CacheCreation1hInputTokens,
 			},
 			ServerToolUse: &ClaudeServerToolUsage{WebSearchRequests: result.webSearchRequests},
 		},

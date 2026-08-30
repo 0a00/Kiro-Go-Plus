@@ -167,6 +167,7 @@ type customerRequestLogView struct {
 	CacheMatchedInputTokens  int     `json:"cacheMatchedInputTokens,omitempty"`
 	CacheEligibleInputTokens int     `json:"cacheEligibleInputTokens,omitempty"`
 	CacheReadEfficiency      float64 `json:"cacheReadEfficiency,omitempty"`
+	CacheReportedReadRate    float64 `json:"cacheReportedReadRate,omitempty"`
 	CacheAccountingMode      string  `json:"cacheAccountingMode,omitempty"`
 	WebSearchRequests        int     `json:"webSearchRequests,omitempty"`
 	RequestToolCount         int     `json:"requestToolCount,omitempty"`
@@ -233,6 +234,7 @@ func customerRequestLog(entry requestLogEntry) customerRequestLogView {
 		CacheMatchedInputTokens:  entry.CacheMatchedInputTokens,
 		CacheEligibleInputTokens: entry.CacheEligibleInputTokens,
 		CacheReadEfficiency:      entry.CacheReadEfficiency,
+		CacheReportedReadRate:    entry.CacheReportedReadRate,
 		CacheAccountingMode:      entry.CacheAccountingMode,
 		WebSearchRequests:        entry.WebSearchRequests,
 		RequestToolCount:         entry.RequestToolCount,

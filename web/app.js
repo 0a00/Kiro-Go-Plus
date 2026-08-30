@@ -808,6 +808,7 @@
         cacheDetails.push(t('requests.cacheMatched', item.cacheMatchedInputTokens || 0, item.cacheEligibleInputTokens || 0));
       }
       if (item.cacheReadEfficiency) cacheDetails.push(t('requests.cacheEfficiency') + ': ' + (item.cacheReadEfficiency * 100).toFixed(1) + '%');
+      if (item.cacheReportedReadRate) cacheDetails.push(t('requests.cacheReportedRate') + ': ' + (item.cacheReportedReadRate * 100).toFixed(1) + '%');
       if (item.cacheTargetApplied) cacheDetails.push(t('requests.cacheTarget', ((item.cacheTargetReadRate || 0) * 100).toFixed(1)));
       if (item.hasUpstreamCacheBreakdown) {
         cacheDetails.push(t('requests.cacheUpstreamActual', item.upstreamCacheReadInputTokens || 0, item.upstreamCacheCreationInputTokens || 0));
@@ -2766,6 +2767,7 @@
   function renderPromptCacheStats(stats) {
     $('cacheStatEntries').textContent = formatNumber(stats.entries || 0) + ' / ' + formatNumber(stats.accounts || 0);
     $('cacheStatHitRate').textContent = ((Number(stats.hitRate) || 0) * 100).toFixed(1) + '%';
+    $('cacheStatReadRate').textContent = ((Number(stats.cacheReadRate) || 0) * 100).toFixed(1) + '%';
     $('cacheStatReadTokens').textContent = formatNumber(stats.cacheReadTokens || 0);
     $('cacheStatCreationTokens').textContent = formatNumber(stats.cacheCreationTokens || 0);
     $('cacheStatSkipped').textContent = formatNumber(stats.cacheSkipped || 0);

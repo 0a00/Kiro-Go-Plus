@@ -377,11 +377,7 @@ func (h *Handler) handleResponsesNonStream(
 			reasoningContent = ""
 		}
 
-		if realInputTokens > 0 {
-			inputTokens = realInputTokens
-		} else if inputTokens <= 0 {
-			inputTokens = estimatedInputTokens
-		}
+		inputTokens = resolveInputTokenCount(inputTokens, upstreamUsage, realInputTokens, estimatedInputTokens)
 		cacheUsage, inputTokens := h.promptCache.ResolveUsage(syntheticCacheUsage, upstreamUsage, inputTokens, cacheProfile)
 		cacheDiagnostic = finalizePromptCacheDiagnostic(cacheDiagnostic, upstreamUsage, cacheUsage, inputTokens)
 		payload.setPromptCacheDiagnostic(cacheDiagnostic)
@@ -1057,11 +1053,7 @@ func (h *Handler) handleResponsesStream(
 			})
 		}
 
-		if realInputTokens > 0 {
-			inputTokens = realInputTokens
-		} else if inputTokens <= 0 {
-			inputTokens = estimatedInputTokens
-		}
+		inputTokens = resolveInputTokenCount(inputTokens, upstreamUsage, realInputTokens, estimatedInputTokens)
 		cacheUsage, inputTokens := h.promptCache.ResolveUsage(syntheticCacheUsage, upstreamUsage, inputTokens, cacheProfile)
 		cacheDiagnostic = finalizePromptCacheDiagnostic(cacheDiagnostic, upstreamUsage, cacheUsage, inputTokens)
 		payload.setPromptCacheDiagnostic(cacheDiagnostic)

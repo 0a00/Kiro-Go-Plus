@@ -35,6 +35,10 @@ type promptCacheUsage struct {
 	CacheReadInputTokens       int
 	CacheCreation5mInputTokens int
 	CacheCreation1hInputTokens int
+	// totalInputTokens is the denominator used by downstream-compatible
+	// accounting and statistics. It is intentionally kept separate from the
+	// Claude billed input bucket, which excludes cache reads and writes.
+	totalInputTokens int
 
 	localMatchedInputTokens int
 	targetReadRate          float64
@@ -54,6 +58,7 @@ type promptCacheDiagnostic struct {
 	MatchedInputTokens  int
 	EligibleInputTokens int
 	ReadEfficiency      float64
+	ReportedReadRate    float64
 	AccountingMode      string
 	TargetReadRate      float64
 	TargetApplied       bool
@@ -72,6 +77,7 @@ func (d promptCacheDiagnostic) Apply(entry *requestLogEntry) {
 	entry.CacheMatchedInputTokens = d.MatchedInputTokens
 	entry.CacheEligibleInputTokens = d.EligibleInputTokens
 	entry.CacheReadEfficiency = d.ReadEfficiency
+	entry.CacheReportedReadRate = d.ReportedReadRate
 	entry.CacheAccountingMode = d.AccountingMode
 	entry.CacheTargetReadRate = d.TargetReadRate
 	entry.CacheTargetApplied = d.TargetApplied
@@ -154,6 +160,8 @@ type promptCacheTracker struct {
 	cacheMisses          atomic.Uint64
 	cacheReadTokens      atomic.Uint64
 	cacheCreationTokens  atomic.Uint64
+	trackedInputTokens   atomic.Uint64
+	uncachedInputTokens  atomic.Uint64
 	cacheSkipped         atomic.Uint64
 	stateGeneration      atomic.Uint64
 	persistedGeneration  atomic.Uint64
@@ -172,6 +180,9 @@ type promptCacheStats struct {
 	HitRate             float64           `json:"hitRate"`
 	CacheReadTokens     uint64            `json:"cacheReadTokens"`
 	CacheCreationTokens uint64            `json:"cacheCreationTokens"`
+	TrackedInputTokens  uint64            `json:"trackedInputTokens"`
+	UncachedInputTokens uint64            `json:"uncachedInputTokens"`
+	CacheReadRate       float64           `json:"cacheReadRate"`
 	MissReasons         map[string]uint64 `json:"missReasons,omitempty"`
 }
 
@@ -1158,15 +1169,28 @@ func (t *promptCacheTracker) RecordDecision(usage promptCacheUsage, diagnostic p
 		return
 	}
 	t.trackedRequests.Add(1)
-	if usage.CacheReadInputTokens > 0 {
+	totalInputTokens := usage.totalInputTokens
+	if totalInputTokens <= 0 {
+		// Keep direct callers and legacy tests useful even when they do not pass
+		// through ResolveUsage, which is where the normal denominator is set.
+		totalInputTokens = maxInt(usage.CacheReadInputTokens, 0) + maxInt(usage.CacheCreationInputTokens, 0)
+	}
+	readTokens := minInt(maxInt(usage.CacheReadInputTokens, 0), maxInt(totalInputTokens, 0))
+	creationTokens := minInt(maxInt(usage.CacheCreationInputTokens, 0), maxInt(totalInputTokens-readTokens, 0))
+	uncachedTokens := maxInt(totalInputTokens-readTokens-creationTokens, 0)
+	if totalInputTokens > 0 {
+		t.trackedInputTokens.Add(uint64(totalInputTokens))
+		t.uncachedInputTokens.Add(uint64(uncachedTokens))
+	}
+	if readTokens > 0 {
 		t.cacheHits.Add(1)
-		t.cacheReadTokens.Add(uint64(usage.CacheReadInputTokens))
+		t.cacheReadTokens.Add(uint64(readTokens))
 	} else {
 		t.cacheMisses.Add(1)
 		t.recordMissReason(diagnostic.Reason)
 	}
-	if usage.CacheCreationInputTokens > 0 {
-		t.cacheCreationTokens.Add(uint64(usage.CacheCreationInputTokens))
+	if creationTokens > 0 {
+		t.cacheCreationTokens.Add(uint64(creationTokens))
 	}
 }
 
@@ -1195,6 +1219,8 @@ func (t *promptCacheTracker) Stats() promptCacheStats {
 		CacheSkipped:        t.cacheSkipped.Load(),
 		CacheReadTokens:     t.cacheReadTokens.Load(),
 		CacheCreationTokens: t.cacheCreationTokens.Load(),
+		TrackedInputTokens:  t.trackedInputTokens.Load(),
+		UncachedInputTokens: t.uncachedInputTokens.Load(),
 	}
 	t.diagnosticMu.Lock()
 	stats.MissReasons = make(map[string]uint64, len(t.missReasons))
@@ -1210,6 +1236,9 @@ func (t *promptCacheTracker) Stats() promptCacheStats {
 	}
 	if stats.TrackedRequests > 0 {
 		stats.HitRate = float64(stats.CacheHits) / float64(stats.TrackedRequests)
+	}
+	if stats.TrackedInputTokens > 0 {
+		stats.CacheReadRate = float64(stats.CacheReadTokens) / float64(stats.TrackedInputTokens)
 	}
 	return stats
 }
@@ -1236,6 +1265,8 @@ func (t *promptCacheTracker) Clear() {
 	t.cacheMisses.Store(0)
 	t.cacheReadTokens.Store(0)
 	t.cacheCreationTokens.Store(0)
+	t.trackedInputTokens.Store(0)
+	t.uncachedInputTokens.Store(0)
 	t.cacheSkipped.Store(0)
 	t.diagnosticMu.Lock()
 	t.missReasons = make(map[string]uint64)
@@ -1653,7 +1684,7 @@ func reconcilePromptCacheUsage(usage promptCacheUsage, inputTokens int) promptCa
 
 	usage.CacheCreationInputTokens = maxInt(usage.CacheCreationInputTokens, 0)
 	usage.CacheReadInputTokens = maxInt(usage.CacheReadInputTokens, 0)
-	cacheTokens := usage.CacheCreationInputTokens + usage.CacheReadInputTokens
+	cacheTokens := saturatingTokenAdd(usage.CacheCreationInputTokens, usage.CacheReadInputTokens)
 	if cacheTokens > inputTokens {
 		creation := int(math.Round(float64(usage.CacheCreationInputTokens) * float64(inputTokens) / float64(cacheTokens)))
 		creation = minInt(maxInt(creation, 0), inputTokens)
@@ -1667,7 +1698,7 @@ func reconcilePromptCacheUsage(usage promptCacheUsage, inputTokens int) promptCa
 		usage.CacheCreation1hInputTokens = 0
 		return usage
 	}
-	breakdownTotal := maxInt(usage.CacheCreation5mInputTokens, 0) + maxInt(usage.CacheCreation1hInputTokens, 0)
+	breakdownTotal := saturatingTokenAdd(usage.CacheCreation5mInputTokens, usage.CacheCreation1hInputTokens)
 	if breakdownTotal == 0 {
 		usage.CacheCreation5mInputTokens = creation
 		usage.CacheCreation1hInputTokens = 0
@@ -1678,6 +1709,31 @@ func reconcilePromptCacheUsage(usage promptCacheUsage, inputTokens int) promptCa
 	usage.CacheCreation5mInputTokens = cache5m
 	usage.CacheCreation1hInputTokens = creation - cache5m
 	return usage
+}
+
+// targetPromptCacheReadTokens chooses an integer read bucket whose ratio is
+// inside the configured range whenever the input is large enough to represent
+// that range. The clamp is applied after rounding so a downstream aggregator
+// cannot observe a value just outside the requested bounds because of integer
+// token counts.
+func targetPromptCacheReadTokens(inputTokens int, targetRate, minRate, maxRate float64) int {
+	if inputTokens <= 0 {
+		return 0
+	}
+	minRate, maxRate = normalizeEfficiencyRange(minRate, maxRate)
+	targetRate = clampFloat(targetRate, minRate, maxRate)
+	desired := int(math.Round(float64(inputTokens) * targetRate))
+	minimum := int(math.Ceil(float64(inputTokens) * minRate))
+	maximum := int(math.Floor(float64(inputTokens) * maxRate))
+	minimum = minInt(maxInt(minimum, 0), inputTokens)
+	maximum = minInt(maxInt(maximum, 0), inputTokens)
+	if minimum <= maximum {
+		return minInt(maxInt(desired, minimum), maximum)
+	}
+	// Very small inputs may not contain an integer within a fractional range.
+	// Return the closest rounded value in that case; normal cacheable prompts
+	// are large enough for the bounded path above.
+	return minInt(maxInt(desired, 0), inputTokens)
 }
 
 func (t *promptCacheTracker) ResolveUsage(synthetic promptCacheUsage, upstream KiroTokenUsage, inputTokens int, profile *promptCacheProfile) (promptCacheUsage, int) {
@@ -1700,12 +1756,10 @@ func resolvePromptCacheUsage(synthetic promptCacheUsage, upstream KiroTokenUsage
 }
 
 func resolvePromptCacheUsageForMode(synthetic promptCacheUsage, upstream KiroTokenUsage, inputTokens int, profile *promptCacheProfile, mode string, targetMin, targetMax float64) (promptCacheUsage, int) {
-	if upstream.HasCacheBreakdown {
-		if upstream.hasUncachedBreakdown {
-			inputTokens = maxInt(upstream.UncachedInputTokens, 0) + maxInt(upstream.CacheReadInputTokens, 0) + maxInt(upstream.CacheCreationInputTokens, 0)
-		} else if upstream.InputTokens > 0 {
-			inputTokens = upstream.InputTokens
-		}
+	upstream = normalizeKiroTokenUsage(upstream)
+	inputTokens = maxInt(inputTokens, 0)
+	if upstream.InputTokens > 0 {
+		inputTokens = upstream.InputTokens
 	}
 
 	localUsage := reconcilePromptCacheUsage(synthetic, inputTokens)
@@ -1717,7 +1771,7 @@ func resolvePromptCacheUsageForMode(synthetic promptCacheUsage, upstream KiroTok
 			CacheCreation5mInputTokens: upstream.CacheCreation5mTokens,
 			CacheCreation1hInputTokens: upstream.CacheCreation1hTokens,
 		}
-		if baseline.CacheCreationInputTokens > 0 && baseline.CacheCreation5mInputTokens+baseline.CacheCreation1hInputTokens == 0 {
+		if baseline.CacheCreationInputTokens > 0 && saturatingTokenAdd(baseline.CacheCreation5mInputTokens, baseline.CacheCreation1hInputTokens) == 0 {
 			baseline.CacheCreation5mInputTokens, baseline.CacheCreation1hInputTokens = computePromptCacheTTLBreakdown(profile, 0)
 		}
 		baseline = reconcilePromptCacheUsage(baseline, inputTokens)
@@ -1735,17 +1789,22 @@ func resolvePromptCacheUsageForMode(synthetic promptCacheUsage, upstream KiroTok
 	case config.PromptCacheAccountingAggregatorTarget:
 		warmHit := synthetic.localMatchedInputTokens > 0 || (upstream.HasCacheBreakdown && upstream.CacheReadInputTokens > 0)
 		if warmHit && inputTokens > 0 {
+			targetMin, targetMax = normalizeEfficiencyRange(targetMin, targetMax)
 			if synthetic.hasTargetReadRate {
-				targetRate = synthetic.targetReadRate
+				targetRate = clampFloat(synthetic.targetReadRate, targetMin, targetMax)
 			} else {
-				targetMin, targetMax = normalizeEfficiencyRange(targetMin, targetMax)
 				targetRate = (targetMin + targetMax) / 2
 			}
 			targetRate = clampFloat(targetRate, 0, 1)
-			creation := minInt(maxInt(baseline.CacheCreationInputTokens, 0), inputTokens)
-			targetRead := int(math.Round(float64(inputTokens) * targetRate))
-			targetRead = minInt(maxInt(targetRead, 0), inputTokens-creation)
-			reported.CacheCreationInputTokens = creation
+			targetRead := targetPromptCacheReadTokens(inputTokens, targetRate, targetMin, targetMax)
+			// This mode exists to make the usage contract consumed by New API and
+			// similar aggregators deterministic. Local cache creation is an
+			// estimate, not an upstream billing fact; exposing it here would reduce
+			// the configured read ratio on partial matches. Keep upstream values in
+			// the diagnostic fields below and report the remainder as uncached input.
+			reported.CacheCreationInputTokens = 0
+			reported.CacheCreation5mInputTokens = 0
+			reported.CacheCreation1hInputTokens = 0
 			reported.CacheReadInputTokens = targetRead
 			reported = reconcilePromptCacheUsage(reported, inputTokens)
 			targetApplied = true
@@ -1760,6 +1819,7 @@ func resolvePromptCacheUsageForMode(synthetic promptCacheUsage, upstream KiroTok
 	reported.upstreamCacheRead = maxInt(upstream.CacheReadInputTokens, 0)
 	reported.upstreamCacheCreation = maxInt(upstream.CacheCreationInputTokens, 0)
 	reported.hasUpstreamBreakdown = upstream.HasCacheBreakdown
+	reported.totalInputTokens = maxInt(inputTokens, 0)
 	return reported, inputTokens
 }
 
@@ -1786,6 +1846,7 @@ func finalizePromptCacheDiagnostic(diagnostic promptCacheDiagnostic, upstream Ki
 		}
 		if inputTokens > 0 {
 			diagnostic.ReadEfficiency = float64(usage.CacheReadInputTokens) / float64(inputTokens)
+			diagnostic.ReportedReadRate = diagnostic.ReadEfficiency
 		}
 		return diagnostic
 	}
@@ -1812,6 +1873,7 @@ func finalizePromptCacheDiagnostic(diagnostic promptCacheDiagnostic, upstream Ki
 		}
 		if inputTokens > 0 {
 			diagnostic.ReadEfficiency = float64(usage.CacheReadInputTokens) / float64(inputTokens)
+			diagnostic.ReportedReadRate = diagnostic.ReadEfficiency
 		}
 		return diagnostic
 	}
@@ -1820,13 +1882,18 @@ func finalizePromptCacheDiagnostic(diagnostic promptCacheDiagnostic, upstream Ki
 	if diagnostic.MatchedInputTokens > 0 {
 		diagnostic.ReadEfficiency = float64(usage.CacheReadInputTokens) / float64(diagnostic.MatchedInputTokens)
 	}
+	if inputTokens > 0 {
+		diagnostic.ReportedReadRate = float64(usage.CacheReadInputTokens) / float64(inputTokens)
+	}
 	return diagnostic
 }
 
 func buildClaudeUsageMap(inputTokens, outputTokens, thinkingTokens int, usage promptCacheUsage, includeCache bool) map[string]interface{} {
+	inputTokens = maxInt(inputTokens, 0)
+	usage = reconcilePromptCacheUsage(usage, inputTokens)
 	result := map[string]interface{}{
 		"input_tokens":  billedClaudeInputTokens(inputTokens, usage),
-		"output_tokens": outputTokens,
+		"output_tokens": maxInt(outputTokens, 0),
 	}
 	if thinkingTokens > 0 {
 		result["thinking_tokens"] = thinkingTokens

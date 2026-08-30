@@ -942,11 +942,11 @@ func TestResolvePromptCacheUsageAggregatorTargetsTotalInput(t *testing.T) {
 		t.Fatalf("unexpected Anthropic usage: %#v", claudeUsage)
 	}
 	openAIUsage := buildOpenAIUsage(inputTokens, 10, 0, usage)
-	if openAIUsage.PromptTokens != 1000 || openAIUsage.TotalTokens != 1010 || openAIUsage.PromptTokensDetails == nil || openAIUsage.PromptTokensDetails.CachedTokens != 930 {
+	if openAIUsage.PromptTokens != 1000 || openAIUsage.TotalTokens != 1010 || openAIUsage.PromptTokensDetails == nil || openAIUsage.PromptTokensDetails.CachedTokens != 930 || openAIUsage.PromptTokensDetails.CacheWriteTokens != 0 {
 		t.Fatalf("unexpected OpenAI usage: %+v", openAIUsage)
 	}
 	responsesUsage := buildResponsesUsage(inputTokens, 10, 0, usage)
-	if responsesUsage.InputTokens != 1000 || responsesUsage.TotalTokens != 1010 || responsesUsage.InputTokensDetails == nil || responsesUsage.InputTokensDetails.CachedTokens != 930 {
+	if responsesUsage.InputTokens != 1000 || responsesUsage.TotalTokens != 1010 || responsesUsage.InputTokensDetails == nil || responsesUsage.InputTokensDetails.CachedTokens != 930 || responsesUsage.InputTokensDetails.CacheWriteTokens != 0 {
 		t.Fatalf("unexpected Responses usage: %+v", responsesUsage)
 	}
 }
@@ -971,11 +971,24 @@ func TestResolvePromptCacheUsageAggregatorPreservesWarmupAndCreation(t *testing.
 		CacheReadInputTokens:       300,
 	}
 	usage, _ = resolvePromptCacheUsageForMode(partial, KiroTokenUsage{}, 1000, nil, config.PromptCacheAccountingAggregatorTarget, 0.9, 0.95)
-	if !usage.targetApplied || usage.CacheCreationInputTokens != 200 || usage.CacheReadInputTokens != 800 {
-		t.Fatalf("cache creation must cap the target read bucket: %+v", usage)
+	if !usage.targetApplied || usage.CacheCreationInputTokens != 0 || usage.CacheReadInputTokens != 950 {
+		t.Fatalf("aggregator target must preserve the configured total-input ratio: %+v", usage)
 	}
 	if got := billedClaudeInputTokens(1000, usage) + usage.CacheCreationInputTokens + usage.CacheReadInputTokens; got != 1000 {
 		t.Fatalf("partial-hit input buckets total %d, want 1000", got)
+	}
+	if ratio := float64(usage.CacheReadInputTokens) / 1000; ratio < 0.9 || ratio > 0.95 {
+		t.Fatalf("partial-hit reported ratio = %.4f, want 0.90-0.95", ratio)
+	}
+}
+
+func TestTargetPromptCacheReadTokensStaysWithinConfiguredRange(t *testing.T) {
+	for _, inputTokens := range []int{512, 1000, 2048, 10000} {
+		read := targetPromptCacheReadTokens(inputTokens, 0.93, 0.9, 0.95)
+		ratio := float64(read) / float64(inputTokens)
+		if ratio < 0.9 || ratio > 0.95 {
+			t.Fatalf("input=%d read=%d ratio=%.6f outside configured range", inputTokens, read, ratio)
+		}
 	}
 }
 
@@ -1066,15 +1079,55 @@ func TestPromptCacheStatsAndClear(t *testing.T) {
 		}},
 	}
 	tracker.Update("acct-1", profile)
-	tracker.RecordUsage(promptCacheUsage{CacheReadInputTokens: 1200, CacheCreationInputTokens: 100}, true)
+	usage := promptCacheUsage{CacheReadInputTokens: 1200, CacheCreationInputTokens: 100, totalInputTokens: 1600}
+	tracker.RecordUsage(usage, true)
 
 	stats := tracker.Stats()
-	if stats.Entries != 1 || stats.Accounts != 1 || stats.CacheHits != 1 || stats.CacheReadTokens != 1200 || stats.CacheCreationTokens != 100 {
+	if stats.Entries != 1 || stats.Accounts != 1 || stats.CacheHits != 1 || stats.CacheReadTokens != 1200 || stats.CacheCreationTokens != 100 || stats.TrackedInputTokens != 1600 || stats.UncachedInputTokens != 300 {
 		t.Fatalf("unexpected cache stats: %+v", stats)
+	}
+	if stats.CacheReadRate != 0.75 {
+		t.Fatalf("cache read rate = %.4f, want 0.75", stats.CacheReadRate)
 	}
 	tracker.Clear()
 	if stats = tracker.Stats(); stats.Entries != 0 || stats.TrackedRequests != 0 {
 		t.Fatalf("expected cache state and stats to clear, got %+v", stats)
+	}
+}
+
+func TestPromptCacheStatsClampCacheBucketsToTotalInput(t *testing.T) {
+	tracker := newPromptCacheTracker(time.Hour)
+	tracker.RecordDecision(
+		promptCacheUsage{
+			CacheReadInputTokens:     1500,
+			CacheCreationInputTokens: 900,
+			totalInputTokens:         1000,
+		},
+		promptCacheDiagnostic{Status: "hit", Source: "upstream"},
+	)
+
+	stats := tracker.Stats()
+	if stats.CacheHits != 1 || stats.CacheMisses != 0 {
+		t.Fatalf("unexpected hit classification for malformed buckets: %+v", stats)
+	}
+	if stats.CacheReadTokens != 1000 || stats.CacheCreationTokens != 0 {
+		t.Fatalf("cache buckets were not clamped: %+v", stats)
+	}
+	if stats.TrackedInputTokens != 1000 || stats.UncachedInputTokens != 0 || stats.CacheReadRate != 1 {
+		t.Fatalf("unexpected clamped input accounting: %+v", stats)
+	}
+
+	tracker.RecordDecision(
+		promptCacheUsage{
+			CacheReadInputTokens:     700,
+			CacheCreationInputTokens: 700,
+			totalInputTokens:         1000,
+		},
+		promptCacheDiagnostic{Status: "partial_hit", Source: "upstream"},
+	)
+	stats = tracker.Stats()
+	if stats.CacheReadTokens != 1700 || stats.CacheCreationTokens != 300 || stats.TrackedInputTokens != 2000 || stats.UncachedInputTokens != 0 {
+		t.Fatalf("overlapping cache buckets were not reconciled: %+v", stats)
 	}
 }
 

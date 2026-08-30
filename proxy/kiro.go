@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -649,7 +650,17 @@ type KiroTokenUsage struct {
 	ThinkingTokens           int
 	HasCacheBreakdown        bool
 	HasThinkingBreakdown     bool
+	// Keep field presence separate from the numeric values. Upstream payloads
+	// commonly omit zero-valued cache buckets, and treating an omitted field as
+	// an explicit zero can erase a valid total input count.
+	hasInputTokens           bool
+	hasOutputTokens          bool
+	hasThinkingTokens        bool
 	hasUncachedBreakdown     bool
+	hasCacheReadTokens       bool
+	hasCacheCreationTokens   bool
+	hasCacheCreation5mTokens bool
+	hasCacheCreation1hTokens bool
 }
 
 // ==================== API Call ====================
@@ -1609,106 +1620,487 @@ func updateTokensFromEvent(event map[string]interface{}, currentInputTokens, cur
 	return usage.InputTokens, usage.OutputTokens
 }
 
+// updateTokenUsageFromEvent accepts the several usage envelopes emitted by
+// different Kiro data planes. Candidate collection and merging are deliberately
+// deterministic: Go map iteration order must not decide which usage snapshot
+// wins, and a later telemetry placeholder must not erase a useful snapshot.
 func updateTokenUsageFromEvent(event map[string]interface{}, current KiroTokenUsage) KiroTokenUsage {
-	candidates := []map[string]interface{}{event}
-	collectUsageMaps(event, &candidates)
+	candidates := make([]tokenUsageCandidate, 0, 4)
+	if candidate, ok := parseTokenUsageCandidate(event, 0, "$"); ok {
+		candidates = append(candidates, candidate)
+	}
+	collectUsageCandidates(event, "", &candidates)
+	eventUsage := mergeTokenUsageCandidates(candidates)
+	return mergeTokenUsageProgress(current, eventUsage)
+}
 
-	for _, usage := range candidates {
-		if usage == nil {
+type tokenUsageCandidate struct {
+	usage        KiroTokenUsage
+	priority     int
+	completeness int
+	path         string
+}
+
+// Usage envelopes with a canonical tokenUsage object are more authoritative
+// than generic metrics. The priority is only used for conflicts; missing fields
+// are still filled from lower-priority candidates.
+func usageMapPriority(key string) (int, bool) {
+	switch normalizeStreamIdentifier(key) {
+	case "tokenusage":
+		return 400, true
+	case "usage":
+		return 300, true
+	case "metadataevent", "messagemetadataevent", "metadata", "messagemetadata", "responsemetadata":
+		return 250, true
+	case "metrics", "tokenmetrics":
+		return 200, true
+	case "usageevent", "metricsevent", "meteringevent":
+		return 150, true
+	default:
+		return 0, false
+	}
+}
+
+func collectUsageCandidates(v interface{}, path string, out *[]tokenUsageCandidate) {
+	if out == nil {
+		return
+	}
+	switch typed := v.(type) {
+	case map[string]interface{}:
+		keys := make([]string, 0, len(typed))
+		for key := range typed {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			child := typed[key]
+			childPath := usagePathJoin(path, key)
+			if childMap, ok := child.(map[string]interface{}); ok {
+				if priority, recognized := usageMapPriority(key); recognized {
+					if candidate, valid := parseTokenUsageCandidate(childMap, priority, childPath); valid {
+						*out = append(*out, candidate)
+					}
+				}
+			}
+			collectUsageCandidates(child, childPath, out)
+		}
+	case []interface{}:
+		for index, child := range typed {
+			collectUsageCandidates(child, fmt.Sprintf("%s[%d]", path, index), out)
+		}
+	}
+}
+
+func usagePathJoin(path, key string) string {
+	if path == "" {
+		return key
+	}
+	return path + "." + key
+}
+
+func parseTokenUsageCandidate(m map[string]interface{}, priority int, path string) (tokenUsageCandidate, bool) {
+	candidate := tokenUsageCandidate{priority: priority, path: path}
+	usage := &candidate.usage
+	if m == nil {
+		return candidate, false
+	}
+
+	if value, ok := readTokenNumber(m,
+		"outputTokens", "completionTokens", "totalOutputTokens",
+		"output_tokens", "completion_tokens", "total_output_tokens",
+	); ok {
+		usage.OutputTokens = value
+		usage.hasOutputTokens = true
+		candidate.completeness++
+	}
+	if value, ok := readTokenNumber(m,
+		"thinkingTokens", "reasoningTokens", "thinking_tokens", "reasoning_tokens",
+	); ok {
+		usage.ThinkingTokens = value
+		usage.hasThinkingTokens = true
+		usage.HasThinkingBreakdown = true
+		candidate.completeness++
+	}
+	for _, key := range []string{"outputTokenDetails", "outputTokensDetails", "completionTokenDetails", "completionTokensDetails", "output_token_details", "output_tokens_details", "completion_token_details", "completion_tokens_details"} {
+		details, ok := readTokenMapField(m, key)
+		if !ok {
 			continue
 		}
-
-		if v, ok := readTokenNumber(usage,
-			"outputTokens", "completionTokens", "totalOutputTokens",
-			"output_tokens", "completion_tokens", "total_output_tokens",
-		); ok {
-			current.OutputTokens = v
-		}
-		if v, ok := readTokenNumber(usage,
-			"thinkingTokens", "reasoningTokens", "thinking_tokens", "reasoning_tokens",
-		); ok {
-			current.ThinkingTokens = v
-			current.HasThinkingBreakdown = true
-		}
-		for _, key := range []string{"outputTokenDetails", "outputTokensDetails", "completionTokenDetails", "completionTokensDetails", "output_token_details", "output_tokens_details", "completion_token_details", "completion_tokens_details"} {
-			details, ok := streamMapField(usage, key)
-			if !ok {
-				continue
+		if value, found := readTokenNumber(details, "thinkingTokens", "reasoningTokens", "thinking_tokens", "reasoning_tokens"); found {
+			if !usage.hasThinkingTokens || value > usage.ThinkingTokens {
+				usage.ThinkingTokens = value
 			}
-			if v, found := readTokenNumber(details, "thinkingTokens", "reasoningTokens", "thinking_tokens", "reasoning_tokens"); found {
-				current.ThinkingTokens = v
-				current.HasThinkingBreakdown = true
-			}
-		}
-
-		inputValue, hasExplicitInput := readTokenNumber(usage,
-			"inputTokens", "promptTokens", "totalInputTokens",
-			"input_tokens", "prompt_tokens", "total_input_tokens",
-		)
-		if hasExplicitInput {
-			current.InputTokens = inputValue
-		}
-
-		uncached, hasUncached := readTokenNumber(usage, "uncachedInputTokens", "uncached_input_tokens")
-		cacheRead, hasCacheRead := readTokenNumber(usage, "cacheReadInputTokens", "cacheReadTokens", "cache_read_input_tokens", "cache_read_tokens")
-		cacheWrite, hasCacheWrite := readTokenNumber(usage, "cacheWriteInputTokens", "cacheWriteTokens", "cache_write_input_tokens", "cache_write_tokens", "cacheCreationInputTokens", "cacheCreationTokens", "cache_creation_input_tokens", "cache_creation_tokens")
-		cache5m, hasCache5m := readTokenNumber(usage, "ephemeral5mInputTokens", "ephemeral_5m_input_tokens")
-		cache1h, hasCache1h := readTokenNumber(usage, "ephemeral1hInputTokens", "ephemeral_1h_input_tokens")
-		for _, key := range []string{"cache_creation", "cacheCreation"} {
-			creation, ok := streamMapField(usage, key)
-			if !ok {
-				continue
-			}
-			if v, found := readTokenNumber(creation, "ephemeral5mInputTokens", "ephemeral_5m_input_tokens"); found {
-				cache5m, hasCache5m = v, true
-			}
-			if v, found := readTokenNumber(creation, "ephemeral1hInputTokens", "ephemeral_1h_input_tokens"); found {
-				cache1h, hasCache1h = v, true
-			}
-		}
-		if hasUncached || hasCacheRead || hasCacheWrite || hasCache5m || hasCache1h {
-			current.HasCacheBreakdown = true
-		}
-		if hasUncached {
-			current.UncachedInputTokens = uncached
-			current.hasUncachedBreakdown = true
-		}
-		if hasCacheRead {
-			current.CacheReadInputTokens = cacheRead
-		}
-		if hasCacheWrite {
-			current.CacheCreationInputTokens = cacheWrite
-		}
-		if hasCache5m {
-			current.CacheCreation5mTokens = cache5m
-		}
-		if hasCache1h {
-			current.CacheCreation1hTokens = cache1h
-		}
-		breakdownTotal := current.UncachedInputTokens + current.CacheReadInputTokens + current.CacheCreationInputTokens
-		if current.InputTokens <= 0 && breakdownTotal > 0 {
-			current.InputTokens = breakdownTotal
-		}
-
-		total, ok := readTokenNumber(usage, "totalTokens", "total_tokens")
-		if !hasExplicitInput && ok && total > 0 {
-			candidateOutput := current.OutputTokens
-			if v, vok := readTokenNumber(usage,
-				"outputTokens", "completionTokens", "totalOutputTokens",
-				"output_tokens", "completion_tokens", "total_output_tokens",
-			); vok {
-				candidateOutput = v
-			}
-			if total-candidateOutput > 0 {
-				current.InputTokens = total - candidateOutput
-			}
+			usage.hasThinkingTokens = true
+			usage.HasThinkingBreakdown = true
+			candidate.completeness++
 		}
 	}
 
-	if current.HasCacheBreakdown && !current.hasUncachedBreakdown && current.InputTokens > 0 {
-		current.UncachedInputTokens = maxInt(current.InputTokens-current.CacheReadInputTokens-current.CacheCreationInputTokens, 0)
+	if value, ok := readTokenNumber(m,
+		"inputTokens", "promptTokens", "totalInputTokens",
+		"input_tokens", "prompt_tokens", "total_input_tokens",
+	); ok {
+		usage.InputTokens = value
+		usage.hasInputTokens = true
+		candidate.completeness++
 	}
-	return current
+	if value, ok := readTokenNumber(m, "uncachedInputTokens", "uncached_input_tokens"); ok {
+		usage.UncachedInputTokens = value
+		usage.hasUncachedBreakdown = true
+		usage.HasCacheBreakdown = true
+		candidate.completeness++
+	}
+	if value, ok := readTokenNumber(m, "cacheReadInputTokens", "cacheReadTokens", "cache_read_input_tokens", "cache_read_tokens"); ok {
+		usage.CacheReadInputTokens = value
+		usage.hasCacheReadTokens = true
+		usage.HasCacheBreakdown = true
+		candidate.completeness++
+	}
+	if value, ok := readTokenNumber(m, "cacheWriteInputTokens", "cacheWriteTokens", "cache_write_input_tokens", "cacheCreationInputTokens", "cacheCreationTokens", "cache_creation_input_tokens", "cache_creation_tokens"); ok {
+		usage.CacheCreationInputTokens = value
+		usage.hasCacheCreationTokens = true
+		usage.HasCacheBreakdown = true
+		candidate.completeness++
+	}
+	if value, ok := readTokenNumber(m, "ephemeral5mInputTokens", "ephemeral_5m_input_tokens"); ok {
+		usage.CacheCreation5mTokens = value
+		usage.hasCacheCreation5mTokens = true
+		usage.HasCacheBreakdown = true
+		candidate.completeness++
+	}
+	if value, ok := readTokenNumber(m, "ephemeral1hInputTokens", "ephemeral_1h_input_tokens"); ok {
+		usage.CacheCreation1hTokens = value
+		usage.hasCacheCreation1hTokens = true
+		usage.HasCacheBreakdown = true
+		candidate.completeness++
+	}
+	for _, key := range []string{"cache_creation", "cacheCreation"} {
+		creation, ok := readTokenMapField(m, key)
+		if !ok {
+			continue
+		}
+		if value, found := readTokenNumber(creation, "ephemeral5mInputTokens", "ephemeral_5m_input_tokens"); found {
+			if !usage.hasCacheCreation5mTokens || value > usage.CacheCreation5mTokens {
+				usage.CacheCreation5mTokens = value
+			}
+			usage.hasCacheCreation5mTokens = true
+			usage.HasCacheBreakdown = true
+			candidate.completeness++
+		}
+		if value, found := readTokenNumber(creation, "ephemeral1hInputTokens", "ephemeral_1h_input_tokens"); found {
+			if !usage.hasCacheCreation1hTokens || value > usage.CacheCreation1hTokens {
+				usage.CacheCreation1hTokens = value
+			}
+			usage.hasCacheCreation1hTokens = true
+			usage.HasCacheBreakdown = true
+			candidate.completeness++
+		}
+	}
+
+	if !usage.hasInputTokens {
+		if total, ok := readTokenNumber(m, "totalTokens", "total_tokens"); ok && total > 0 {
+			if total >= usage.OutputTokens {
+				usage.InputTokens = total - usage.OutputTokens
+				usage.hasInputTokens = true
+				candidate.completeness++
+			}
+		}
+	}
+	return candidate, candidate.completeness > 0
+}
+
+type tokenUsageFieldRank struct {
+	priority     int
+	completeness int
+	path         string
+}
+
+type tokenUsageMergeState struct {
+	usage               KiroTokenUsage
+	inputRank           tokenUsageFieldRank
+	outputRank          tokenUsageFieldRank
+	thinkingRank        tokenUsageFieldRank
+	uncachedRank        tokenUsageFieldRank
+	cacheReadRank       tokenUsageFieldRank
+	cacheCreationRank   tokenUsageFieldRank
+	cacheCreation5mRank tokenUsageFieldRank
+	cacheCreation1hRank tokenUsageFieldRank
+	inputSet            bool
+	outputSet           bool
+	thinkingSet         bool
+	uncachedSet         bool
+	cacheReadSet        bool
+	cacheCreationSet    bool
+	cacheCreation5mSet  bool
+	cacheCreation1hSet  bool
+}
+
+func (s *tokenUsageMergeState) merge(candidate tokenUsageCandidate) {
+	s.mergeField(&s.usage.InputTokens, &s.inputSet, &s.inputRank, candidate.usage.InputTokens, candidate.usage.hasInputTokens, candidate, true)
+	s.mergeField(&s.usage.OutputTokens, &s.outputSet, &s.outputRank, candidate.usage.OutputTokens, candidate.usage.hasOutputTokens, candidate, true)
+	s.mergeField(&s.usage.ThinkingTokens, &s.thinkingSet, &s.thinkingRank, candidate.usage.ThinkingTokens, candidate.usage.hasThinkingTokens, candidate, true)
+	s.mergeField(&s.usage.UncachedInputTokens, &s.uncachedSet, &s.uncachedRank, candidate.usage.UncachedInputTokens, candidate.usage.hasUncachedBreakdown, candidate, false)
+	s.mergeField(&s.usage.CacheReadInputTokens, &s.cacheReadSet, &s.cacheReadRank, candidate.usage.CacheReadInputTokens, candidate.usage.hasCacheReadTokens, candidate, false)
+	s.mergeField(&s.usage.CacheCreationInputTokens, &s.cacheCreationSet, &s.cacheCreationRank, candidate.usage.CacheCreationInputTokens, candidate.usage.hasCacheCreationTokens, candidate, false)
+	s.mergeField(&s.usage.CacheCreation5mTokens, &s.cacheCreation5mSet, &s.cacheCreation5mRank, candidate.usage.CacheCreation5mTokens, candidate.usage.hasCacheCreation5mTokens, candidate, false)
+	s.mergeField(&s.usage.CacheCreation1hTokens, &s.cacheCreation1hSet, &s.cacheCreation1hRank, candidate.usage.CacheCreation1hTokens, candidate.usage.hasCacheCreation1hTokens, candidate, false)
+	s.usage.HasCacheBreakdown = s.usage.HasCacheBreakdown || candidate.usage.HasCacheBreakdown
+	s.usage.HasThinkingBreakdown = s.usage.HasThinkingBreakdown || candidate.usage.HasThinkingBreakdown
+	s.usage.hasInputTokens = s.inputSet
+	s.usage.hasOutputTokens = s.outputSet
+	s.usage.hasThinkingTokens = s.thinkingSet
+	s.usage.hasUncachedBreakdown = s.uncachedSet
+	s.usage.hasCacheReadTokens = s.cacheReadSet
+	s.usage.hasCacheCreationTokens = s.cacheCreationSet
+	s.usage.hasCacheCreation5mTokens = s.cacheCreation5mSet
+	s.usage.hasCacheCreation1hTokens = s.cacheCreation1hSet
+}
+
+func (s *tokenUsageMergeState) mergeField(dst *int, set *bool, rank *tokenUsageFieldRank, value int, present bool, candidate tokenUsageCandidate, preservePositiveZero bool) {
+	if !present {
+		return
+	}
+	value = maxInt(value, 0)
+	if !*set {
+		*dst = value
+		*set = true
+		*rank = tokenUsageFieldRank{priority: candidate.priority, completeness: candidate.completeness, path: candidate.path}
+		return
+	}
+	existing := maxInt(*dst, 0)
+	// A zero-valued telemetry field is commonly a placeholder. It must not
+	// erase a positive value already obtained from an equally or more specific
+	// snapshot. A more authoritative canonical snapshot may explicitly clear a
+	// lower-priority metric value.
+	if value == 0 && existing > 0 {
+		if preservePositiveZero {
+			return
+		}
+		if candidate.priority > rank.priority ||
+			(candidate.priority == rank.priority && candidate.completeness > rank.completeness) {
+			*dst = 0
+			*rank = tokenUsageFieldRank{priority: candidate.priority, completeness: candidate.completeness, path: candidate.path}
+		}
+		return
+	}
+	if existing == 0 && value > 0 {
+		*dst = value
+		*rank = tokenUsageFieldRank{priority: candidate.priority, completeness: candidate.completeness, path: candidate.path}
+		return
+	}
+	if candidate.priority > rank.priority ||
+		(candidate.priority == rank.priority && candidate.completeness > rank.completeness) {
+		*dst = value
+		*rank = tokenUsageFieldRank{priority: candidate.priority, completeness: candidate.completeness, path: candidate.path}
+		return
+	}
+	// Equal-confidence snapshots are normally cumulative. Keep the largest
+	// value; sorted candidate paths make ties deterministic.
+	if candidate.priority == rank.priority && candidate.completeness == rank.completeness && value > existing {
+		*dst = value
+		*rank = tokenUsageFieldRank{priority: candidate.priority, completeness: candidate.completeness, path: candidate.path}
+	}
+}
+
+func mergeTokenUsageCandidates(candidates []tokenUsageCandidate) KiroTokenUsage {
+	sort.SliceStable(candidates, func(i, j int) bool {
+		if candidates[i].priority != candidates[j].priority {
+			return candidates[i].priority < candidates[j].priority
+		}
+		if candidates[i].completeness != candidates[j].completeness {
+			return candidates[i].completeness < candidates[j].completeness
+		}
+		return candidates[i].path < candidates[j].path
+	})
+	var state tokenUsageMergeState
+	for _, candidate := range candidates {
+		state.merge(candidate)
+	}
+	return normalizeKiroTokenUsage(state.usage)
+}
+
+// mergeTokenUsageProgress combines snapshots from successive stream frames.
+// Usage counters are cumulative in Kiro streams, so they may advance but must
+// not regress when a trailing frame contains only zero placeholders.
+func mergeTokenUsageProgress(current, next KiroTokenUsage) KiroTokenUsage {
+	// Preserve positive values from callers using the pre-presence-bit shape.
+	// Stream counters are cumulative, so a later partial snapshot must not make
+	// them regress merely because its internal flag is absent.
+	if !current.hasInputTokens && current.InputTokens > 0 {
+		current.hasInputTokens = true
+	}
+	if !current.hasOutputTokens && current.OutputTokens > 0 {
+		current.hasOutputTokens = true
+	}
+	if !current.hasThinkingTokens && current.ThinkingTokens > 0 {
+		current.hasThinkingTokens = true
+	}
+	if next.hasInputTokens {
+		if next.InputTokens > 0 && (!current.hasInputTokens || current.InputTokens <= 0 || next.InputTokens > current.InputTokens) {
+			current.InputTokens = next.InputTokens
+			current.hasInputTokens = true
+		} else if current.InputTokens <= 0 {
+			current.InputTokens = next.InputTokens
+			current.hasInputTokens = true
+		}
+	}
+	if next.hasOutputTokens {
+		if next.OutputTokens > current.OutputTokens || current.OutputTokens <= 0 {
+			current.OutputTokens = next.OutputTokens
+		}
+		current.hasOutputTokens = true
+	}
+	if next.hasThinkingTokens {
+		if next.ThinkingTokens > current.ThinkingTokens || current.ThinkingTokens <= 0 {
+			current.ThinkingTokens = next.ThinkingTokens
+		}
+		current.hasThinkingTokens = true
+	}
+	mergeProgressTokenField(&current.UncachedInputTokens, &current.hasUncachedBreakdown, next.UncachedInputTokens, next.hasUncachedBreakdown)
+	mergeProgressTokenField(&current.CacheReadInputTokens, &current.hasCacheReadTokens, next.CacheReadInputTokens, next.hasCacheReadTokens)
+	mergeProgressTokenField(&current.CacheCreationInputTokens, &current.hasCacheCreationTokens, next.CacheCreationInputTokens, next.hasCacheCreationTokens)
+	mergeProgressTokenField(&current.CacheCreation5mTokens, &current.hasCacheCreation5mTokens, next.CacheCreation5mTokens, next.hasCacheCreation5mTokens)
+	mergeProgressTokenField(&current.CacheCreation1hTokens, &current.hasCacheCreation1hTokens, next.CacheCreation1hTokens, next.hasCacheCreation1hTokens)
+	current.HasCacheBreakdown = current.HasCacheBreakdown || next.HasCacheBreakdown
+	current.HasThinkingBreakdown = current.HasThinkingBreakdown || next.HasThinkingBreakdown
+	return normalizeKiroTokenUsage(current)
+}
+
+func mergeProgressTokenField(current *int, currentPresent *bool, next int, nextPresent bool) {
+	// Legacy callers may provide a positive snapshot without the internal
+	// presence bit. Preserve it before a later zero-valued telemetry placeholder
+	// is considered.
+	if !*currentPresent && *current > 0 {
+		*currentPresent = true
+	}
+	if !nextPresent {
+		return
+	}
+	next = maxInt(next, 0)
+	if !*currentPresent || next > *current {
+		*current = next
+	}
+	*currentPresent = true
+}
+
+// normalizeKiroTokenUsage keeps the upstream usage breakdown internally
+// consistent before it is used as a denominator or exposed to a client. Kiro
+// deployments have emitted both top-level cache creation totals and nested
+// 5-minute/1-hour buckets; accepting either shape must not produce overlapping
+// input buckets.
+func normalizeKiroTokenUsage(usage KiroTokenUsage) KiroTokenUsage {
+	usage.InputTokens = maxInt(usage.InputTokens, 0)
+	usage.OutputTokens = maxInt(usage.OutputTokens, 0)
+	usage.UncachedInputTokens = maxInt(usage.UncachedInputTokens, 0)
+	usage.CacheReadInputTokens = maxInt(usage.CacheReadInputTokens, 0)
+	usage.CacheCreationInputTokens = maxInt(usage.CacheCreationInputTokens, 0)
+	usage.CacheCreation5mTokens = maxInt(usage.CacheCreation5mTokens, 0)
+	usage.CacheCreation1hTokens = maxInt(usage.CacheCreation1hTokens, 0)
+	usage.ThinkingTokens = maxInt(usage.ThinkingTokens, 0)
+
+	// Positive values keep manually constructed usages backwards compatible;
+	// parser-populated presence flags also preserve explicit zero values.
+	hasInput := usage.hasInputTokens || usage.InputTokens > 0
+	hasOutput := usage.hasOutputTokens || usage.OutputTokens > 0
+	hasThinking := usage.hasThinkingTokens || usage.ThinkingTokens > 0 || usage.HasThinkingBreakdown
+	hasUncached := usage.hasUncachedBreakdown || usage.UncachedInputTokens > 0
+	hasCacheRead := usage.hasCacheReadTokens || usage.CacheReadInputTokens > 0
+	hasCacheCreation := usage.hasCacheCreationTokens || usage.CacheCreationInputTokens > 0
+	hasCache5m := usage.hasCacheCreation5mTokens || usage.CacheCreation5mTokens > 0
+	hasCache1h := usage.hasCacheCreation1hTokens || usage.CacheCreation1hTokens > 0
+
+	// Nested creation buckets are useful when the aggregate field is omitted,
+	// which is common in Claude-compatible usage payloads. An explicitly
+	// supplied aggregate, including zero, remains authoritative.
+	nestedCreation := saturatingTokenAdd(usage.CacheCreation5mTokens, usage.CacheCreation1hTokens)
+	if !hasCacheCreation && (hasCache5m || hasCache1h) {
+		usage.CacheCreationInputTokens = nestedCreation
+		hasCacheCreation = true
+	}
+
+	usage.hasInputTokens = hasInput
+	usage.hasOutputTokens = hasOutput
+	usage.hasThinkingTokens = hasThinking
+	usage.hasUncachedBreakdown = hasUncached
+	usage.hasCacheReadTokens = hasCacheRead
+	usage.hasCacheCreationTokens = hasCacheCreation
+	usage.hasCacheCreation5mTokens = hasCache5m
+	usage.hasCacheCreation1hTokens = hasCache1h
+	usage.HasCacheBreakdown = usage.HasCacheBreakdown || hasUncached || hasCacheRead || hasCacheCreation || hasCache5m || hasCache1h
+	if !usage.HasCacheBreakdown {
+		return usage
+	}
+
+	cacheBuckets := saturatingTokenAdd(usage.CacheReadInputTokens, usage.CacheCreationInputTokens)
+	// Only an uncached value plus at least one explicitly present cache bucket
+	// is a complete three-way breakdown. If the cache buckets were omitted,
+	// preserve an independently reported total instead of replacing it with 0.
+	breakdownTotal := saturatingTokenAdd(usage.UncachedInputTokens, cacheBuckets)
+	meaningfulBreakdown := usage.UncachedInputTokens > 0 || cacheBuckets > 0
+	completeBreakdown := hasUncached && (hasCacheRead || hasCacheCreation) && meaningfulBreakdown
+	if completeBreakdown {
+		// A positive independent input total is retained when the breakdown is
+		// only a smaller partial snapshot. When the breakdown exceeds it, use the
+		// complete buckets to avoid under-counting overlapping cache tokens.
+		if !hasInput || breakdownTotal > usage.InputTokens {
+			usage.InputTokens = breakdownTotal
+			hasInput = true
+		}
+	} else if !hasInput {
+		usage.InputTokens = saturatingTokenAdd(usage.UncachedInputTokens, cacheBuckets)
+		hasInput = true
+	} else {
+		// If only cache buckets are supplied and they exceed the aggregate, the
+		// buckets are the only recoverable total.
+		usage.InputTokens = maxInt(usage.InputTokens, maxInt(cacheBuckets, usage.UncachedInputTokens))
+	}
+	if !hasUncached {
+		usage.UncachedInputTokens = usage.InputTokens - cacheBuckets
+	}
+	// The total may have been recovered from a breakdown rather than supplied
+	// as a named field. Preserve that fact for subsequent stream frames.
+	usage.hasInputTokens = hasInput
+
+	// Keep the nested creation buckets within the normalized creation total.
+	if hasCacheCreation && (hasCache5m || hasCache1h) && nestedCreation != usage.CacheCreationInputTokens {
+		if nestedCreation <= 0 {
+			usage.CacheCreation5mTokens = 0
+			usage.CacheCreation1hTokens = 0
+		} else {
+			cache5m := int(float64(usage.CacheCreation5mTokens) * float64(usage.CacheCreationInputTokens) / float64(nestedCreation))
+			cache5m = minInt(maxInt(cache5m, 0), usage.CacheCreationInputTokens)
+			usage.CacheCreation5mTokens = cache5m
+			usage.CacheCreation1hTokens = usage.CacheCreationInputTokens - cache5m
+		}
+	}
+	return usage
+}
+
+func saturatingTokenAdd(a, b int) int {
+	a = maxInt(a, 0)
+	b = maxInt(b, 0)
+	maxValue := int(^uint(0) >> 1)
+	if a > maxValue-b {
+		return maxValue
+	}
+	return a + b
+}
+
+// resolveInputTokenCount selects a stable total-input denominator. Context
+// percentage is a useful fallback, but it is not an input-token measurement
+// and must never override an explicit upstream usage value.
+func resolveInputTokenCount(callbackInputTokens int, upstream KiroTokenUsage, contextInputTokens, estimatedInputTokens int) int {
+	upstream = normalizeKiroTokenUsage(upstream)
+	if upstream.InputTokens > 0 {
+		return upstream.InputTokens
+	}
+	if callbackInputTokens > 0 {
+		return callbackInputTokens
+	}
+	if contextInputTokens > 0 {
+		return contextInputTokens
+	}
+	return maxInt(estimatedInputTokens, 0)
 }
 
 // getContextWindowSize returns the context window size (in tokens) for a model.
@@ -1777,24 +2169,60 @@ func isLargeContextModel(model string) bool {
 }
 
 func collectUsageMaps(v interface{}, out *[]map[string]interface{}) {
-	switch t := v.(type) {
+	if out == nil {
+		return
+	}
+	switch typed := v.(type) {
 	case map[string]interface{}:
-		for k, child := range t {
-			lk := normalizeStreamIdentifier(k)
-			if lk == "usage" || lk == "tokenusage" || lk == "metrics" || lk == "tokenmetrics" ||
-				lk == "usageevent" || lk == "metricsevent" || lk == "meteringevent" ||
-				lk == "messagemetadataevent" {
-				if m, ok := child.(map[string]interface{}); ok {
-					*out = append(*out, m)
+		keys := make([]string, 0, len(typed))
+		for key := range typed {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			child := typed[key]
+			if _, recognized := usageMapPriority(key); recognized {
+				if usage, ok := child.(map[string]interface{}); ok {
+					*out = append(*out, usage)
 				}
 			}
 			collectUsageMaps(child, out)
 		}
 	case []interface{}:
-		for _, child := range t {
+		for _, child := range typed {
 			collectUsageMaps(child, out)
 		}
 	}
+}
+
+func readTokenMapField(m map[string]interface{}, names ...string) (map[string]interface{}, bool) {
+	if m == nil {
+		return nil, false
+	}
+	for _, name := range names {
+		if value, ok := m[name].(map[string]interface{}); ok && value != nil {
+			return value, true
+		}
+	}
+	wanted := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		if normalized := normalizeStreamIdentifier(name); normalized != "" {
+			wanted[normalized] = struct{}{}
+		}
+	}
+	matchingKeys := make([]string, 0, len(m))
+	for key := range m {
+		if _, ok := wanted[normalizeStreamIdentifier(key)]; ok {
+			matchingKeys = append(matchingKeys, key)
+		}
+	}
+	sort.Strings(matchingKeys)
+	for _, key := range matchingKeys {
+		if value, ok := m[key].(map[string]interface{}); ok && value != nil {
+			return value, true
+		}
+	}
+	return nil, false
 }
 
 func readTokenNumber(m map[string]interface{}, keys ...string) (int, bool) {
@@ -1835,11 +2263,15 @@ func readTokenNumber(m map[string]interface{}, keys ...string) (int, bool) {
 			wanted[normalized] = struct{}{}
 		}
 	}
-	for key, value := range m {
-		if _, ok := wanted[normalizeStreamIdentifier(key)]; !ok {
-			continue
+	matchingKeys := make([]string, 0, len(m))
+	for key := range m {
+		if _, ok := wanted[normalizeStreamIdentifier(key)]; ok {
+			matchingKeys = append(matchingKeys, key)
 		}
-		if parsed, ok := parse(value); ok {
+	}
+	sort.Strings(matchingKeys)
+	for _, key := range matchingKeys {
+		if parsed, ok := parse(m[key]); ok {
 			return parsed, true
 		}
 	}

@@ -2850,11 +2850,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 		}
 		closeActiveBlock()
 
-		if realInputTokens > 0 {
-			inputTokens = realInputTokens
-		} else if inputTokens <= 0 {
-			inputTokens = estimatedInputTokens
-		}
+		inputTokens = resolveInputTokenCount(inputTokens, upstreamUsage, realInputTokens, estimatedInputTokens)
 		cacheUsage, inputTokens := h.promptCache.ResolveUsage(syntheticCacheUsage, upstreamUsage, inputTokens, cacheProfile)
 		cacheDiagnostic = finalizePromptCacheDiagnostic(cacheDiagnostic, upstreamUsage, cacheUsage, inputTokens)
 		payload.setPromptCacheDiagnostic(cacheDiagnostic)
@@ -3238,11 +3234,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 			rawThinkingContent = ""
 		}
 
-		if realInputTokens > 0 {
-			inputTokens = realInputTokens
-		} else if inputTokens <= 0 {
-			inputTokens = estimatedInputTokens
-		}
+		inputTokens = resolveInputTokenCount(inputTokens, upstreamUsage, realInputTokens, estimatedInputTokens)
 		cacheUsage, inputTokens := h.promptCache.ResolveUsage(syntheticCacheUsage, upstreamUsage, inputTokens, cacheProfile)
 		cacheDiagnostic = finalizePromptCacheDiagnostic(cacheDiagnostic, upstreamUsage, cacheUsage, inputTokens)
 		payload.setPromptCacheDiagnostic(cacheDiagnostic)
@@ -3920,11 +3912,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 			sendChunk("", 3)
 		}
 
-		if realInputTokens > 0 {
-			inputTokens = realInputTokens
-		} else if inputTokens <= 0 {
-			inputTokens = estimatedInputTokens
-		}
+		inputTokens = resolveInputTokenCount(inputTokens, upstreamUsage, realInputTokens, estimatedInputTokens)
 		cacheUsage, inputTokens := h.promptCache.ResolveUsage(syntheticCacheUsage, upstreamUsage, inputTokens, cacheProfile)
 		cacheDiagnostic = finalizePromptCacheDiagnostic(cacheDiagnostic, upstreamUsage, cacheUsage, inputTokens)
 		payload.setPromptCacheDiagnostic(cacheDiagnostic)
@@ -4148,11 +4136,7 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 			reasoningContent = ""
 		}
 
-		if realInputTokens > 0 {
-			inputTokens = realInputTokens
-		} else if inputTokens <= 0 {
-			inputTokens = estimatedInputTokens
-		}
+		inputTokens = resolveInputTokenCount(inputTokens, upstreamUsage, realInputTokens, estimatedInputTokens)
 		cacheUsage, inputTokens := h.promptCache.ResolveUsage(syntheticCacheUsage, upstreamUsage, inputTokens, cacheProfile)
 		cacheDiagnostic = finalizePromptCacheDiagnostic(cacheDiagnostic, upstreamUsage, cacheUsage, inputTokens)
 		payload.setPromptCacheDiagnostic(cacheDiagnostic)

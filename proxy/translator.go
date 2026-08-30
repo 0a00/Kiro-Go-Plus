@@ -1450,6 +1450,9 @@ type OpenAIUsage struct {
 type OpenAIPromptTokensDetails struct {
 	CachedTokens        int `json:"cached_tokens"`
 	CacheCreationTokens int `json:"cache_creation_tokens,omitempty"`
+	// CacheWriteTokens is the native OpenAI name. Keep the legacy alias above
+	// for clients and adapters that already consume it.
+	CacheWriteTokens int `json:"cache_write_tokens,omitempty"`
 }
 
 type OpenAICompletionTokensDetails struct {
@@ -1457,26 +1460,34 @@ type OpenAICompletionTokensDetails struct {
 }
 
 func buildOpenAIUsage(inputTokens, outputTokens, thinkingTokens int, cacheUsage promptCacheUsage) OpenAIUsage {
+	inputTokens = maxInt(inputTokens, 0)
+	outputTokens = maxInt(outputTokens, 0)
+	cacheUsage = reconcilePromptCacheUsage(cacheUsage, inputTokens)
 	return OpenAIUsage{
 		PromptTokens:     inputTokens,
 		CompletionTokens: outputTokens,
-		TotalTokens:      inputTokens + outputTokens,
+		TotalTokens:      saturatingTokenAdd(inputTokens, outputTokens),
 		PromptTokensDetails: &OpenAIPromptTokensDetails{
 			CachedTokens:        cacheUsage.CacheReadInputTokens,
 			CacheCreationTokens: cacheUsage.CacheCreationInputTokens,
+			CacheWriteTokens:    cacheUsage.CacheCreationInputTokens,
 		},
 		CompletionTokensDetails: &OpenAICompletionTokensDetails{ReasoningTokens: thinkingTokens},
 	}
 }
 
 func buildOpenAIUsageMap(inputTokens, outputTokens, thinkingTokens int, cacheUsage promptCacheUsage) map[string]interface{} {
+	inputTokens = maxInt(inputTokens, 0)
+	outputTokens = maxInt(outputTokens, 0)
+	cacheUsage = reconcilePromptCacheUsage(cacheUsage, inputTokens)
 	return map[string]interface{}{
 		"prompt_tokens":     inputTokens,
 		"completion_tokens": outputTokens,
-		"total_tokens":      inputTokens + outputTokens,
+		"total_tokens":      saturatingTokenAdd(inputTokens, outputTokens),
 		"prompt_tokens_details": map[string]int{
 			"cached_tokens":         cacheUsage.CacheReadInputTokens,
 			"cache_creation_tokens": cacheUsage.CacheCreationInputTokens,
+			"cache_write_tokens":    cacheUsage.CacheCreationInputTokens,
 		},
 		"completion_tokens_details": map[string]int{
 			"reasoning_tokens": thinkingTokens,

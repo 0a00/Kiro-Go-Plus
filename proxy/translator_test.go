@@ -825,7 +825,7 @@ func TestOpenAIUsageIncludesCacheAndReasoningDetails(t *testing.T) {
 		CacheCreationInputTokens: 20,
 	})
 	promptDetails, ok := usage["prompt_tokens_details"].(map[string]int)
-	if !ok || promptDetails["cached_tokens"] != 60 || promptDetails["cache_creation_tokens"] != 20 {
+	if !ok || promptDetails["cached_tokens"] != 60 || promptDetails["cache_creation_tokens"] != 20 || promptDetails["cache_write_tokens"] != 20 {
 		t.Fatalf("unexpected prompt token details: %#v", usage["prompt_tokens_details"])
 	}
 	completionDetails, ok := usage["completion_tokens_details"].(map[string]int)
@@ -839,7 +839,7 @@ func TestResponsesUsageIncludesTokenDetails(t *testing.T) {
 		CacheReadInputTokens:     70,
 		CacheCreationInputTokens: 10,
 	})
-	if usage.InputTokensDetails == nil || usage.InputTokensDetails.CachedTokens != 70 || usage.InputTokensDetails.CacheCreationTokens != 10 {
+	if usage.InputTokensDetails == nil || usage.InputTokensDetails.CachedTokens != 70 || usage.InputTokensDetails.CacheCreationTokens != 10 || usage.InputTokensDetails.CacheWriteTokens != 10 {
 		t.Fatalf("unexpected Responses input details: %+v", usage)
 	}
 	if usage.OutputTokensDetails == nil || usage.OutputTokensDetails.ReasoningTokens != 18 {

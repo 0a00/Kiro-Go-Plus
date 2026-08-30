@@ -128,6 +128,7 @@ type requestDetailResponse struct {
 	CacheCreation5mTokens    int                    `json:"cacheCreation5mTokens,omitempty"`
 	CacheCreation1hTokens    int                    `json:"cacheCreation1hTokens,omitempty"`
 	HasCacheBreakdown        bool                   `json:"hasCacheBreakdown,omitempty"`
+	CacheReportedReadRate    float64                `json:"cacheReportedReadRate,omitempty"`
 	CacheAccountingMode      string                 `json:"cacheAccountingMode,omitempty"`
 	CacheTargetReadRate      float64                `json:"cacheTargetReadRate,omitempty"`
 	CacheTargetApplied       bool                   `json:"cacheTargetApplied,omitempty"`
@@ -1073,6 +1074,7 @@ func (t *requestDetailTrace) finalize(entry requestLogEntry) (requestDetail, boo
 			CacheCreation5mTokens:    usage.CacheCreation5mTokens,
 			CacheCreation1hTokens:    usage.CacheCreation1hTokens,
 			HasCacheBreakdown:        usage.HasCacheBreakdown,
+			CacheReportedReadRate:    entry.CacheReportedReadRate,
 			CacheAccountingMode:      entry.CacheAccountingMode,
 			CacheTargetReadRate:      entry.CacheTargetReadRate,
 			CacheTargetApplied:       entry.CacheTargetApplied,

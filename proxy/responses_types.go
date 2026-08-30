@@ -78,6 +78,9 @@ type ResponsesUsage struct {
 type ResponsesInputTokensDetails struct {
 	CachedTokens        int `json:"cached_tokens"`
 	CacheCreationTokens int `json:"cache_creation_tokens,omitempty"`
+	// CacheWriteTokens is the native OpenAI Responses field. Retain the legacy
+	// cache creation alias for existing clients.
+	CacheWriteTokens int `json:"cache_write_tokens,omitempty"`
 }
 
 type ResponsesOutputTokensDetails struct {
@@ -85,13 +88,17 @@ type ResponsesOutputTokensDetails struct {
 }
 
 func buildResponsesUsage(inputTokens, outputTokens, thinkingTokens int, cacheUsage promptCacheUsage) ResponsesUsage {
+	inputTokens = maxInt(inputTokens, 0)
+	outputTokens = maxInt(outputTokens, 0)
+	cacheUsage = reconcilePromptCacheUsage(cacheUsage, inputTokens)
 	return ResponsesUsage{
 		InputTokens:  inputTokens,
 		OutputTokens: outputTokens,
-		TotalTokens:  inputTokens + outputTokens,
+		TotalTokens:  saturatingTokenAdd(inputTokens, outputTokens),
 		InputTokensDetails: &ResponsesInputTokensDetails{
 			CachedTokens:        cacheUsage.CacheReadInputTokens,
 			CacheCreationTokens: cacheUsage.CacheCreationInputTokens,
+			CacheWriteTokens:    cacheUsage.CacheCreationInputTokens,
 		},
 		OutputTokensDetails: &ResponsesOutputTokensDetails{ReasoningTokens: thinkingTokens},
 	}
