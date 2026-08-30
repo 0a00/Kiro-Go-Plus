@@ -1,5 +1,5 @@
 {
-  "version": "1.2.57",
-  "changelog": "Make long-tool and actionable-output protection activity-aware so sustained thinking, progress, and tool fragments do not trigger false timeouts; retain idle protection for genuinely stalled streams.\n修复长工具和可提交输出保护误把持续思考、进度及工具分片当成超时的问题：改为空闲感知看门狗，持续有活动时不打断，真正无活动时仍按配置保护并重试。",
+  "version": "1.2.58",
+  "changelog": "Recognize wrapped and Anthropic-style EventStream response frames, preserve indexed parallel tool calls, and add payload-safe diagnostics for HTTP 200 empty streams.\n修复嵌套及 Anthropic 风格流事件解析，按内容块索引保留并行工具调用，并为 HTTP 200 空响应增加不泄露内容的诊断信息。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }

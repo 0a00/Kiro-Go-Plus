@@ -178,6 +178,41 @@ func TestEmptyResponseRetryExhaustionStillAllowsAccountFailover(t *testing.T) {
 	}
 }
 
+func TestRetryBudgetErrorDoesNotDuplicateEndpointPrefix(t *testing.T) {
+	now := time.Now()
+	budget := &upstreamAttemptBudget{
+		maxAttempts: 1,
+		startedAt:   now,
+		now:         func() time.Time { return now },
+	}
+	if !budget.take() {
+		t.Fatal("initial upstream attempt was rejected")
+	}
+	diagnostics := &eventStreamDiagnostics{}
+	diagnostics.record(64, decodedStreamEvent{kind: streamEventUnknown})
+	failure := newEmptyResponseErrorWithDiagnostics("AmazonQ", false, diagnostics)
+	budget.recordFailure("AmazonQ", failure)
+
+	message := newRetryBudgetError(budget).Error()
+	if strings.Contains(message, "from AmazonQ: from AmazonQ:") {
+		t.Fatalf("endpoint prefix was duplicated: %s", message)
+	}
+	if strings.Count(message, "from AmazonQ") != 1 {
+		t.Fatalf("unexpected endpoint context: %s", message)
+	}
+	if !strings.Contains(message, "stream diagnostics: frames=1 payload_bytes=64") {
+		t.Fatalf("safe stream diagnostics were lost: %s", message)
+	}
+}
+
+func TestStripEndpointPrefixTerminatesForNestedPrefix(t *testing.T) {
+	message := "HTTP 200: from AmazonQ: from AmazonQ: empty response"
+	got := stripEndpointPrefix(message, "AmazonQ")
+	if got != "HTTP 200: empty response" {
+		t.Fatalf("stripped message = %q, want %q", got, "HTTP 200: empty response")
+	}
+}
+
 func TestCallKiroAPIRetriesSameEndpointBeforeVisibleOutput(t *testing.T) {
 	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatalf("init config: %v", err)

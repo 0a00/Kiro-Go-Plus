@@ -633,6 +633,7 @@ type KiroStreamCallback struct {
 	OnStopReason      func(reason string)
 	detailTrace       *requestDetailTrace
 	detailToolNameMap map[string]string
+	streamDiagnostics *eventStreamDiagnostics
 }
 
 // KiroTokenUsage preserves upstream cache accounting when the event stream
@@ -1014,7 +1015,18 @@ endpointLoop:
 			var firstTokenTimedOut atomic.Bool
 			firstTokenTimeout := time.Duration(retryConfig.FirstTokenTimeoutSeconds) * time.Second
 			var firstTokenTimer *time.Timer
-			wrappedCallback, meaningfulGate := wrapMeaningfulStreamCallback(callback, func() {
+			// A retry is a separate upstream stream. Keep its counters isolated so
+			// an empty-response diagnostic describes only the failing attempt.
+			attemptDiagnostics := &eventStreamDiagnostics{}
+			attemptCallback := callback
+			if attemptCallback == nil {
+				attemptCallback = &KiroStreamCallback{}
+			} else {
+				callbackCopy := *attemptCallback
+				attemptCallback = &callbackCopy
+			}
+			attemptCallback.streamDiagnostics = attemptDiagnostics
+			wrappedCallback, meaningfulGate := wrapMeaningfulStreamCallback(attemptCallback, func() {
 				if firstTokenTimer != nil {
 					firstTokenTimer.Stop()
 				}
@@ -1022,6 +1034,7 @@ endpointLoop:
 					payload.recordUpstreamActivity()
 				}
 			}, payload != nil && payload.requireActionableOutput, payload != nil && payload.requireToolUse, payload != nil && payload.deferTextUntilComplete, payload != nil && payload.streamThinkingPrecommit)
+			wrappedCallback.streamDiagnostics = attemptDiagnostics
 			toolAssemblyTimeout := time.Duration(retryConfig.ToolAssemblyTimeoutSeconds) * time.Second
 			wrappedCallback, toolMonitor := wrapToolAssemblyMonitor(wrappedCallback, toolAssemblyTimeout, func(toolAssemblySnapshot) {
 				cancelRequest()
@@ -1247,7 +1260,7 @@ endpointLoop:
 			}
 			if !meaningfulGate.hasActionableOutput() {
 				retry := payload != nil && payload.attemptBudget.recordEmpty()
-				lastErr = newEmptyResponseError(ep.Name, retry)
+				lastErr = newEmptyResponseErrorWithDiagnostics(ep.Name, retry, attemptDiagnostics)
 				if payload != nil {
 					payload.attemptBudget.recordFailure(ep.Name, lastErr)
 				}
@@ -1348,6 +1361,11 @@ func parseEventStreamWithOptions(body io.Reader, callback *KiroStreamCallback, o
 	if callback == nil {
 		callback = &KiroStreamCallback{}
 	}
+	diagnostics := callback.streamDiagnostics
+	if diagnostics == nil {
+		diagnostics = &eventStreamDiagnostics{}
+		callback.streamDiagnostics = diagnostics
+	}
 
 	// Read directly without bufio to avoid buffering latency in streaming responses.
 	var tokenUsage KiroTokenUsage
@@ -1376,6 +1394,7 @@ func parseEventStreamWithOptions(body io.Reader, callback *KiroStreamCallback, o
 			break
 		}
 		if err != nil {
+			diagnostics.recordInvalid()
 			var streamErr *EventStreamError
 			if errors.As(err, &streamErr) && streamErr.Kind == EventStreamTruncated {
 				boundary, cause := mergeToolUseRecoveryState(
@@ -1412,6 +1431,7 @@ func parseEventStreamWithOptions(body io.Reader, callback *KiroStreamCallback, o
 		lowerType := strings.ToLower(eventType)
 		lastFrameWasTelemetry = false
 		if strings.EqualFold(strings.TrimSpace(eventType), "ContentLengthExceededException") {
+			diagnostics.record(len(payloadBytes), decodedStreamEvent{kind: streamEventCompletion, terminal: true})
 			sawExplicitCompletion = true
 			terminalToolBoundary, terminalToolCause = mergeToolUseRecoveryState(
 				terminalToolBoundary, terminalToolCause,
@@ -1424,6 +1444,7 @@ func parseEventStreamWithOptions(body io.Reader, callback *KiroStreamCallback, o
 		}
 		if messageType == "error" || messageType == "exception" ||
 			strings.Contains(lowerType, "exception") || strings.Contains(lowerType, "error") {
+			diagnostics.recordInvalid()
 			reason, message := upstreamErrorDetails(payloadBytes)
 			classified := classifyUpstreamHTTPError(http.StatusBadGateway, eventType, payloadBytes)
 			if reason != "" {
@@ -1435,11 +1456,13 @@ func parseEventStreamWithOptions(body io.Reader, callback *KiroStreamCallback, o
 			return classified
 		}
 		if len(payloadBytes) == 0 {
+			diagnostics.recordInvalid()
 			return &EventStreamError{Kind: EventStreamInvalidPayload, Message: fmt.Sprintf("%s payload is empty", eventType)}
 		}
 
 		var event map[string]interface{}
 		if err := json.Unmarshal(payloadBytes, &event); err != nil {
+			diagnostics.recordInvalid()
 			label := eventType
 			if label == "" {
 				label = "event"
@@ -1450,9 +1473,13 @@ func parseEventStreamWithOptions(body io.Reader, callback *KiroStreamCallback, o
 				Cause:   err,
 			}
 		}
-		toolPayload, wrappedToolEvent := unwrapToolUseEventPayload(event)
-		toolEvent := wrappedToolEvent || isToolUseEventPayload(eventType, toolPayload, pendingToolUses.latest())
-		if eventType == "" && !toolEvent {
+		decoded := decodeStreamEventWithPending(eventType, event, pendingToolUses, pendingToolUses.latest())
+		diagnostics.record(len(payloadBytes), decoded)
+		if decoded.kind == streamEventUnknown {
+			logger.Debugf("[KiroAPI] Ignored unrecognized EventStream event (type_present=%t, %s)", eventType != "", diagnostics.summary())
+		}
+		if eventType == "" && decoded.kind == streamEventUnknown {
+			diagnostics.recordInvalid()
 			return &EventStreamError{Kind: EventStreamInvalidHeaders, Message: "missing :event-type header"}
 		}
 
@@ -1462,56 +1489,61 @@ func parseEventStreamWithOptions(body io.Reader, callback *KiroStreamCallback, o
 			callback.OnUsage(tokenUsage)
 		}
 
-		// Some Kiro data planes use distinct event names for tool start, input,
-		// and stop frames. Classify those frames by both header and payload.
-		if toolEvent {
-			if toolUseEventSignalsStop(eventType) {
-				toolPayload["stop"] = true
+		if decoded.text != "" {
+			sawOutput = true
+			if callback.OnText != nil {
+				callback.OnText(decoded.text, false)
 			}
+		}
+		if decoded.reasoning != "" {
+			sawOutput = true
+			if callback.OnText != nil {
+				callback.OnText(decoded.reasoning, true)
+			}
+		}
+		for _, toolPayload := range decoded.toolPayloads {
 			sawOutput = true
 			if err = handleToolUseEvent(toolPayload, pendingToolUses, callback); err != nil {
 				return err
 			}
-			continue
 		}
 
-		switch eventType {
-		case "assistantResponseEvent":
-			if content, ok := event["content"].(string); ok && content != "" {
-				sawOutput = true
-				if callback.OnText != nil {
-					callback.OnText(content, false)
+		if decoded.stopReason != "" {
+			sawExplicitCompletion = true
+			boundary := toolUseRecoveryBoundaryForStopReason(decoded.stopReason)
+			terminalToolBoundary, terminalToolCause = mergeToolUseRecoveryState(
+				terminalToolBoundary, terminalToolCause,
+				boundary, fmt.Errorf("%s stop reason %q", eventType, decoded.stopReason),
+			)
+			if callback.OnStopReason != nil {
+				callback.OnStopReason(decoded.stopReason)
+			}
+		}
+		if decoded.terminal {
+			sawExplicitCompletion = true
+		}
+
+		lastFrameWasTelemetry = decoded.telemetry
+		switch decoded.kind {
+		case streamEventMetering:
+			metering := event
+			if wrapped, ok := streamWrapperMap(event, streamTelemetryWrapperNames...); ok {
+				metering = wrapped
+			}
+			for _, candidate := range streamCandidateMaps(metering, streamTelemetryWrapperNames...) {
+				if usage, ok := streamNumberField(candidate, "usage", "creditUsage", "credit_usage"); ok {
+					totalCredits += usage
+					break
 				}
 			}
-		case "reasoningContentEvent":
-			if text, ok := event["text"].(string); ok && text != "" {
-				sawOutput = true
-				if callback.OnText != nil {
-					callback.OnText(text, true)
-				}
+		case streamEventContextUsage:
+			contextEvent := event
+			if wrapped, ok := streamWrapperMap(event, "contextUsageEvent", "context_usage_event", "contextUsage", "context_usage"); ok {
+				contextEvent = wrapped
 			}
-		case "meteringEvent":
-			lastFrameWasTelemetry = true
-			if usage, ok := event["usage"].(float64); ok {
-				totalCredits += usage
-			}
-		case "contextUsageEvent":
-			lastFrameWasTelemetry = true
-			if pct, ok := event["contextUsagePercentage"].(float64); ok {
+			if pct, ok := streamNumberField(contextEvent, "contextUsagePercentage", "context_usage_percentage", "percentage"); ok {
 				if callback.OnContextUsage != nil {
 					callback.OnContextUsage(pct)
-				}
-			}
-		case "metadataEvent":
-			if reason := firstStringField(event, "stopReason", "stop_reason"); reason != "" {
-				sawExplicitCompletion = true
-				boundary := toolUseRecoveryBoundaryForStopReason(reason)
-				terminalToolBoundary, terminalToolCause = mergeToolUseRecoveryState(
-					terminalToolBoundary, terminalToolCause,
-					boundary, fmt.Errorf("%s stop reason %q", eventType, reason),
-				)
-				if callback.OnStopReason != nil {
-					callback.OnStopReason(reason)
 				}
 			}
 		}
@@ -1599,7 +1631,7 @@ func updateTokenUsageFromEvent(event map[string]interface{}, current KiroTokenUs
 			current.HasThinkingBreakdown = true
 		}
 		for _, key := range []string{"outputTokenDetails", "outputTokensDetails", "completionTokenDetails", "completionTokensDetails", "output_token_details", "output_tokens_details", "completion_token_details", "completion_tokens_details"} {
-			details, ok := usage[key].(map[string]interface{})
+			details, ok := streamMapField(usage, key)
 			if !ok {
 				continue
 			}
@@ -1623,7 +1655,7 @@ func updateTokenUsageFromEvent(event map[string]interface{}, current KiroTokenUs
 		cache5m, hasCache5m := readTokenNumber(usage, "ephemeral5mInputTokens", "ephemeral_5m_input_tokens")
 		cache1h, hasCache1h := readTokenNumber(usage, "ephemeral1hInputTokens", "ephemeral_1h_input_tokens")
 		for _, key := range []string{"cache_creation", "cacheCreation"} {
-			creation, ok := usage[key].(map[string]interface{})
+			creation, ok := streamMapField(usage, key)
 			if !ok {
 				continue
 			}
@@ -1748,8 +1780,10 @@ func collectUsageMaps(v interface{}, out *[]map[string]interface{}) {
 	switch t := v.(type) {
 	case map[string]interface{}:
 		for k, child := range t {
-			lk := strings.ToLower(k)
-			if lk == "usage" || lk == "tokenusage" || lk == "token_usage" {
+			lk := normalizeStreamIdentifier(k)
+			if lk == "usage" || lk == "tokenusage" || lk == "metrics" || lk == "tokenmetrics" ||
+				lk == "usageevent" || lk == "metricsevent" || lk == "meteringevent" ||
+				lk == "messagemetadataevent" {
 				if m, ok := child.(map[string]interface{}); ok {
 					*out = append(*out, m)
 				}
@@ -1764,12 +1798,8 @@ func collectUsageMaps(v interface{}, out *[]map[string]interface{}) {
 }
 
 func readTokenNumber(m map[string]interface{}, keys ...string) (int, bool) {
-	for _, k := range keys {
-		v, ok := m[k]
-		if !ok {
-			continue
-		}
-		switch n := v.(type) {
+	parse := func(value interface{}) (int, bool) {
+		switch n := value.(type) {
 		case float64:
 			return int(n), true
 		case int:
@@ -1781,12 +1811,36 @@ func readTokenNumber(m map[string]interface{}, keys ...string) (int, bool) {
 				return int(parsed), true
 			}
 		case string:
-			if parsed, err := strconv.Atoi(n); err == nil {
+			if parsed, err := strconv.Atoi(strings.TrimSpace(n)); err == nil {
 				return parsed, true
 			}
-			if parsed, err := strconv.ParseFloat(n, 64); err == nil {
+			if parsed, err := strconv.ParseFloat(strings.TrimSpace(n), 64); err == nil {
 				return int(parsed), true
 			}
+		}
+		return 0, false
+	}
+	for _, k := range keys {
+		v, ok := m[k]
+		if !ok {
+			continue
+		}
+		if parsed, ok := parse(v); ok {
+			return parsed, true
+		}
+	}
+	wanted := make(map[string]struct{}, len(keys))
+	for _, key := range keys {
+		if normalized := normalizeStreamIdentifier(key); normalized != "" {
+			wanted[normalized] = struct{}{}
+		}
+	}
+	for key, value := range m {
+		if _, ok := wanted[normalizeStreamIdentifier(key)]; !ok {
+			continue
+		}
+		if parsed, ok := parse(value); ok {
+			return parsed, true
 		}
 	}
 	return 0, false
@@ -1795,13 +1849,14 @@ func readTokenNumber(m map[string]interface{}, keys ...string) (int, bool) {
 // ==================== Tool Use Handling ====================
 
 type toolUseState struct {
-	ToolUseID     string
-	Name          string
-	InputBuffer   strings.Builder
-	FragmentCount int
-	GeneratedID   bool
-	StreamStarted bool
-	Stopped       bool
+	ToolUseID         string
+	Name              string
+	ContentBlockIndex string
+	InputBuffer       strings.Builder
+	FragmentCount     int
+	GeneratedID       bool
+	StreamStarted     bool
+	Stopped           bool
 }
 
 // pendingToolUseSet keeps concurrent tool calls separate while preserving the
@@ -1892,6 +1947,19 @@ func (p *pendingToolUseSet) get(id string) *toolUseState {
 		return nil
 	}
 	return p.byID[id]
+}
+
+func (p *pendingToolUseSet) getByContentBlockIndex(index string) *toolUseState {
+	if p == nil || strings.TrimSpace(index) == "" {
+		return nil
+	}
+	for _, id := range p.order {
+		state := p.get(id)
+		if state != nil && state.ContentBlockIndex == index {
+			return state
+		}
+	}
+	return nil
 }
 
 func (p *pendingToolUseSet) first() *toolUseState {
@@ -2043,13 +2111,20 @@ func handleToolUseEvent(event map[string]interface{}, pending *pendingToolUseSet
 	}
 	toolUseID := firstStringField(event, "toolUseId", "toolUseID", "tool_use_id", "id")
 	name := firstStringField(event, "name", "toolName", "tool_name")
-	isStop := firstBoolField(event, "stop", "isStop", "done")
+	contentBlockIndex := streamContentBlockIndexFrom(event)
+	isStop := firstBoolField(event, "stop", "isStop", "done", "completed", "complete", "isFinal", "final")
 	created := false
 	var current *toolUseState
 
 	switch {
 	case toolUseID != "":
 		current = pending.get(toolUseID)
+		if current == nil && contentBlockIndex != "" {
+			current = pending.getByContentBlockIndex(contentBlockIndex)
+			if current != nil {
+				pending.rekey(current, toolUseID)
+			}
+		}
 		if current == nil {
 			latest := pending.latest()
 			if latest != nil && latest.GeneratedID && (name == "" || latest.Name == name) {
@@ -2058,7 +2133,19 @@ func handleToolUseEvent(event map[string]interface{}, pending *pendingToolUseSet
 			}
 		}
 		if current == nil && name != "" {
-			current = &toolUseState{ToolUseID: toolUseID, Name: name}
+			current = &toolUseState{ToolUseID: toolUseID, Name: name, ContentBlockIndex: contentBlockIndex}
+			pending.add(current)
+			created = true
+		}
+	case contentBlockIndex != "":
+		current = pending.getByContentBlockIndex(contentBlockIndex)
+		if current == nil && name != "" {
+			current = &toolUseState{
+				ToolUseID:         "toolu_" + uuid.New().String(),
+				Name:              name,
+				ContentBlockIndex: contentBlockIndex,
+				GeneratedID:       true,
+			}
 			pending.add(current)
 			created = true
 		}
@@ -2087,6 +2174,9 @@ func handleToolUseEvent(event map[string]interface{}, pending *pendingToolUseSet
 			Kind:    EventStreamInvalidPayload,
 			Message: "toolUseEvent is missing a tool name",
 		}
+	}
+	if current.ContentBlockIndex == "" && contentBlockIndex != "" {
+		current.ContentBlockIndex = contentBlockIndex
 	}
 	if created && current.GeneratedID && callback != nil && callback.OnToolUseActivity != nil {
 		callback.OnToolUseActivity()
@@ -2119,6 +2209,17 @@ func handleToolUseEvent(event map[string]interface{}, pending *pendingToolUseSet
 			}
 		}
 		if !current.StreamStarted && callback != nil && callback.OnToolUseActivity != nil {
+			callback.OnToolUseActivity()
+		}
+	} else if inputArray, ok := event["input"].([]interface{}); ok && len(inputArray) > 0 {
+		data, _ := json.Marshal(inputArray)
+		current.InputBuffer.Reset()
+		current.InputBuffer.Write(data)
+		current.FragmentCount++
+		if callback != nil && callback.OnToolUseDelta != nil && current.StreamStarted {
+			callback.OnToolUseDelta(current.ToolUseID, string(data))
+		}
+		if callback != nil && callback.OnToolUseActivity != nil && !current.StreamStarted {
 			callback.OnToolUseActivity()
 		}
 	}

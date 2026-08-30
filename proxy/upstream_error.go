@@ -363,10 +363,18 @@ func classifyRequestCancellation(endpoint string, err error) *UpstreamError {
 }
 
 func newEmptyResponseError(endpoint string, retryEndpoints bool) *UpstreamError {
+	return newEmptyResponseErrorWithDiagnostics(endpoint, retryEndpoints, nil)
+}
+
+func newEmptyResponseErrorWithDiagnostics(endpoint string, retryEndpoints bool, diagnostics *eventStreamDiagnostics) *UpstreamError {
+	message := "upstream returned HTTP 200 without actionable text or a complete tool call"
+	if summary := diagnostics.summary(); summary != "" {
+		message += "; stream diagnostics: " + summary
+	}
 	return &UpstreamError{
 		Kind:                 UpstreamErrorEmptyResponse,
 		Endpoint:             endpoint,
-		Message:              "upstream returned HTTP 200 without actionable text or a complete tool call",
+		Message:              message,
 		RetryAcrossEndpoints: retryEndpoints,
 		// Exhausting endpoint-level empty retries must not prevent another
 		// account from serving the request.
@@ -463,7 +471,7 @@ func newRetryBudgetError(budget *upstreamAttemptBudget) *UpstreamError {
 		message = fmt.Sprintf("upstream retry %s exhausted after %d attempts in %s", limitType, snapshot.Attempts, snapshot.Elapsed.Round(time.Second))
 		if snapshot.LastError != "" {
 			if snapshot.LastEndpoint != "" {
-				message += fmt.Sprintf("; last failure from %s: %s", snapshot.LastEndpoint, snapshot.LastError)
+				message += fmt.Sprintf("; last failure from %s: %s", snapshot.LastEndpoint, stripEndpointPrefix(snapshot.LastError, snapshot.LastEndpoint))
 			} else {
 				message += "; last failure: " + snapshot.LastError
 			}
@@ -473,6 +481,23 @@ func newRetryBudgetError(budget *upstreamAttemptBudget) *UpstreamError {
 		Kind:    UpstreamErrorRetryBudget,
 		Message: message,
 	}
+}
+
+func stripEndpointPrefix(message, endpoint string) string {
+	message = strings.TrimSpace(message)
+	endpoint = strings.TrimSpace(endpoint)
+	if message == "" || endpoint == "" {
+		return message
+	}
+	prefix := "from " + endpoint + ":"
+	if !strings.Contains(message, prefix) {
+		return message
+	}
+	// UpstreamError.Error already includes its endpoint. Remove every copy in
+	// one pass; iterative removal can revisit the same occurrence forever when
+	// a preceding message fragment remains (for example, "HTTP 200: from ...").
+	message = strings.ReplaceAll(message, prefix, "")
+	return strings.Join(strings.Fields(message), " ")
 }
 
 func upstreamErrorDetails(body []byte) (string, string) {

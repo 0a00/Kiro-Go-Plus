@@ -185,6 +185,142 @@ func TestParseEventStreamReadsStopReasonKeyVariants(t *testing.T) {
 	}
 }
 
+func TestParseEventStreamReadsNestedAssistantResponseMessage(t *testing.T) {
+	stream := bytes.NewReader(bytes.Join([][]byte{
+		awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{
+			"assistantResponseMessage": map[string]interface{}{
+				"content": "nested answer",
+			},
+		}),
+		awsEventStreamFrame(t, "messageMetadataEvent", map[string]interface{}{
+			"messageMetadataEvent": map[string]interface{}{
+				"stopReason": "end_turn",
+			},
+		}),
+	}, nil))
+
+	var output strings.Builder
+	var stopReason string
+	err := parseEventStream(stream, &KiroStreamCallback{
+		OnText:       func(text string, _ bool) { output.WriteString(text) },
+		OnStopReason: func(reason string) { stopReason = reason },
+	})
+	if err != nil {
+		t.Fatalf("nested assistant response failed: %v", err)
+	}
+	if output.String() != "nested answer" || stopReason != "end_turn" {
+		t.Fatalf("unexpected nested response: output=%q stop=%q", output.String(), stopReason)
+	}
+}
+
+func TestParseEventStreamAcceptsTelemetryAndAuxiliaryTail(t *testing.T) {
+	stream := bytes.NewReader(bytes.Join([][]byte{
+		awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "answer"}),
+		awsEventStreamFrame(t, "usageEvent", map[string]interface{}{
+			"usageEvent": map[string]interface{}{"inputTokens": 12, "outputTokens": 4},
+		}),
+		awsEventStreamFrame(t, "metricsEvent", map[string]interface{}{
+			"metricsEvent": map[string]interface{}{"usage": 1.0},
+		}),
+		awsEventStreamFrame(t, "followupPromptEvent", map[string]interface{}{
+			"followupPrompt": "untrusted auxiliary text",
+		}),
+	}, nil))
+
+	var output strings.Builder
+	err := parseEventStream(stream, &KiroStreamCallback{
+		OnText: func(text string, _ bool) { output.WriteString(text) },
+	})
+	if err != nil {
+		t.Fatalf("telemetry tail was treated as truncation: %v", err)
+	}
+	if output.String() != "answer" {
+		t.Fatalf("auxiliary event leaked into output: %q", output.String())
+	}
+}
+
+func TestParseEventStreamAssociatesInterleavedContentBlockToolsByIndex(t *testing.T) {
+	stream := bytes.NewReader(bytes.Join([][]byte{
+		awsEventStreamFrame(t, "contentBlockStart", map[string]interface{}{
+			"index": 1,
+			"contentBlock": map[string]interface{}{
+				"type": "tool_use", "id": "toolu_one", "name": "one", "input": map[string]interface{}{},
+			},
+		}),
+		awsEventStreamFrame(t, "contentBlockStart", map[string]interface{}{
+			"index": 2,
+			"contentBlock": map[string]interface{}{
+				"type": "tool_use", "id": "toolu_two", "name": "two", "input": map[string]interface{}{},
+			},
+		}),
+		awsEventStreamFrame(t, "contentBlockDelta", map[string]interface{}{
+			"index": 2,
+			"delta": map[string]interface{}{"type": "input_json_delta", "partial_json": `{"two":2}`},
+		}),
+		awsEventStreamFrame(t, "contentBlockStop", map[string]interface{}{"index": 2}),
+		awsEventStreamFrame(t, "contentBlockDelta", map[string]interface{}{
+			"index": 1,
+			"delta": map[string]interface{}{"type": "input_json_delta", "partial_json": `{"one":1}`},
+		}),
+		awsEventStreamFrame(t, "contentBlockStop", map[string]interface{}{"index": 1}),
+	}, nil))
+
+	var tools []KiroToolUse
+	err := parseEventStream(stream, &KiroStreamCallback{
+		OnToolUse: func(tool KiroToolUse) { tools = append(tools, tool) },
+	})
+	if err != nil {
+		t.Fatalf("indexed tool stream failed: %v", err)
+	}
+	if len(tools) != 2 || tools[0].ToolUseID != "toolu_one" || tools[1].ToolUseID != "toolu_two" {
+		t.Fatalf("unexpected tool order: %+v", tools)
+	}
+	if tools[0].Input["one"] != float64(1) || tools[1].Input["two"] != float64(2) {
+		t.Fatalf("tool arguments were associated with the wrong block: %+v", tools)
+	}
+}
+
+func TestParseEventStreamDoesNotTreatTextAndThinkingContentBlocksAsTools(t *testing.T) {
+	stream := bytes.NewReader(bytes.Join([][]byte{
+		awsEventStreamFrame(t, "contentBlockStart", map[string]interface{}{
+			"index":        0,
+			"contentBlock": map[string]interface{}{"type": "thinking", "thinking": ""},
+		}),
+		awsEventStreamFrame(t, "contentBlockDelta", map[string]interface{}{
+			"index": 0,
+			"delta": map[string]interface{}{"type": "thinking_delta", "thinking": "planning"},
+		}),
+		awsEventStreamFrame(t, "contentBlockStop", map[string]interface{}{"index": 0}),
+		awsEventStreamFrame(t, "contentBlockStart", map[string]interface{}{
+			"index":        1,
+			"contentBlock": map[string]interface{}{"type": "text", "text": ""},
+		}),
+		awsEventStreamFrame(t, "contentBlockDelta", map[string]interface{}{
+			"index": 1,
+			"delta": map[string]interface{}{"type": "text_delta", "text": "answer"},
+		}),
+		awsEventStreamFrame(t, "contentBlockStop", map[string]interface{}{"index": 1}),
+		awsEventStreamFrame(t, "messageStop", map[string]interface{}{}),
+	}, nil))
+
+	var output, reasoning strings.Builder
+	err := parseEventStream(stream, &KiroStreamCallback{
+		OnText: func(text string, isThinking bool) {
+			if isThinking {
+				reasoning.WriteString(text)
+			} else {
+				output.WriteString(text)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("text/thinking content blocks were misclassified: %v", err)
+	}
+	if reasoning.String() != "planning" || output.String() != "answer" {
+		t.Fatalf("unexpected content-block output: reasoning=%q output=%q", reasoning.String(), output.String())
+	}
+}
+
 func TestParseEventStreamTreatsContentLengthExceededAsMaxTokens(t *testing.T) {
 	stream := bytes.NewReader(bytes.Join([][]byte{
 		awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "partial but valid"}),
