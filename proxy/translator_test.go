@@ -803,14 +803,20 @@ func TestOpenAIToolResultImageCarriedWhenFollowedByUser(t *testing.T) {
 	payload := OpenAIToKiro(req, false)
 
 	var toolHistImages int
+	var toolHistResults int
 	for _, h := range payload.ConversationState.History {
-		if h.UserInputMessage != nil && h.UserInputMessage.UserInputMessageContext != nil &&
-			len(h.UserInputMessage.UserInputMessageContext.ToolResults) > 0 {
+		if h.UserInputMessage != nil {
 			toolHistImages += len(h.UserInputMessage.Images)
+			if h.UserInputMessage.UserInputMessageContext != nil {
+				toolHistResults += len(h.UserInputMessage.UserInputMessageContext.ToolResults)
+			}
 		}
 	}
 	if toolHistImages != 1 {
-		t.Fatalf("expected tool image carried on the flushed tool-result history entry, got %d", toolHistImages)
+		t.Fatalf("expected tool image carried on the flushed history entry, got %d", toolHistImages)
+	}
+	if toolHistResults != 0 {
+		t.Fatalf("historical tool results must be narrated instead of remaining structured, got %d", toolHistResults)
 	}
 
 	cur := payload.ConversationState.CurrentMessage.UserInputMessage

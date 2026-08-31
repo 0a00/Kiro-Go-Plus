@@ -342,13 +342,13 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 	// the last history assistant must carry matching structured toolUses. If not
 	// (orphaned tool results, e.g. after context compaction), flatten them into
 	// the current message text so the upstream does not reject the request.
-	currentToolResultIDs := collectToolResultIDs(currentToolResults)
-	keepCurrentToolResults := currentToolResultsMatchLastAssistant(history, currentToolResultIDs)
+	orderedToolResults, keepCurrentToolResults := orderToolResultsForLastAssistant(history, currentToolResults)
 
 	// Flatten structured tool calls/results that live in history; upstream only
 	// accepts a single active tool turn (last assistant toolUses ⟺ current toolResults).
 	if keepCurrentToolResults {
-		history = sanitizeKiroHistory(history, currentToolResultIDs)
+		currentToolResults = orderedToolResults
+		history = sanitizeKiroHistory(history, currentToolResults)
 	} else {
 		history = sanitizeKiroHistory(history, nil)
 	}
@@ -1636,11 +1636,11 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 
 	// Decide whether current tool results form a valid active tool turn; if not,
 	// flatten them into the current message text (see ClaudeToKiro for rationale).
-	currentToolResultIDs := collectToolResultIDs(currentToolResults)
-	keepCurrentToolResults := currentToolResultsMatchLastAssistant(history, currentToolResultIDs)
+	orderedToolResults, keepCurrentToolResults := orderToolResultsForLastAssistant(history, currentToolResults)
 
 	if keepCurrentToolResults {
-		history = sanitizeKiroHistory(history, currentToolResultIDs)
+		currentToolResults = orderedToolResults
+		history = sanitizeKiroHistory(history, currentToolResults)
 	} else {
 		history = sanitizeKiroHistory(history, nil)
 	}
@@ -1807,8 +1807,11 @@ func extractOpenAIMessageText(content interface{}) string {
 	return ""
 }
 
-// collectToolResultIDs returns the set of toolUseId values referenced by the
-// given tool results.
+// collectToolResultIDs returns the set of non-empty toolUseId values referenced
+// by the given tool results. It is retained for set-oriented diagnostics and
+// compatibility with older callers; pairing decisions must use
+// orderToolResultsForLastAssistant because a map cannot represent duplicates or
+// empty IDs.
 func collectToolResultIDs(toolResults []KiroToolResult) map[string]bool {
 	if len(toolResults) == 0 {
 		return nil
@@ -1822,19 +1825,88 @@ func collectToolResultIDs(toolResults []KiroToolResult) map[string]bool {
 	return ids
 }
 
+// lastAssistantToolUseIDs returns the ordered, unique IDs from the immediately
+// preceding assistant turn. Kiro treats tool_result blocks as belonging only to
+// that turn, so searching farther back would incorrectly accept stale results.
+func lastAssistantToolUseIDs(history []KiroHistoryMessage) ([]string, bool) {
+	if len(history) == 0 {
+		return nil, false
+	}
+	last := history[len(history)-1]
+	if last.AssistantResponseMessage == nil || len(last.AssistantResponseMessage.ToolUses) == 0 {
+		return nil, false
+	}
+
+	ids := make([]string, 0, len(last.AssistantResponseMessage.ToolUses))
+	seen := make(map[string]struct{}, len(last.AssistantResponseMessage.ToolUses))
+	for _, toolUse := range last.AssistantResponseMessage.ToolUses {
+		id := toolUse.ToolUseID
+		if strings.TrimSpace(id) == "" {
+			return nil, false
+		}
+		if _, exists := seen[id]; exists {
+			return nil, false
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	return ids, true
+}
+
+// orderToolResultsForLastAssistant validates a complete one-to-one tool
+// result pairing and returns results in the assistant tool-use order. A result
+// list is considered invalid when it has a missing, extra, duplicate, or empty
+// ID. Returning false deliberately makes callers flatten the entire list into
+// text instead of sending a partially structured request that Kiro rejects.
+func orderToolResultsForLastAssistant(history []KiroHistoryMessage, toolResults []KiroToolResult) ([]KiroToolResult, bool) {
+	toolUseIDs, ok := lastAssistantToolUseIDs(history)
+	if !ok || len(toolResults) != len(toolUseIDs) {
+		return nil, false
+	}
+
+	byID := make(map[string]KiroToolResult, len(toolResults))
+	for _, result := range toolResults {
+		id := result.ToolUseID
+		if strings.TrimSpace(id) == "" {
+			return nil, false
+		}
+		if _, exists := byID[id]; exists {
+			return nil, false
+		}
+		byID[id] = result
+	}
+
+	ordered := make([]KiroToolResult, 0, len(toolUseIDs))
+	for _, id := range toolUseIDs {
+		result, exists := byID[id]
+		if !exists {
+			return nil, false
+		}
+		ordered = append(ordered, result)
+	}
+	return ordered, true
+}
+
 // currentToolResultsMatchLastAssistant reports whether the current message's
 // tool results answer the structured tool calls of the final history assistant
-// message. Only in that case may the current toolResults stay structured.
+// message. This map-based compatibility wrapper still enforces an exact set
+// match; callers that have the original slice should use
+// orderToolResultsForLastAssistant to detect duplicates and preserve order.
 func currentToolResultsMatchLastAssistant(history []KiroHistoryMessage, currentToolResultIDs map[string]bool) bool {
 	if len(currentToolResultIDs) == 0 || len(history) == 0 {
 		return false
 	}
-	last := history[len(history)-1]
-	if last.AssistantResponseMessage == nil || len(last.AssistantResponseMessage.ToolUses) == 0 {
+	for id := range currentToolResultIDs {
+		if strings.TrimSpace(id) == "" {
+			return false
+		}
+	}
+	toolUseIDs, ok := lastAssistantToolUseIDs(history)
+	if !ok || len(toolUseIDs) != len(currentToolResultIDs) {
 		return false
 	}
-	for _, tu := range last.AssistantResponseMessage.ToolUses {
-		if !currentToolResultIDs[tu.ToolUseID] {
+	for _, id := range toolUseIDs {
+		if !currentToolResultIDs[id] {
 			return false
 		}
 	}
@@ -1921,10 +1993,10 @@ func joinHistoryText(existing, narrated string) string {
 // message's toolResults. Everything else is narrated as text so the upstream
 // accepts the request.
 //
-// currentToolResultIDs is the set of toolUseId values carried by the current
+// currentToolResults is the complete toolUseId list carried by the current
 // (outgoing) message. When the last history entry is an assistant message whose
-// tool uses are fully covered by that set, its structured toolUses are kept.
-func sanitizeKiroHistory(history []KiroHistoryMessage, currentToolResultIDs map[string]bool) []KiroHistoryMessage {
+// tool uses have an exact one-to-one match, its structured toolUses are kept.
+func sanitizeKiroHistory(history []KiroHistoryMessage, currentToolResults []KiroToolResult) []KiroHistoryMessage {
 	if len(history) == 0 {
 		return history
 	}
@@ -1946,20 +2018,8 @@ func sanitizeKiroHistory(history []KiroHistoryMessage, currentToolResultIDs map[
 	// Determine whether the last history assistant turn is the "active" tool turn
 	// answered by the current message. If so, its structured toolUses stay.
 	activeIdx := -1
-	if len(currentToolResultIDs) > 0 {
-		last := history[len(history)-1]
-		if last.AssistantResponseMessage != nil && len(last.AssistantResponseMessage.ToolUses) > 0 {
-			allCovered := true
-			for _, tu := range last.AssistantResponseMessage.ToolUses {
-				if !currentToolResultIDs[tu.ToolUseID] {
-					allCovered = false
-					break
-				}
-			}
-			if allCovered {
-				activeIdx = len(history) - 1
-			}
-		}
+	if _, ok := orderToolResultsForLastAssistant(history, currentToolResults); ok {
+		activeIdx = len(history) - 1
 	}
 
 	for i := range history {
@@ -1991,10 +2051,6 @@ func sanitizeKiroHistory(history []KiroHistoryMessage, currentToolResultIDs map[
 		if msg.UserInputMessage != nil && msg.UserInputMessage.UserInputMessageContext != nil {
 			ctx := msg.UserInputMessage.UserInputMessageContext
 			if len(ctx.ToolResults) > 0 {
-				if len(msg.UserInputMessage.Images) > 0 {
-					ctx.Tools = nil
-					continue
-				}
 				narrated := narrateToolResults(ctx.ToolResults, toolNames)
 				msg.UserInputMessage.Content = joinHistoryText(msg.UserInputMessage.Content, narrated)
 				ctx.ToolResults = nil
@@ -2209,7 +2265,7 @@ func activeToolTurn(payload *KiroPayload, history, conversation []KiroHistoryMes
 	if context == nil || len(context.ToolResults) == 0 {
 		return nil
 	}
-	if !currentToolResultsMatchLastAssistant(history, collectToolResultIDs(context.ToolResults)) {
+	if _, ok := orderToolResultsForLastAssistant(history, context.ToolResults); !ok {
 		return nil
 	}
 	return conversation[len(conversation)-1].AssistantResponseMessage
@@ -2224,7 +2280,10 @@ func detachOrphanedToolResults(payload *KiroPayload) {
 	if context == nil || len(context.ToolResults) == 0 {
 		return
 	}
-	if currentToolResultsMatchLastAssistant(payload.ConversationState.History, collectToolResultIDs(context.ToolResults)) {
+	if ordered, ok := orderToolResultsForLastAssistant(payload.ConversationState.History, context.ToolResults); ok {
+		// Keep parallel results deterministic even when the client returned them
+		// in completion order rather than assistant declaration order.
+		context.ToolResults = ordered
 		return
 	}
 
@@ -2239,6 +2298,56 @@ func detachOrphanedToolResults(payload *KiroPayload) {
 	if len(context.Tools) == 0 {
 		current.UserInputMessageContext = nil
 	}
+}
+
+// repairKiroPayloadToolResults is the final defense before a payload is sent to
+// Kiro. Translators normally establish this invariant earlier, but retries,
+// response-history expansion, and payload truncation can change the last
+// assistant turn after translation. Invalid current results are flattened; any
+// remaining structured history is passed through the same sanitizer so an
+// orphan cannot reach the upstream data plane.
+func repairKiroPayloadToolResults(payload *KiroPayload) {
+	if payload == nil {
+		return
+	}
+
+	current := &payload.ConversationState.CurrentMessage.UserInputMessage
+	currentResults := []KiroToolResult(nil)
+	if context := current.UserInputMessageContext; context != nil && len(context.ToolResults) > 0 {
+		if ordered, ok := orderToolResultsForLastAssistant(payload.ConversationState.History, context.ToolResults); ok {
+			context.ToolResults = ordered
+			currentResults = ordered
+		} else {
+			detachOrphanedToolResults(payload)
+		}
+	}
+
+	if historyHasStructuredToolData(payload.ConversationState.History) {
+		payload.ConversationState.History = sanitizeKiroHistory(payload.ConversationState.History, currentResults)
+	}
+
+	// Sanitizing history can remove the assistant that justified the current
+	// results. Re-check after that pass and flatten rather than sending a stale
+	// structured block.
+	if context := current.UserInputMessageContext; context != nil && len(context.ToolResults) > 0 {
+		if ordered, ok := orderToolResultsForLastAssistant(payload.ConversationState.History, context.ToolResults); ok {
+			context.ToolResults = ordered
+		} else {
+			detachOrphanedToolResults(payload)
+		}
+	}
+}
+
+func historyHasStructuredToolData(history []KiroHistoryMessage) bool {
+	for _, message := range history {
+		if assistant := message.AssistantResponseMessage; assistant != nil && len(assistant.ToolUses) > 0 {
+			return true
+		}
+		if user := message.UserInputMessage; user != nil && user.UserInputMessageContext != nil && len(user.UserInputMessageContext.ToolResults) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // historyEntryByteSize returns the serialized size of a single history entry,

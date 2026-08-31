@@ -252,6 +252,17 @@ func classifyUpstreamHTTPError(statusCode int, endpoint string, body []byte) *Up
 	}
 
 	switch {
+	case strings.Contains(combined, "tool_use_result_mismatch") ||
+		strings.Contains(combined, "unexpected tool_use_id") ||
+		(strings.Contains(combined, "tool_result") &&
+			(strings.Contains(combined, "corresponding tool_use") ||
+				strings.Contains(combined, "previous message"))):
+		// Kiro rejects malformed conversation structure deterministically. Retrying
+		// another account or endpoint with the same payload only repeats the 400;
+		// the translator must flatten/repair the tool results first.
+		err.Kind = UpstreamErrorClientRequest
+		err.RetryAcrossAccounts = false
+		err.RetryAcrossEndpoints = false
 	case strings.Contains(combined, "temporarily_suspended") ||
 		strings.Contains(combined, "temporarily is suspended") ||
 		strings.Contains(combined, "account suspended") ||

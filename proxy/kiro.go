@@ -786,6 +786,12 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 		payload.attemptBudget = newUpstreamAttemptBudget()
 	}
 
+	// Translators normally enforce tool-use/result pairing, but payload history
+	// can be rebuilt or truncated between translation and this call. Repair the
+	// final in-memory payload immediately before every marshal so an orphaned,
+	// duplicate, or stale tool_result never reaches Kiro.
+	repairKiroPayloadToolResults(payload)
+
 	if _, err := json.Marshal(payload); err != nil {
 		return err
 	}
