@@ -3920,8 +3920,9 @@
     body.innerHTML =
       '<p class="help-block">' + escapeHtml(t('modal.apiKeyDesc')) + '</p>' +
       '<div class="form-group"><label>' + escapeHtml(t('apikey.keyLabel')) + '</label>' +
-      '<input type="password" id="kiroApiKeyValue" class="font-mono" placeholder="ksk_..." autocomplete="new-password" spellcheck="false" /></div>' +
-      '<div class="form-group"><label>' + escapeHtml(t('apikey.nickname')) + ' <small>' + escapeHtml(t('apikey.optional')) + '</small></label>' +
+      '<textarea id="kiroApiKeyValue" class="font-mono" rows="5" placeholder="' + escapeAttr(t('apikey.keyPlaceholder')) + '" autocomplete="off" spellcheck="false"></textarea>' +
+      '<small class="form-hint">' + escapeHtml(t('apikey.batchHint')) + '</small></div>' +
+      '<div class="form-group"><label>' + escapeHtml(t('apikey.nickname')) + ' <small>' + escapeHtml(t('apikey.nicknameBatchHint')) + '</small></label>' +
       '<input type="text" id="kiroApiKeyNickname" placeholder="' + escapeAttr(t('apikey.nicknamePlaceholder')) + '" /></div>' +
       '<div class="form-group"><label>' + escapeHtml(t('detail.region')) + ' <small>' + escapeHtml(t('apikey.autoDetect')) + '</small></label>' +
       '<input type="text" id="kiroApiKeyRegion" placeholder="us-east-1" /></div>' +
@@ -3935,12 +3936,45 @@
     $('importKiroApiKeyBtn').addEventListener('click', importKiroApiKey);
   }
   async function importKiroApiKey() {
-    const key = $('kiroApiKeyValue').value.trim();
-    if (!key) return toastWarning(t('apikey.keyMissing'));
-    if (!key.startsWith('ksk_') || key.length <= 4) return toastWarning(t('apikey.keyInvalid'));
+    const raw = $('kiroApiKeyValue').value;
+    const keys = raw.split(/\r\n|\n|\r/).map(line => line.trim()).filter(Boolean);
+    if (!keys.length) return toastWarning(t('apikey.keyMissing'));
+    if (keys.length > 1000) return toastWarning(t('apikey.batchTooMany'));
     const button = $('importKiroApiKeyBtn');
     button.disabled = true;
     try {
+      if (keys.length > 1) {
+        const res = await api('/accounts/kiro-api-keys/batch', {
+          method: 'POST',
+          body: JSON.stringify({
+            // Preserve physical line numbers so batch errors point to the
+            // same lines the administrator pasted, including blank lines.
+            keys: raw,
+            nicknamePrefix: $('kiroApiKeyNickname').value.trim(),
+            region: $('kiroApiKeyRegion').value.trim(),
+            proxyURL: $('kiroApiKeyProxyURL').value.trim(),
+            enabled: true
+          })
+        });
+        const d = await res.json().catch(() => ({}));
+        if (!res.ok || !d.counts) throw new Error(d.error || res.status);
+        const counts = d.counts;
+        let message = t('apikey.batchResult', counts.created || 0, counts.updated || 0, counts.duplicates || 0, counts.failed || 0);
+        const failures = Array.isArray(d.results) ? d.results.filter(item => item && item.status === 'failed').slice(0, 3) : [];
+        if (failures.length) {
+          const details = failures.map(item => t('apikey.batchErrorLine', item.index || 0, item.keyMasked || 'api-key-****', String(item.error || '').slice(0, 180))).join(' | ');
+          message += ' ' + details;
+        }
+        closeModal();
+        loadAccounts();
+        loadStats();
+        if (counts.failed) toastWarning(message, { duration: 12000 });
+        else toastPrimary(message);
+        return;
+      }
+
+      const key = keys[0];
+      if (!key.startsWith('ksk_') || key.length <= 4) return toastWarning(t('apikey.keyInvalid'));
       const res = await api('/accounts', {
         method: 'POST',
         body: JSON.stringify({

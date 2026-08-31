@@ -4351,6 +4351,8 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 		h.apiGetAccounts(w, r)
 	case path == "/accounts" && r.Method == "POST":
 		h.apiAddAccount(w, r)
+	case path == "/accounts/kiro-api-keys/batch" && r.Method == "POST":
+		h.apiAddKiroAPIKeysBatch(w, r)
 	case path == "/accounts/batch" && r.Method == "POST":
 		h.apiBatchAccounts(w, r)
 	// models/refresh 必须在通用 /refresh 前匹配，否则会被误拦截

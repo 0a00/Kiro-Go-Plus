@@ -448,6 +448,68 @@ func TestKiroAPIKeyAccountNormalization(t *testing.T) {
 	}
 }
 
+func TestDifferentKiroAPIKeysWithSharedProfileStaySeparate(t *testing.T) {
+	if err := Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	shared := func(key string) Account {
+		return Account{
+			ID:          "generated-" + key,
+			Email:       "same@example.invalid",
+			UserId:      "same-user",
+			Provider:    "API Key",
+			AuthMethod:  "api_key",
+			AccessToken: key,
+			KiroApiKey:  key,
+			Enabled:     true,
+		}
+	}
+	first, updated, err := UpsertAccountByIdentity(shared("ksk_first"))
+	if err != nil || updated {
+		t.Fatalf("first upsert: account=%+v updated=%v err=%v", first, updated, err)
+	}
+	second, updated, err := UpsertAccountByIdentity(shared("ksk_second"))
+	if err != nil || updated {
+		t.Fatalf("second key was merged: account=%+v updated=%v err=%v", second, updated, err)
+	}
+	accounts := GetAccounts()
+	if len(accounts) != 2 {
+		t.Fatalf("different API keys produced %d accounts, want 2: %+v", len(accounts), accounts)
+	}
+
+	updatedAccount := shared("ksk_first")
+	updatedAccount.Nickname = "renamed"
+	_, updated, err = UpsertAccountByIdentity(updatedAccount)
+	if err != nil || !updated {
+		t.Fatalf("same key was not idempotently updated: updated=%v err=%v", updated, err)
+	}
+	if got := len(GetAccounts()); got != 2 {
+		t.Fatalf("same key update changed account count to %d", got)
+	}
+}
+
+func TestAPIKeyDoesNotMergeWithOAuthProfileIdentity(t *testing.T) {
+	if err := Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	if err := AddAccount(Account{
+		ID: "oauth", Email: "shared@example.invalid", UserId: "shared-user",
+		Provider: "BuilderId", AuthMethod: "social", AccessToken: "oauth-token", Enabled: true,
+	}); err != nil {
+		t.Fatalf("add OAuth account: %v", err)
+	}
+	_, updated, err := UpsertAccountByIdentity(Account{
+		ID: "api", Email: "shared@example.invalid", UserId: "shared-user",
+		Provider: "API Key", AuthMethod: "api_key", KiroApiKey: "ksk_profile-isolated", Enabled: true,
+	})
+	if err != nil || updated {
+		t.Fatalf("API key merged with OAuth account: updated=%v err=%v", updated, err)
+	}
+	if got := len(GetAccounts()); got != 2 {
+		t.Fatalf("OAuth/API key identity collision left %d accounts, want 2", got)
+	}
+}
+
 func TestPromptCacheDefaultsForLegacyConfig(t *testing.T) {
 	dir := t.TempDir()
 	cfgFile := filepath.Join(dir, "config.json")

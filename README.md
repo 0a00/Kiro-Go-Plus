@@ -22,7 +22,7 @@ Kiro-Go Plus preserves Kiro-Go's API and deployment compatibility while adding p
 - Failure protection: model-window-aware input truncation, first-output timeout, safe same-endpoint retry before client-visible output, actionable-output and required-tool validation, selectable safe/adaptive/balanced/live tool streams, long-tool truncation recovery, endpoint circuits, durable cooldowns, and bounded retries
 - Token controls: bounded enabled/adaptive thinking, native Kiro reasoning effort, configurable default thinking/output/context budgets, and client-value precedence
 - Streaming validation: AWS EventStream length and CRC validation, idle timeout, and truncated-response detection
-- Authentication: Builder ID, IAM Identity Center, Kiro hosted SSO, Microsoft 365 / Entra ID, SSO Token, API key, and direct multi-file native/KAM JSON import from the authenticated Web admin; OAuth authentication regions remain separate from Profile ARN data-plane regions, while `ksk_` keys discover and validate their data-plane region before persistence
+- Authentication: Builder ID, IAM Identity Center, Kiro hosted SSO, Microsoft 365 / Entra ID, SSO Token, API key, one-per-line Kiro API Key batch import, and direct multi-file native/KAM JSON import from the authenticated Web admin; OAuth authentication regions remain separate from Profile ARN data-plane regions, while `ksk_` keys discover and validate their data-plane region before persistence
 - Prompt Cache accounting: official upstream usage, legacy matched-prefix efficiency, or a total-input target range compatible with New API/Sub2API; includes 5m/1h TTLs, sharded LRU, API-key isolation, persistence, and diagnostics
 - Extensions: Claude Opus 5 and Sonnet 5 metadata, GPT-5.6 aliases, dynamic model capability/effort discovery, optional safe unlisted-model pass-through, text/thinking/tool self-tests, multi-round Web Search, external token counting, and Responses history
 - Operations: account inventory diagnostics with latency/error EWMAs and affinity rates, persisted request metadata, bounded long-term JSONL log archives, account selection/queue and first SSE/thinking/text/tool timing, effective upstream event gaps, tool-fragment/assembly timing, optional complete logs with sanitized request/output, retries and stream timelines, diagnostic events, webhook alerts, `/health`, and `/ready`
@@ -39,6 +39,7 @@ Credential import narrowly repairs exports labeled as generic `social` when the 
 Open `/admin` to manage:
 
 - Account import, routability/inventory diagnostics, enable/disable state, weights, priority, per-account concurrency, and proxies
+- Kiro API Key batch import: paste one `ksk_` key per line; common region/proxy settings are applied, duplicates are reported, and usable entries are persisted even when other lines fail
 - Runtime/legacy endpoint preference and automatic fallback
 - Load balancing, retries, pre-output same-endpoint backoff, timeouts, circuits, and upstream protection
 - Token/model refresh intervals, concurrency, batch sizes, due-account refresh, and failed-account retry controls

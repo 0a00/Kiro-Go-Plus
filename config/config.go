@@ -562,7 +562,7 @@ const (
 )
 
 // Version current version
-const Version = "1.2.60"
+const Version = "1.2.61"
 
 var (
 	cfg           *Config
@@ -2721,10 +2721,19 @@ func sameAccountIdentity(a, b Account) bool {
 	if a.CredentialFingerprint != "" && b.CredentialFingerprint != "" && a.CredentialFingerprint == b.CredentialFingerprint {
 		return true
 	}
+	// API-key accounts are credentials, not user profiles. A single Kiro
+	// identity may legitimately own several independent ksk_ keys, so email,
+	// user ID, and machine ID must never merge different keys.
+	if isKiroAPIKeyIdentity(a) || isKiroAPIKeyIdentity(b) {
+		if isKiroAPIKeyIdentity(a) && isKiroAPIKeyIdentity(b) {
+			return sameAPIKeyCredential(a, b)
+		}
+		return false
+	}
 	if a.UserId != "" && b.UserId != "" && a.UserId == b.UserId && sameProvider(a.Provider, b.Provider) {
 		return true
 	}
-	apiKeyFingerprintMismatch := a.AuthMethod == "api_key" && b.AuthMethod == "api_key" &&
+	apiKeyFingerprintMismatch := isAPIKeyAuthMethod(a) && isAPIKeyAuthMethod(b) &&
 		a.CredentialFingerprint != "" && b.CredentialFingerprint != "" && a.CredentialFingerprint != b.CredentialFingerprint
 	if !apiKeyFingerprintMismatch && a.Email != "" && b.Email != "" && strings.EqualFold(a.Email, b.Email) && sameProvider(a.Provider, b.Provider) {
 		return true
@@ -2733,6 +2742,31 @@ func sameAccountIdentity(a, b Account) bool {
 		return true
 	}
 	return false
+}
+
+func isAPIKeyAuthMethod(account Account) bool {
+	method := strings.TrimSpace(account.AuthMethod)
+	return strings.EqualFold(method, "api_key") || strings.EqualFold(method, "apikey")
+}
+
+func isKiroAPIKeyIdentity(account Account) bool {
+	key := strings.TrimSpace(account.KiroApiKey)
+	if key == "" {
+		key = strings.TrimSpace(account.AccessToken)
+	}
+	return strings.HasPrefix(key, "ksk_")
+}
+
+func sameAPIKeyCredential(a, b Account) bool {
+	aKey := strings.TrimSpace(a.KiroApiKey)
+	if aKey == "" {
+		aKey = strings.TrimSpace(a.AccessToken)
+	}
+	bKey := strings.TrimSpace(b.KiroApiKey)
+	if bKey == "" {
+		bKey = strings.TrimSpace(b.AccessToken)
+	}
+	return aKey != "" && bKey != "" && aKey == bKey
 }
 
 func sameProvider(a, b string) bool {
