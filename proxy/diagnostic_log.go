@@ -90,6 +90,7 @@ func (l *diagnosticLog) list(limit int) []diagnosticLogEntry {
 func (h *Handler) recordDiagnosticFailure(entry diagnosticLogEntry) {
 	cfg := config.GetDiagnosticConfig()
 	if !cfg.Enabled {
+		h.archiveDiagnostic(entry)
 		return
 	}
 	if h.diagnosticLog == nil {
@@ -103,6 +104,7 @@ func (h *Handler) recordDiagnosticFailure(entry diagnosticLogEntry) {
 	entry.Error = truncateDiagnosticText(redactDiagnosticText(entry.Error), 2000)
 	entry.RequestSummary = truncateDiagnosticText(redactDiagnosticText(entry.RequestSummary), 4000)
 	h.diagnosticLog.add(entry)
+	h.archiveDiagnostic(entry)
 }
 
 func (h *Handler) recordDiagnosticFailureForPayload(protocol, model string, account *config.Account, statusCode int, err error, payload *KiroPayload) {

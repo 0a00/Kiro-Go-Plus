@@ -1986,6 +1986,7 @@
       loadPromptCacheConfig(),
       loadDiagnosticsConfig(),
       loadRequestLogConfig(),
+      loadLogArchiveConfig(),
       loadCountTokensProviderConfig(),
       loadWebSearchConfig(),
       loadPromptFilter(),
@@ -2912,6 +2913,76 @@
     }
     toast(t('settings.requestLogSaved'), 'success');
     loadRequestLogConfig();
+  }
+
+  function renderLogArchiveStatus(data) {
+    const status = data.status || data || {};
+    const files = Number(status.fileCount) || 0;
+    const bytes = Number(status.totalBytes) || 0;
+    const queued = Number(status.queuedRecords) || 0;
+    const dropped = Number(status.droppedRecords) || 0;
+    let message = t(
+      'settings.logArchiveStatus',
+      files,
+      (bytes / 1048576).toFixed(2),
+      queued,
+      dropped
+    );
+    if (status.lastError) message += ' | ' + t('settings.logArchiveLastError', String(status.lastError));
+    $('logArchiveStatus').textContent = message;
+  }
+
+  async function loadLogArchiveConfig() {
+    const res = await api('/log-archive');
+    const d = await res.json();
+    const cfg = d.config || {};
+    $('logArchiveEnabled').checked = cfg.enabled === true;
+    $('logArchiveIncludeDetails').checked = cfg.includeDetails === true;
+    $('logArchiveRetentionDays').value = Number.isFinite(Number(cfg.retentionDays)) ? cfg.retentionDays : 90;
+    $('logArchiveMaxMiB').value = Math.round((Number(cfg.maxBytes) || 1073741824) / 1048576);
+    renderLogArchiveStatus(d);
+  }
+
+  async function saveLogArchiveConfig() {
+    const retentionDays = Math.round(Number($('logArchiveRetentionDays').value) || 0);
+    const maxMiB = Math.round(Number($('logArchiveMaxMiB').value) || 0);
+    if (retentionDays < 0 || retentionDays > 3650 || maxMiB < 64 || maxMiB > 10240) {
+      toast(t('settings.logArchiveInvalid'), 'warning');
+      return;
+    }
+    const res = await api('/log-archive', {
+      method: 'POST',
+      body: JSON.stringify({
+        enabled: $('logArchiveEnabled').checked,
+        includeDetails: $('logArchiveIncludeDetails').checked,
+        retentionDays,
+        maxBytes: maxMiB * 1048576
+      })
+    });
+    const d = await res.json().catch(() => ({}));
+    if (!res.ok || d.success === false) {
+      toast(t('common.saveFailed') + ': ' + (d.error || t('common.unknownError')), 'error');
+      return;
+    }
+    toast(t('settings.logArchiveSaved'), 'success');
+    loadLogArchiveConfig();
+  }
+
+  async function clearLogArchive() {
+    const ok = await confirmAction(t('settings.clearLogArchiveConfirm'), {
+      title: t('settings.clearLogArchive'),
+      confirmText: t('settings.clearLogArchive'),
+      variant: 'danger'
+    });
+    if (!ok) return;
+    const res = await api('/log-archive', { method: 'DELETE' });
+    const d = await res.json().catch(() => ({}));
+    if (!res.ok || d.success === false) {
+      toast(t('common.failed') + ': ' + (d.error || t('common.unknownError')), 'error');
+      return;
+    }
+    toast(t('settings.logArchiveCleared', d.deleted || 0), 'success');
+    renderLogArchiveStatus(d.status || {});
   }
 
   async function clearRequestDetails() {
@@ -4730,6 +4801,8 @@
     $('cacheAccountingMode').addEventListener('change', syncPromptCacheAccountingMode);
     $('saveDiagnosticsBtn').addEventListener('click', saveDiagnosticsConfig);
     $('saveRequestLogBtn').addEventListener('click', saveRequestLogConfig);
+	$('saveLogArchiveBtn').addEventListener('click', saveLogArchiveConfig);
+	$('clearLogArchiveBtn').addEventListener('click', clearLogArchive);
 	$('clearRequestDetailsBtn').addEventListener('click', clearRequestDetails);
     $('saveCountTokensProviderBtn').addEventListener('click', saveCountTokensProviderConfig);
     $('saveWebSearchBtn').addEventListener('click', saveWebSearchConfig);

@@ -344,6 +344,25 @@ type RequestLogConfig struct {
 	MaxDetailBytes     int  `json:"maxDetailBytes"`
 }
 
+// LogArchiveConfig controls the bounded long-term archive for request metadata,
+// diagnostics, and (optionally) complete sanitized request details.
+// RetentionDays=0 disables age-based cleanup; MaxBytes remains enforced.
+type LogArchiveConfig struct {
+	Enabled        bool  `json:"enabled"`
+	IncludeDetails bool  `json:"includeDetails"`
+	RetentionDays  int   `json:"retentionDays"`
+	MaxBytes       int64 `json:"maxBytes"`
+}
+
+const (
+	DefaultLogArchiveRetentionDays = 90
+	MinLogArchiveRetentionDays     = 0
+	MaxLogArchiveRetentionDays     = 3650
+	DefaultLogArchiveMaxBytes      = int64(1 << 30)
+	MinLogArchiveMaxBytes          = int64(64 << 20)
+	MaxLogArchiveMaxBytes          = int64(10 << 30)
+)
+
 // WebSearchConfig controls the Anthropic web_search compatibility shim.
 type WebSearchConfig struct {
 	Enabled   bool `json:"enabled"`
@@ -429,6 +448,9 @@ type Config struct {
 
 	// RequestLog controls persisted recent-request metadata.
 	RequestLog RequestLogConfig `json:"requestLog,omitempty"`
+
+	// LogArchive controls bounded long-term JSONL log retention.
+	LogArchive LogArchiveConfig `json:"logArchive,omitempty"`
 
 	// WebSearch controls the optional Anthropic web_search shim.
 	WebSearch WebSearchConfig `json:"webSearch,omitempty"`
@@ -531,7 +553,7 @@ const (
 )
 
 // Version current version
-const Version = "1.2.58"
+const Version = "1.2.59"
 
 var (
 	cfg           *Config
@@ -594,6 +616,7 @@ func loadLocked() error {
 				Health:                    defaultHealthConfig(),
 				Diagnostics:               defaultDiagnosticConfig(),
 				RequestLog:                defaultRequestLogConfig(),
+				LogArchive:                defaultLogArchiveConfig(),
 				WebSearch:                 defaultWebSearchConfig(),
 				CountTokensProvider:       defaultCountTokensProviderConfig(),
 				ToolStreamMode:            ToolStreamModeSafe,
@@ -708,6 +731,17 @@ func loadLocked() error {
 	if !rawConfigHasKey(data, "requestLog") {
 		c.RequestLog = defaultRequestLogConfig()
 	}
+	if !rawConfigHasKey(data, "logArchive") {
+		c.LogArchive = defaultLogArchiveConfig()
+	} else {
+		defaults := defaultLogArchiveConfig()
+		if !rawConfigHasNestedKey(data, "logArchive", "retentionDays") {
+			c.LogArchive.RetentionDays = defaults.RetentionDays
+		}
+		if !rawConfigHasNestedKey(data, "logArchive", "maxBytes") {
+			c.LogArchive.MaxBytes = defaults.MaxBytes
+		}
+	}
 	if !rawConfigHasKey(data, "webSearch") {
 		c.WebSearch = defaultWebSearchConfig()
 	}
@@ -744,6 +778,7 @@ func loadLocked() error {
 	normalizeHealthLocked()
 	normalizeDiagnosticLocked()
 	normalizeRequestLogLocked()
+	normalizeLogArchiveLocked()
 	normalizeWebSearchLocked()
 	normalizeCountTokensProviderLocked()
 
@@ -1466,6 +1501,31 @@ func normalizeRequestLogLocked() {
 	}
 }
 
+func defaultLogArchiveConfig() LogArchiveConfig {
+	return LogArchiveConfig{
+		Enabled:        false,
+		IncludeDetails: false,
+		RetentionDays:  DefaultLogArchiveRetentionDays,
+		MaxBytes:       DefaultLogArchiveMaxBytes,
+	}
+}
+
+func normalizeLogArchiveLocked() {
+	defaults := defaultLogArchiveConfig()
+	if cfg.LogArchive.RetentionDays < MinLogArchiveRetentionDays {
+		cfg.LogArchive.RetentionDays = defaults.RetentionDays
+	}
+	if cfg.LogArchive.RetentionDays > MaxLogArchiveRetentionDays {
+		cfg.LogArchive.RetentionDays = MaxLogArchiveRetentionDays
+	}
+	if cfg.LogArchive.MaxBytes < MinLogArchiveMaxBytes {
+		cfg.LogArchive.MaxBytes = defaults.MaxBytes
+	}
+	if cfg.LogArchive.MaxBytes > MaxLogArchiveMaxBytes {
+		cfg.LogArchive.MaxBytes = MaxLogArchiveMaxBytes
+	}
+}
+
 func defaultWebSearchConfig() WebSearchConfig {
 	return WebSearchConfig{Enabled: false, MaxRounds: DefaultWebSearchMaxRounds}
 }
@@ -2162,6 +2222,36 @@ func UpdateRequestLogConfig(requestLog RequestLogConfig) error {
 	defer cfgLock.Unlock()
 	cfg.RequestLog = requestLog
 	normalizeRequestLogLocked()
+	return Save()
+}
+
+func GetLogArchiveConfig() LogArchiveConfig {
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	if cfg == nil {
+		return defaultLogArchiveConfig()
+	}
+	out := cfg.LogArchive
+	if out.RetentionDays < MinLogArchiveRetentionDays {
+		out.RetentionDays = DefaultLogArchiveRetentionDays
+	}
+	if out.RetentionDays > MaxLogArchiveRetentionDays {
+		out.RetentionDays = MaxLogArchiveRetentionDays
+	}
+	if out.MaxBytes < MinLogArchiveMaxBytes {
+		out.MaxBytes = DefaultLogArchiveMaxBytes
+	}
+	if out.MaxBytes > MaxLogArchiveMaxBytes {
+		out.MaxBytes = MaxLogArchiveMaxBytes
+	}
+	return out
+}
+
+func UpdateLogArchiveConfig(archive LogArchiveConfig) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	cfg.LogArchive = archive
+	normalizeLogArchiveLocked()
 	return Save()
 }
 

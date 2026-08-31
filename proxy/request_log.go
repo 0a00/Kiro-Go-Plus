@@ -350,6 +350,7 @@ func (h *Handler) recordRequestLog(entry requestLogEntry) {
 		h.requestLog = newRequestLog(config.GetRequestLogConfig().MaxEntries)
 	}
 	h.requestLog.add(entry)
+	h.archiveRequestLog(entry)
 }
 
 func (h *Handler) recordCanceledRequestForPayload(payload *KiroPayload, protocol, model string, startedAt time.Time, firstContentMs *int64, err error) {

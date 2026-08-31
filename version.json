@@ -1,5 +1,5 @@
 {
-  "version": "1.2.58",
-  "changelog": "Recognize wrapped and Anthropic-style EventStream response frames, preserve indexed parallel tool calls, and add payload-safe diagnostics for HTTP 200 empty streams.\n修复嵌套及 Anthropic 风格流事件解析，按内容块索引保留并行工具调用，并为 HTTP 200 空响应增加不泄露内容的诊断信息。",
+  "version": "1.2.59",
+  "changelog": "Add bounded long-term JSONL log archives with rotation, retention, secure redaction, Web configuration, and streaming download.\n增加有界长期 JSONL 日志归档，支持轮换、保留策略、安全脱敏、Web 配置和流式下载。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }

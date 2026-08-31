@@ -1115,7 +1115,11 @@ func (h *Handler) recordRequestDetailForContext(ctx context.Context, entry reque
 	if !ok {
 		return h.ensureRequestDetailStore().has(entry.RequestID)
 	}
-	return h.ensureRequestDetailStore().add(detail)
+	stored := h.ensureRequestDetailStore().add(detail)
+	if stored {
+		h.archiveRequestDetail(detail)
+	}
+	return stored
 }
 
 func boundRequestDetail(detail requestDetail, maxBytes int) requestDetail {

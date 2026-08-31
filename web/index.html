@@ -954,6 +954,45 @@
 		  </div>
         </div>
 
+        <!-- Long-term log archive -->
+        <div class="card settings-card" data-settings-group="diagnostics">
+          <div class="card-header"><span class="card-title" data-i18n="settings.logArchive"></span></div>
+          <div class="form-group">
+            <label class="flex items-center gap-2">
+              <span class="switch"><input type="checkbox" id="logArchiveEnabled" /><span class="slider"></span></span>
+              <span data-i18n="settings.logArchiveEnabled"></span>
+            </label>
+            <small data-i18n="settings.logArchiveHint"></small>
+          </div>
+          <div class="form-group">
+            <label class="flex items-center gap-2">
+              <span class="switch"><input type="checkbox" id="logArchiveIncludeDetails" /><span class="slider"></span></span>
+              <span data-i18n="settings.logArchiveIncludeDetails"></span>
+            </label>
+            <small data-i18n="settings.logArchiveDetailsHint"></small>
+          </div>
+          <div class="form-group">
+            <label data-i18n="settings.logArchiveRetentionDays"></label>
+            <input type="number" id="logArchiveRetentionDays" min="0" max="3650" step="1" />
+          </div>
+          <div class="form-group">
+            <label data-i18n="settings.logArchiveMaxMiB"></label>
+            <input type="number" id="logArchiveMaxMiB" min="64" max="10240" step="64" />
+            <small id="logArchiveStatus" aria-live="polite"></small>
+          </div>
+          <div class="flex gap-2 flex-wrap">
+            <button class="btn btn-primary" id="saveLogArchiveBtn" data-i18n="settings.saveLogArchive"></button>
+            <a class="btn btn-outline" href="/admin/api/log-archive/download">
+              <i class="fa-solid fa-download" aria-hidden="true"></i>
+              <span data-i18n="settings.downloadLogArchive"></span>
+            </a>
+            <button class="btn btn-outline" id="clearLogArchiveBtn" type="button">
+              <i class="fa-solid fa-trash-can" aria-hidden="true"></i>
+              <span data-i18n="settings.clearLogArchive"></span>
+            </button>
+          </div>
+        </div>
+
         <!-- Count tokens provider settings -->
         <div class="card settings-card" data-settings-group="integrations">
           <div class="card-header"><span class="card-title" data-i18n="settings.countTokensProvider"></span></div>

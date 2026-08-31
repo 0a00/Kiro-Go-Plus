@@ -110,6 +110,8 @@ type Handler struct {
 	requestLog           *requestLog
 	requestDetailsMu     sync.Mutex
 	requestDetails       *requestDetailStore
+	logArchiveMu         sync.Mutex
+	logArchive           *logArchive
 	diagnosticLog        *diagnosticLog
 	alerts               *healthAlertManager
 	autoRefreshMu        sync.Mutex
@@ -377,6 +379,7 @@ func NewHandler() *Handler {
 	if requestDetailsErr != nil {
 		logger.Warnf("[RequestDetail] Failed to restore persisted request details: %v", requestDetailsErr)
 	}
+	logArchive := newLogArchive(config.GetLogArchiveConfig(), logArchivePath())
 	backgroundCtx, backgroundCancel := context.WithCancel(context.Background())
 	h := &Handler{
 		pool:             pool.GetPool(),
@@ -391,6 +394,7 @@ func NewHandler() *Handler {
 		modelHealth:      make(map[string]modelHealthState),
 		requestLog:       requestLog,
 		requestDetails:   requestDetails,
+		logArchive:       logArchive,
 		diagnosticLog:    newDiagnosticLog(config.GetDiagnosticConfig().MaxEntries),
 		alerts:           newHealthAlertManager(),
 		autoRefreshFail:  pool.GetPool().RefreshFailureCooldowns(),
@@ -3055,6 +3059,12 @@ func (h *Handler) Close() {
 				logger.Warnf("[RequestDetail] Failed to flush request details: %v", err)
 			}
 		}
+		if archive := h.currentLogArchive(); archive != nil {
+			if err := archive.Flush(); err != nil {
+				logger.Warnf("[LogArchive] Failed to flush log archive: %v", err)
+			}
+			archive.Close()
+		}
 		if h.promptCache != nil {
 			cacheCfg := config.GetPromptCacheConfig()
 			if cacheCfg.PersistEnabled {
@@ -4444,6 +4454,14 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 		h.apiGetRequestLogConfig(w, r)
 	case path == "/request-log" && r.Method == "POST":
 		h.apiUpdateRequestLogConfig(w, r)
+	case path == "/log-archive/download" && r.Method == "GET":
+		h.apiDownloadLogArchive(w, r)
+	case path == "/log-archive" && r.Method == "GET":
+		h.apiGetLogArchive(w, r)
+	case path == "/log-archive" && r.Method == "POST":
+		h.apiUpdateLogArchive(w, r)
+	case path == "/log-archive" && r.Method == "DELETE":
+		h.apiClearLogArchive(w, r)
 	case path == "/request-details" && r.Method == "GET":
 		h.apiGetRequestDetail(w, r, false)
 	case path == "/request-details/download" && r.Method == "GET":

@@ -66,6 +66,53 @@ func TestRequestLogConfigDefaultsAndPersistence(t *testing.T) {
 	}
 }
 
+func TestLogArchiveConfigDefaultsPersistenceAndBounds(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := Init(path); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	defaults := GetLogArchiveConfig()
+	if defaults.Enabled || defaults.IncludeDetails || defaults.RetentionDays != DefaultLogArchiveRetentionDays || defaults.MaxBytes != DefaultLogArchiveMaxBytes {
+		t.Fatalf("unexpected archive defaults: %+v", defaults)
+	}
+
+	configured := LogArchiveConfig{
+		Enabled:        true,
+		IncludeDetails: true,
+		RetentionDays:  0,
+		MaxBytes:       2 << 30,
+	}
+	if err := UpdateLogArchiveConfig(configured); err != nil {
+		t.Fatalf("update archive config: %v", err)
+	}
+	if err := Init(path); err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	persisted := GetLogArchiveConfig()
+	if persisted != configured {
+		t.Fatalf("unexpected persisted archive config: %+v", persisted)
+	}
+
+	if err := UpdateLogArchiveConfig(LogArchiveConfig{
+		RetentionDays: MaxLogArchiveRetentionDays + 1,
+		MaxBytes:      MaxLogArchiveMaxBytes + 1,
+	}); err != nil {
+		t.Fatalf("update bounded archive config: %v", err)
+	}
+	bounded := GetLogArchiveConfig()
+	if bounded.RetentionDays != MaxLogArchiveRetentionDays || bounded.MaxBytes != MaxLogArchiveMaxBytes {
+		t.Fatalf("unexpected bounded archive config: %+v", bounded)
+	}
+
+	if err := UpdateLogArchiveConfig(LogArchiveConfig{RetentionDays: -1, MaxBytes: 1}); err != nil {
+		t.Fatalf("update invalid archive config: %v", err)
+	}
+	reset := GetLogArchiveConfig()
+	if reset.RetentionDays != DefaultLogArchiveRetentionDays || reset.MaxBytes != DefaultLogArchiveMaxBytes {
+		t.Fatalf("invalid archive values were not normalized: %+v", reset)
+	}
+}
+
 func TestResetStatisticsClearsGlobalAndAccountCounters(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	if err := Init(path); err != nil {
