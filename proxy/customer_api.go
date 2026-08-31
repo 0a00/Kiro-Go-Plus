@@ -145,6 +145,8 @@ type customerRequestLogView struct {
 	Endpoint                 string  `json:"endpoint,omitempty"`
 	AccountSelectionMs       int64   `json:"accountSelectionMs,omitempty"`
 	AccountAttempts          int     `json:"accountAttempts,omitempty"`
+	AccountQueueWaitMs       int64   `json:"accountQueueWaitMs,omitempty"`
+	AccountQueueWaitCount    int     `json:"accountQueueWaitCount,omitempty"`
 	RouteAffinityHit         bool    `json:"routeAffinityHit,omitempty"`
 	Status                   string  `json:"status"`
 	StatusCode               int     `json:"statusCode"`
@@ -156,6 +158,14 @@ type customerRequestLogView struct {
 	FirstToolOutputMs        *int64  `json:"firstToolOutputMs,omitempty"`
 	FirstContentMs           *int64  `json:"firstContentMs,omitempty"`
 	MaxStreamGapMs           *int64  `json:"maxStreamGapMs,omitempty"`
+	FirstMeaningfulEventMs   *int64  `json:"firstMeaningfulEventMs,omitempty"`
+	LastMeaningfulEventMs    *int64  `json:"lastMeaningfulEventMs,omitempty"`
+	MaxMeaningfulGapMs       *int64  `json:"maxMeaningfulGapMs,omitempty"`
+	FirstToolFragmentMs      *int64  `json:"firstToolFragmentMs,omitempty"`
+	LastToolFragmentMs       *int64  `json:"lastToolFragmentMs,omitempty"`
+	ToolAssemblyMs           *int64  `json:"toolAssemblyMs,omitempty"`
+	ToolResultRepairs        int     `json:"toolResultRepairs,omitempty"`
+	ToolSchemaRepairs        int     `json:"toolSchemaRepairs,omitempty"`
 	HeartbeatCount           int     `json:"heartbeatCount,omitempty"`
 	DurationMs               int64   `json:"durationMs"`
 	InputTokens              int     `json:"inputTokens,omitempty"`
@@ -212,6 +222,8 @@ func customerRequestLog(entry requestLogEntry) customerRequestLogView {
 		Endpoint:                 customerEndpointClass(entry.Endpoint),
 		AccountSelectionMs:       entry.AccountSelectionMs,
 		AccountAttempts:          entry.AccountAttempts,
+		AccountQueueWaitMs:       entry.AccountQueueWaitMs,
+		AccountQueueWaitCount:    entry.AccountQueueWaitCount,
 		RouteAffinityHit:         entry.RouteAffinityHit,
 		Status:                   entry.Status,
 		StatusCode:               entry.StatusCode,
@@ -223,6 +235,14 @@ func customerRequestLog(entry requestLogEntry) customerRequestLogView {
 		FirstToolOutputMs:        entry.FirstToolOutputMs,
 		FirstContentMs:           entry.FirstContentMs,
 		MaxStreamGapMs:           entry.MaxStreamGapMs,
+		FirstMeaningfulEventMs:   entry.FirstMeaningfulEventMs,
+		LastMeaningfulEventMs:    entry.LastMeaningfulEventMs,
+		MaxMeaningfulGapMs:       entry.MaxMeaningfulGapMs,
+		FirstToolFragmentMs:      entry.FirstToolFragmentMs,
+		LastToolFragmentMs:       entry.LastToolFragmentMs,
+		ToolAssemblyMs:           entry.ToolAssemblyMs,
+		ToolResultRepairs:        entry.ToolResultRepairs,
+		ToolSchemaRepairs:        entry.ToolSchemaRepairs,
 		HeartbeatCount:           entry.HeartbeatCount,
 		DurationMs:               entry.DurationMs,
 		InputTokens:              entry.InputTokens,

@@ -205,10 +205,8 @@ func (h *Handler) handleClaudeWebSearch(ctx context.Context, w http.ResponseWrit
 		if upstreamErr, ok := asUpstreamError(err); ok && upstreamErr.Kind == UpstreamErrorCanceled {
 			return
 		}
-		statusCode := http.StatusBadGateway
-		if isAccountSelectionTimeout(err) {
-			statusCode = http.StatusGatewayTimeout
-		}
+		mapped := mapDownstreamError(err)
+		statusCode := mapped.Status
 		if trace := requestDetailTraceFromContext(ctx); trace != nil {
 			trace.recordError(err)
 		}
@@ -221,7 +219,8 @@ func (h *Handler) handleClaudeWebSearch(ctx context.Context, w http.ResponseWrit
 			Error:          err.Error(),
 			RequestSummary: query,
 		})
-		h.sendClaudeError(w, statusCode, "api_error", err.Error())
+		applyDownstreamErrorHeaders(w, mapped)
+		h.sendClaudeError(w, statusCode, mapped.ClaudeType, err.Error())
 		h.recordRequestLogForContext(ctx, requestLogEntry{
 			Timestamp:    time.Now().Unix(),
 			Protocol:     "claude.web_search",

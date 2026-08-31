@@ -25,7 +25,7 @@ Kiro-Go Plus preserves Kiro-Go's API and deployment compatibility while adding p
 - Authentication: Builder ID, IAM Identity Center, Kiro hosted SSO, Microsoft 365 / Entra ID, SSO Token, API key, and direct multi-file native/KAM JSON import from the authenticated Web admin; OAuth authentication regions remain separate from Profile ARN data-plane regions, while `ksk_` keys discover and validate their data-plane region before persistence
 - Prompt Cache accounting: official upstream usage, legacy matched-prefix efficiency, or a total-input target range compatible with New API/Sub2API; includes 5m/1h TTLs, sharded LRU, API-key isolation, persistence, and diagnostics
 - Extensions: Claude Opus 5 and Sonnet 5 metadata, GPT-5.6 aliases, dynamic model capability/effort discovery, optional safe unlisted-model pass-through, text/thinking/tool self-tests, multi-round Web Search, external token counting, and Responses history
-- Operations: account inventory diagnostics with latency/error EWMAs and affinity rates, persisted request metadata, bounded long-term JSONL log archives, account-selection and first SSE/thinking/text/tool timing, maximum event gaps, optional complete logs with sanitized request/output, retries and stream timelines, diagnostic events, webhook alerts, `/health`, and `/ready`
+- Operations: account inventory diagnostics with latency/error EWMAs and affinity rates, persisted request metadata, bounded long-term JSONL log archives, account selection/queue and first SSE/thinking/text/tool timing, effective upstream event gaps, tool-fragment/assembly timing, optional complete logs with sanitized request/output, retries and stream timelines, diagnostic events, webhook alerts, `/health`, and `/ready`
 - Networking: global and per-account HTTP / SOCKS5 proxies
 
 Prompt Cache accounting does not cache model response bodies or reduce Kiro requests. `official_actual` forwards only upstream cache usage, `matched_prefix` preserves the legacy estimate, and `aggregator_target` redistributes a warm hit into the configured total-input range without changing total tokens. Existing configurations migrate to `matched_prefix`; select `aggregator_target` in Web settings for New API/Sub2API accounting. Persistence stores only versioned prompt fingerprints and metadata with `0600` permissions.
@@ -51,6 +51,8 @@ Settings apply immediately unless the panel explicitly reports that a process re
 
 Tool stream modes trade retry coverage for latency: **Adaptive** keeps ordinary tools live but buffers high-risk `Write`/`Edit`/`Bash`-style arguments so an incomplete JSON tail can be retried; **Live** forwards every tool argument delta immediately; **Balanced** buffers all tool arguments; **Safe** protects tool arguments and incomplete tool calls while forwarding validated visible text immediately. Explicit `tool_choice` requests remain strictly validated in every mode.
 
+Upstream protection defaults to **adaptive** concurrency: legacy hard limits remain available, while work above the soft limits enters a bounded internal wait queue and is woken when a slot or account state changes. Queue overflow returns 429; clients are not given an artificial global request limit. Switch to **Strict hard limits** to apply the configured hard values exactly.
+
 Pre-output stream retry defaults to one same-endpoint retry after 700 ms. It applies only when an HTTP 200 stream fails before any text, thinking, or tool output reaches the client; cancellation and timeout failures are not replayed. Every retry consumes the shared upstream-attempt and duration budgets.
 
 Long-tool protection is enabled by default with one recovery retry and an 8192-token guidance limit. Optional preflight model fallback is disabled by default because model availability differs between accounts.
@@ -61,6 +63,8 @@ Complete request logging is disabled by default. When enabled, it captures infer
 
 For longer investigations, enable **Long-Term Log Archive** in the Web admin panel. It writes newline-delimited JSON records for request metadata, failure diagnostics, and (when selected) complete sanitized request details to `data/log-archive/`. Files rotate at 64 MiB and are removed by the configured retention period and total-capacity limit (0 retention days means capacity-only cleanup). The archive is bounded, uses `0700` directories and `0600` files, survives normal container restarts through the `data/` volume, and reports queued/dropped records in the admin panel. It is disabled by default; complete details may still contain sensitive prompts and output, so use it only during troubleshooting and clear or back up the archive deliberately.
 The archive covers structured request/diagnostic records; Docker stdout/stderr remains subject to the Compose `json-file` rotation policy.
+
+For production troubleshooting, start with metadata-only archive retention for 30 days and a 4 GiB cap. Enable complete details only for a controlled investigation, then disable and clear the archive; `includeDetails` still stores sanitized prompts and output and must be treated as sensitive.
 
 Unlisted-model pass-through is disabled by default. Enable it only when Kiro has released a model that is not yet in the local registry; IDs are syntax-checked locally, while upstream Kiro remains the final availability validator.
 

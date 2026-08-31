@@ -187,6 +187,9 @@ func TestRepairKiroPayloadToolResultsFlattensInvalidCurrentResults(t *testing.T)
 	if !strings.Contains(current.Content, "important output") {
 		t.Fatalf("flattened result was lost: %q", current.Content)
 	}
+	if got := payload.toolResultRepairCount(); got != 1 {
+		t.Fatalf("tool-result repair count = %d, want 1", got)
+	}
 	for i, message := range payload.ConversationState.History {
 		if message.AssistantResponseMessage != nil && len(message.AssistantResponseMessage.ToolUses) > 0 {
 			t.Fatalf("history[%d] retained an orphaned tool use", i)
@@ -195,6 +198,35 @@ func TestRepairKiroPayloadToolResultsFlattensInvalidCurrentResults(t *testing.T)
 			len(message.UserInputMessage.UserInputMessageContext.ToolResults) > 0 {
 			t.Fatalf("history[%d] retained structured tool results", i)
 		}
+	}
+}
+
+func TestSanitizeKiroPayloadToolSchemasIsAppliedAtPreflight(t *testing.T) {
+	payload := &KiroPayload{}
+	payload.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext = &UserInputMessageContext{
+		Tools: []KiroToolWrapper{{
+			ToolSpecification: struct {
+				Name        string      `json:"name"`
+				Description string      `json:"description"`
+				InputSchema InputSchema `json:"inputSchema"`
+			}{
+				Name: "union_tool",
+				InputSchema: InputSchema{JSON: map[string]interface{}{
+					"anyOf": []interface{}{
+						map[string]interface{}{"type": "object", "properties": map[string]interface{}{"path": map[string]interface{}{"type": "string"}}},
+					},
+				}},
+			},
+		}},
+	}
+
+	repairKiroPayloadToolResults(payload)
+	if got := payload.toolSchemaRepairCount(); got != 1 {
+		t.Fatalf("schema normalization count = %d, want 1", got)
+	}
+	schema := payload.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext.Tools[0].ToolSpecification.InputSchema.JSON.(map[string]interface{})
+	if schema["type"] != "object" || schemaContainsKey(schema, "anyOf") {
+		t.Fatalf("preflight schema remains incompatible: %#v", schema)
 	}
 }
 
@@ -276,5 +308,15 @@ func TestToolUseResultMismatchIsNonRetryableClientError(t *testing.T) {
 	}
 	if mapped := mapDownstreamError(err); mapped.Status != http.StatusBadRequest {
 		t.Fatalf("mismatch mapped to HTTP %d, want 400", mapped.Status)
+	}
+}
+
+func TestToolSchemaCompositionIsNonRetryableClientError(t *testing.T) {
+	err := classifyUpstreamHTTPError(http.StatusBadRequest, "Kiro IDE", []byte(`{
+		"reason":"TOOL_SCHEMA_INVALID",
+		"message":"input_schema does not support anyOf at the top level"
+	}`))
+	if err.Kind != UpstreamErrorClientRequest || err.RetryAcrossAccounts || err.RetryAcrossEndpoints {
+		t.Fatalf("unexpected schema classification: %+v", err)
 	}
 }

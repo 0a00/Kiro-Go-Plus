@@ -371,6 +371,9 @@ func NewHandler() *Handler {
 		logger.Warnf("[PromptCache] Failed to remove disabled persisted state: %v", err)
 	}
 	requestLogCfg := config.GetRequestLogConfig()
+	if requestLogCfg.DetailedLogEnabled && !config.GetLogArchiveConfig().Enabled {
+		logger.Warnf("[RequestLog] detailed request logging is enabled without the long-term archive; older details remain bounded by the in-memory/persisted detail store")
+	}
 	requestLog, requestLogErr := newPersistentRequestLog(requestLogCfg.MaxEntries, requestLogPath())
 	if requestLogErr != nil {
 		logger.Warnf("[RequestLog] Failed to restore persisted request log: %v", requestLogErr)
@@ -2051,6 +2054,12 @@ func (h *Handler) handleCountTokens(w http.ResponseWriter, r *http.Request) {
 	defer h.finalizeUnrecordedRequestDetail(r.Context(), detailStatus, startedAt, "claude.count_tokens", req.Model)
 	thinkingCfg := config.GetThinkingConfig()
 	_ = applyClaudeTokenBudgetDefaults(&req)
+	if adjusted, normalizeErr := normalizeClaudeThinkingBudget(&req); normalizeErr != nil {
+		h.sendClaudeError(w, http.StatusBadRequest, "invalid_request_error", normalizeErr.Error())
+		return
+	} else if adjusted {
+		logger.Warnf("[RequestValidation] clamped Claude thinking budget to max_tokens-1 for model %s", req.Model)
+	}
 	if msg := validateClaudeThinkingConfig(req.Thinking, req.MaxTokens); msg != "" {
 		h.sendClaudeError(w, 400, "invalid_request_error", msg)
 		return
@@ -2148,6 +2157,12 @@ func (h *Handler) handleClaudeMessages(w http.ResponseWriter, r *http.Request) {
 	}()
 	thinkingCfg := config.GetThinkingConfig()
 	contextWindowTokens := applyClaudeTokenBudgetDefaults(&req)
+	if adjusted, normalizeErr := normalizeClaudeThinkingBudget(&req); normalizeErr != nil {
+		h.sendClaudeError(w, http.StatusBadRequest, "invalid_request_error", normalizeErr.Error())
+		return
+	} else if adjusted {
+		logger.Warnf("[RequestValidation] clamped Claude thinking budget to max_tokens-1 for model %s", req.Model)
+	}
 	if msg := validateClaudeRequestShape(&req); msg != "" {
 		h.sendClaudeError(w, 400, "invalid_request_error", msg)
 		return
@@ -2942,12 +2957,13 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 				Error:          busyErr.Error(),
 			}
 			h.recordDiagnosticFailureForPayload("claude.messages.stream", model, nil, 429, busyErr, payload)
-			w.Header().Set("Retry-After", "1")
+			w.Header().Set("Retry-After", retryAfterSeconds(upstreamBusyRetryAfter(busyErr)))
 			sendStreamError(429, "rate_limit_error", busyErr.Error())
 			entry.DurationMs = requestDurationMs(startedAt)
 			h.recordRequestLogForPayload(payload, entry)
 			return
 		}
+		h.recordNoAvailableAccounts(payload, "claude.messages.stream", model, startedAt, firstContent.Value())
 		sendStreamError(503, "api_error", "No available accounts")
 		return
 	}
@@ -3344,10 +3360,11 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 				Error:          busyErr.Error(),
 				RequestSummary: summarizeKiroPayload(payload),
 			})
-			w.Header().Set("Retry-After", "1")
+			w.Header().Set("Retry-After", retryAfterSeconds(upstreamBusyRetryAfter(busyErr)))
 			h.sendClaudeError(w, 429, "rate_limit_error", busyErr.Error())
 			return
 		}
+		h.recordNoAvailableAccounts(payload, "claude.messages", model, startedAt, firstContent.Value())
 		h.sendClaudeError(w, 503, "api_error", "No available accounts")
 		return
 	}
@@ -4014,10 +4031,11 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 				Error:          busyErr.Error(),
 			})
 			h.recordDiagnosticFailureForPayload("openai.chat.stream", model, nil, 429, busyErr, payload)
-			w.Header().Set("Retry-After", "1")
+			w.Header().Set("Retry-After", retryAfterSeconds(upstreamBusyRetryAfter(busyErr)))
 			sendTerminalOpenAIStreamError("rate_limit_error", busyErr.Error())
 			return
 		}
+		h.recordNoAvailableAccounts(payload, "openai.chat.stream", model, startedAt, firstContent.Value())
 		sendTerminalOpenAIStreamError("server_error", "No available accounts")
 		return
 	}
@@ -4212,10 +4230,11 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 				Error:          busyErr.Error(),
 			})
 			h.recordDiagnosticFailureForPayload("openai.chat", model, nil, 429, busyErr, payload)
-			w.Header().Set("Retry-After", "1")
+			w.Header().Set("Retry-After", retryAfterSeconds(upstreamBusyRetryAfter(busyErr)))
 			h.sendOpenAIError(w, 429, "rate_limit_error", busyErr.Error())
 			return
 		}
+		h.recordNoAvailableAccounts(payload, "openai.chat", model, startedAt, firstContent.Value())
 		h.sendOpenAIError(w, 503, "server_error", "No available accounts")
 		return
 	}
@@ -7206,10 +7225,76 @@ func (h *Handler) apiGetUpstreamProtection(w http.ResponseWriter, r *http.Reques
 }
 
 func (h *Handler) apiUpdateUpstreamProtection(w http.ResponseWriter, r *http.Request) {
-	var req config.UpstreamProtectionConfig
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	var patch struct {
+		Enabled                           *bool                      `json:"enabled"`
+		MaxPerAccountConcurrency          *int                       `json:"maxPerAccountConcurrency"`
+		MaxPerAccountModelConcurrency     *int                       `json:"maxPerAccountModelConcurrency"`
+		ConcurrencyMode                   *string                    `json:"concurrencyMode"`
+		SoftMaxPerAccountConcurrency      *int                       `json:"softMaxPerAccountConcurrency"`
+		SoftMaxPerAccountModelConcurrency *int                       `json:"softMaxPerAccountModelConcurrency"`
+		QueueCapacity                     *int                       `json:"queueCapacity"`
+		PerModelConcurrency               *map[string]int            `json:"perModelConcurrency"`
+		PerProfileModelConcurrency        *map[string]map[string]int `json:"perProfileModelConcurrency"`
+		RateLimitCooldownMs               *int                       `json:"rateLimitCooldownMs"`
+		MaxRateLimitCooldownMs            *int                       `json:"maxRateLimitCooldownMs"`
+		RouteAffinityTTLSeconds           *int                       `json:"routeAffinityTtlSeconds"`
+		RouteAffinityMaxEntries           *int                       `json:"routeAffinityMaxEntries"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
 		w.WriteHeader(400)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON"})
+		return
+	}
+	req := config.GetUpstreamProtectionConfig()
+	if patch.Enabled != nil {
+		req.Enabled = *patch.Enabled
+	}
+	if patch.MaxPerAccountConcurrency != nil {
+		req.MaxPerAccountConcurrency = *patch.MaxPerAccountConcurrency
+	}
+	if patch.MaxPerAccountModelConcurrency != nil {
+		req.MaxPerAccountModelConcurrency = *patch.MaxPerAccountModelConcurrency
+	}
+	if patch.ConcurrencyMode != nil {
+		req.ConcurrencyMode = *patch.ConcurrencyMode
+	}
+	if patch.SoftMaxPerAccountConcurrency != nil {
+		req.SoftMaxPerAccountConcurrency = *patch.SoftMaxPerAccountConcurrency
+	}
+	if patch.SoftMaxPerAccountModelConcurrency != nil {
+		req.SoftMaxPerAccountModelConcurrency = *patch.SoftMaxPerAccountModelConcurrency
+	}
+	if patch.QueueCapacity != nil {
+		req.QueueCapacity = *patch.QueueCapacity
+	}
+	if patch.PerModelConcurrency != nil {
+		req.PerModelConcurrency = *patch.PerModelConcurrency
+	}
+	if patch.PerProfileModelConcurrency != nil {
+		req.PerProfileModelConcurrency = *patch.PerProfileModelConcurrency
+	}
+	if patch.RateLimitCooldownMs != nil {
+		req.RateLimitCooldownMs = *patch.RateLimitCooldownMs
+	}
+	if patch.MaxRateLimitCooldownMs != nil {
+		req.MaxRateLimitCooldownMs = *patch.MaxRateLimitCooldownMs
+	}
+	if patch.RouteAffinityTTLSeconds != nil {
+		req.RouteAffinityTTLSeconds = *patch.RouteAffinityTTLSeconds
+	}
+	if patch.RouteAffinityMaxEntries != nil {
+		req.RouteAffinityMaxEntries = *patch.RouteAffinityMaxEntries
+	}
+	if mode := strings.ToLower(strings.TrimSpace(req.ConcurrencyMode)); mode != "" && mode != "adaptive" && mode != "hard" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "concurrencyMode must be adaptive or hard"})
+		return
+	}
+	if req.SoftMaxPerAccountConcurrency < 0 || req.SoftMaxPerAccountConcurrency > 1000 ||
+		req.SoftMaxPerAccountModelConcurrency < 0 || req.SoftMaxPerAccountModelConcurrency > 1000 ||
+		req.QueueCapacity < 0 || req.QueueCapacity > 100000 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "invalid adaptive concurrency or queue limits"})
 		return
 	}
 	if err := config.UpdateUpstreamProtectionConfig(req); err != nil {
@@ -7217,7 +7302,10 @@ func (h *Handler) apiUpdateUpstreamProtection(w http.ResponseWriter, r *http.Req
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
-	json.NewEncoder(w).Encode(map[string]bool{"success": true})
+	if h.pool != nil {
+		h.pool.NotifyAvailability()
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "config": config.GetUpstreamProtectionConfig()})
 }
 
 func (h *Handler) apiGetUpstreamProtectionStatus(w http.ResponseWriter, r *http.Request) {

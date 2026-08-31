@@ -99,10 +99,12 @@ func wrapMeaningfulStreamCallback(target *KiroStreamCallback, onActivity func(),
 				}
 				target.detailTrace.recordToolUse(detailToolUse)
 			}
+			gate.markToolFragment()
 			gate.markActivity()
 			gate.handleEvent(pendingStreamEvent{kind: pendingToolUse, toolUse: toolUse})
 		},
 		OnToolUseActivity: func() {
+			gate.markToolFragment()
 			gate.markActivity()
 		},
 		OnToolUseStart: func(toolUseID, name string) {
@@ -113,6 +115,7 @@ func wrapMeaningfulStreamCallback(target *KiroStreamCallback, onActivity func(),
 				}
 				target.detailTrace.recordToolUseStart(toolUseID, detailName)
 			}
+			gate.markToolFragment()
 			gate.markActivity()
 			if gate.streamToolFrames {
 				gate.handleEvent(pendingStreamEvent{kind: pendingToolUseStart, toolUseID: toolUseID, toolName: name})
@@ -122,12 +125,14 @@ func wrapMeaningfulStreamCallback(target *KiroStreamCallback, onActivity func(),
 			if target.detailTrace != nil {
 				target.detailTrace.recordToolUseDelta(toolUseID, input)
 			}
+			gate.markToolFragment()
 			gate.markActivity()
 			if gate.streamToolFrames && toolUseID != "" {
 				gate.handleEvent(pendingStreamEvent{kind: pendingToolUseDelta, toolUseID: toolUseID, text: input})
 			}
 		},
 		OnToolUseStop: func(toolUseID string) {
+			gate.markToolFragment()
 			gate.touchLiveness()
 			if target.detailTrace != nil {
 				target.detailTrace.recordToolUseStop(toolUseID)
@@ -182,12 +187,22 @@ func (g *meaningfulStreamCallback) markActivity() {
 		return
 	}
 	g.touchLiveness()
+	if g.target != nil && g.target.onMeaningfulEvent != nil {
+		g.target.onMeaningfulEvent()
+	}
 	if g.activity.Swap(true) {
 		return
 	}
 	if g.onActivity != nil {
 		g.onActivity()
 	}
+}
+
+func (g *meaningfulStreamCallback) markToolFragment() {
+	if g == nil || g.target == nil || g.target.onToolFragment == nil {
+		return
+	}
+	g.target.onToolFragment()
 }
 
 // setLivenessHook is installed before parsing starts. Unlike onActivity, this

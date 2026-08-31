@@ -424,6 +424,82 @@ func TestEnsureObjectSchemaRemovesKiroRejectedFieldsRecursively(t *testing.T) {
 	}
 }
 
+func TestEnsureObjectSchemaLowersTopLevelCompositions(t *testing.T) {
+	input := map[string]interface{}{
+		"anyOf": []interface{}{
+			map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"path": map[string]interface{}{"type": "string"},
+				},
+			},
+			map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"force": map[string]interface{}{"type": "boolean"},
+				},
+			},
+		},
+		"properties": map[string]interface{}{
+			"existing": map[string]interface{}{"type": "string"},
+		},
+	}
+
+	got, ok := ensureObjectSchema(input).(map[string]interface{})
+	if !ok || got["type"] != "object" {
+		t.Fatalf("expected object schema, got %#v", got)
+	}
+	for _, keyword := range []string{"oneOf", "anyOf", "allOf", "$ref"} {
+		if schemaContainsKey(got, keyword) {
+			t.Fatalf("unsupported composition %q survived: %#v", keyword, got)
+		}
+	}
+	properties, ok := got["properties"].(map[string]interface{})
+	if !ok || len(properties) != 3 {
+		t.Fatalf("composed object properties were not merged: %#v", got["properties"])
+	}
+	if _, exists := input["anyOf"]; !exists {
+		t.Fatal("schema sanitizer mutated the caller")
+	}
+}
+
+func TestEnsureObjectSchemaLowersNestedCompositionsAndNonObjectRoot(t *testing.T) {
+	input := map[string]interface{}{
+		"type": "string",
+		"properties": map[string]interface{}{
+			"value": map[string]interface{}{
+				"anyOf": []interface{}{
+					map[string]interface{}{"type": "string"},
+					map[string]interface{}{"type": "null"},
+				},
+			},
+		},
+		"allOf": []interface{}{map[string]interface{}{"type": "object"}},
+	}
+	got := ensureObjectSchema(input).(map[string]interface{})
+	if got["type"] != "object" || schemaContainsKey(got, "anyOf") || schemaContainsKey(got, "allOf") {
+		t.Fatalf("schema was not lowered: %#v", got)
+	}
+}
+
+func TestEnsureObjectSchemaCleansTypedSchemaSlices(t *testing.T) {
+	input := map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"nested": map[string]interface{}{
+				"oneOf": []map[string]interface{}{{
+					"type":                 "object",
+					"additionalProperties": true,
+				}},
+			},
+		},
+	}
+	got := ensureObjectSchema(input).(map[string]interface{})
+	if schemaContainsKey(got, "oneOf") || schemaContainsKey(got, "additionalProperties") {
+		t.Fatalf("typed schema slice was not sanitized: %#v", got)
+	}
+}
+
 func TestConvertOpenAIToolsSanitizesSchemaAndDescription(t *testing.T) {
 	var tool OpenAITool
 	tool.Type = "function"

@@ -381,6 +381,10 @@ func TestUpstreamProtectionDefaultsEnabledForLegacyConfig(t *testing.T) {
 	if got.MaxPerAccountModelConcurrency != 5 {
 		t.Fatalf("expected default concurrency 5, got %d", got.MaxPerAccountModelConcurrency)
 	}
+	if got.ConcurrencyMode != "adaptive" || got.SoftMaxPerAccountConcurrency != 16 ||
+		got.SoftMaxPerAccountModelConcurrency != 5 || got.QueueCapacity != 256 {
+		t.Fatalf("expected adaptive queue defaults, got %+v", got)
+	}
 }
 
 func TestUpstreamProtectionCanBeExplicitlyDisabled(t *testing.T) {
@@ -611,6 +615,34 @@ func TestOperationalConfigDefaults(t *testing.T) {
 	health := GetHealthConfig()
 	if health.MinReadyAccounts != 1 || health.MinReadyRatio != 0 || health.WebhookCooldownSeconds != 300 {
 		t.Fatalf("unexpected health defaults: %+v", health)
+	}
+	protection := GetUpstreamProtectionConfig()
+	if protection.ConcurrencyMode != "adaptive" || protection.SoftMaxPerAccountConcurrency != 16 ||
+		protection.SoftMaxPerAccountModelConcurrency != 5 || protection.QueueCapacity != 256 {
+		t.Fatalf("unexpected upstream protection defaults: %+v", protection)
+	}
+}
+
+func TestUpstreamProtectionConcurrencyModePersists(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := Init(path); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	protection := GetUpstreamProtectionConfig()
+	protection.ConcurrencyMode = "hard"
+	protection.SoftMaxPerAccountConcurrency = 32
+	protection.SoftMaxPerAccountModelConcurrency = 8
+	protection.QueueCapacity = 512
+	if err := UpdateUpstreamProtectionConfig(protection); err != nil {
+		t.Fatalf("update protection: %v", err)
+	}
+	if err := Init(path); err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	got := GetUpstreamProtectionConfig()
+	if got.ConcurrencyMode != "hard" || got.SoftMaxPerAccountConcurrency != 32 ||
+		got.SoftMaxPerAccountModelConcurrency != 8 || got.QueueCapacity != 512 {
+		t.Fatalf("protection settings did not persist: %+v", got)
 	}
 }
 

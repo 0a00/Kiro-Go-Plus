@@ -44,7 +44,9 @@ model intentionally hides those fields.
 Each stream result separates response-header time, first valid SSE event, first
 semantic output (TTFT), first text, first thinking, first tool output, maximum
 protocol-event gap, maximum wire-activity gap, SSE heartbeat count, and total
-duration. Results also expose the downstream request ID, stop reason, and
+duration. The server request log additionally records first/last meaningful
+upstream events, tool fragments, meaningful gaps, account queue wait, and tool
+assembly time. Results also expose the downstream request ID, stop reason, and
 available input/output/reasoning/cache token fields. JSON reports use mode
 `0600`, include the service version and a credential-free test-settings
 fingerprint, and never include the API key, request body, image, or tool arguments.

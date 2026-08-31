@@ -1,9 +1,38 @@
 package proxy
 
 import (
+	"fmt"
 	"kiro-go/config"
 	"strings"
 )
+
+// normalizeClaudeThinkingBudget reconciles the two Claude limits before the
+// request reaches Kiro. Anthropic requires budget_tokens < max_tokens. Clients
+// such as Claude Code can legitimately send a smaller max_tokens together with
+// a proxy/default thinking budget, which used to become a deterministic 400.
+//
+// A client-provided max_tokens is authoritative, so we lower only the thinking
+// budget (rather than silently increasing the requested output cap). At least
+// 1024 thinking tokens must remain; genuinely undersized requests still receive
+// a clear client error from this function.
+func normalizeClaudeThinkingBudget(req *ClaudeRequest) (changed bool, err error) {
+	if req == nil || req.Thinking == nil || req.MaxTokens <= 0 {
+		return false, nil
+	}
+	if !strings.EqualFold(strings.TrimSpace(req.Thinking.Type), "enabled") || req.Thinking.BudgetTokens <= 0 {
+		return false, nil
+	}
+	if req.Thinking.BudgetTokens < req.MaxTokens {
+		return false, nil
+	}
+	adjusted := req.MaxTokens - 1
+	if adjusted < 1024 {
+		return false, fmt.Errorf("max_tokens must be greater than 1024 when thinking.budget_tokens is enabled")
+	}
+	original := req.Thinking.BudgetTokens
+	req.Thinking.BudgetTokens = adjusted
+	return original != adjusted, nil
+}
 
 func applyClaudeTokenBudgetDefaults(req *ClaudeRequest) int {
 	if req == nil {

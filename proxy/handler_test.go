@@ -306,6 +306,49 @@ func TestRetryConfigAPIAcceptsUnlimitedAccountPolling(t *testing.T) {
 	}
 }
 
+func TestUpstreamProtectionAPIStoresAdaptiveQueueSettings(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	request := config.GetUpstreamProtectionConfig()
+	request.ConcurrencyMode = "adaptive"
+	request.MaxPerAccountConcurrency = 10000
+	request.MaxPerAccountModelConcurrency = 10000
+	request.SoftMaxPerAccountConcurrency = 16
+	request.SoftMaxPerAccountModelConcurrency = 5
+	request.QueueCapacity = 256
+	body, err := json.Marshal(request)
+	if err != nil {
+		t.Fatalf("marshal protection config: %v", err)
+	}
+	rec := httptest.NewRecorder()
+	(&Handler{}).apiUpdateUpstreamProtection(rec, httptest.NewRequest(http.MethodPost, "/admin/api/upstream-protection", bytes.NewReader(body)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	got := config.GetUpstreamProtectionConfig()
+	if got.ConcurrencyMode != "adaptive" || got.SoftMaxPerAccountConcurrency != 16 ||
+		got.SoftMaxPerAccountModelConcurrency != 5 || got.QueueCapacity != 256 {
+		t.Fatalf("adaptive queue settings were not stored: %+v", got)
+	}
+
+	bad := httptest.NewRecorder()
+	(&Handler{}).apiUpdateUpstreamProtection(bad, httptest.NewRequest(http.MethodPost, "/admin/api/upstream-protection", strings.NewReader(`{"concurrencyMode":"invalid"}`)))
+	if bad.Code != http.StatusBadRequest {
+		t.Fatalf("invalid concurrency mode status = %d, want 400", bad.Code)
+	}
+
+	partial := httptest.NewRecorder()
+	(&Handler{}).apiUpdateUpstreamProtection(partial, httptest.NewRequest(http.MethodPost, "/admin/api/upstream-protection", strings.NewReader(`{"queueCapacity":512}`)))
+	if partial.Code != http.StatusOK {
+		t.Fatalf("partial protection update status = %d, body = %s", partial.Code, partial.Body.String())
+	}
+	got = config.GetUpstreamProtectionConfig()
+	if got.MaxPerAccountConcurrency != 10000 || got.SoftMaxPerAccountConcurrency != 16 || got.QueueCapacity != 512 {
+		t.Fatalf("partial update overwrote unrelated settings: %+v", got)
+	}
+}
+
 func TestRetryConfigAPIPreservesNewTimeoutsWhenOmitted(t *testing.T) {
 	tempDir := t.TempDir()
 	if err := config.Init(filepath.Join(tempDir, "config.json")); err != nil {

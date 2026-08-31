@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"kiro-go/config"
+	accountpool "kiro-go/pool"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -127,6 +128,33 @@ func TestAccountAttemptControllerUnlimitedModeEventuallyContinues(t *testing.T) 
 	}
 	if !found || rounds != 2 {
 		t.Fatalf("expected availability after two polling rounds, found=%v rounds=%d", found, rounds)
+	}
+}
+
+func TestAccountAttemptControllerExposesFullWaitQueueAsBusy(t *testing.T) {
+	controller := newAccountAttemptController(context.Background(), nil, 0)
+	controller.wait = func(time.Duration) bool {
+		controller.waitQueueFull = true
+		return false
+	}
+	if controller.nextRound(0) {
+		t.Fatal("controller continued after wait queue rejection")
+	}
+	busy := controller.waitQueueBusy("claude-sonnet-5")
+	if busy == nil || busy.RetryAfter <= 0 || !strings.Contains(busy.Error(), "queue is full") {
+		t.Fatalf("unexpected queue-full busy error: %+v", busy)
+	}
+}
+
+func TestBusyAccountErrorMapsToRetryableRateLimit(t *testing.T) {
+	err := &accountpool.UpstreamBusyError{
+		Model:       "claude-sonnet-5",
+		RetryAfter:  1500 * time.Millisecond,
+		Description: "account availability wait queue is full",
+	}
+	mapped := mapDownstreamError(err)
+	if mapped.Status != 429 || mapped.ClaudeType != "rate_limit_error" || mapped.OpenAIType != "rate_limit_error" || mapped.RetryAfter != "2" {
+		t.Fatalf("unexpected busy mapping: %+v", mapped)
 	}
 }
 

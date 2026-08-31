@@ -77,28 +77,38 @@ func (w *requestDetailFlushingWriter) Flush() {
 }
 
 type requestDetail struct {
-	Version            int                    `json:"version"`
-	RequestID          string                 `json:"requestId"`
-	Timestamp          int64                  `json:"timestamp"`
-	Protocol           string                 `json:"protocol"`
-	Model              string                 `json:"model,omitempty"`
-	APIKeyID           string                 `json:"apiKeyId,omitempty"`
-	APIKeyName         string                 `json:"apiKeyName,omitempty"`
-	AccountID          string                 `json:"accountId,omitempty"`
-	AccountEmail       string                 `json:"accountEmail,omitempty"`
-	Endpoint           string                 `json:"endpoint,omitempty"`
-	AccountSelectionMs int64                  `json:"accountSelectionMs,omitempty"`
-	AccountAttempts    int                    `json:"accountAttempts,omitempty"`
-	RouteAffinityHit   bool                   `json:"routeAffinityHit,omitempty"`
-	Status             string                 `json:"status"`
-	StatusCode         int                    `json:"statusCode"`
-	DurationMs         int64                  `json:"durationMs"`
-	Request            requestDetailRequest   `json:"request"`
-	Response           requestDetailResponse  `json:"response"`
-	Attempts           []requestDetailAttempt `json:"attempts,omitempty"`
-	Timeline           []requestDetailEvent   `json:"timeline,omitempty"`
-	DroppedEvents      int                    `json:"droppedEvents,omitempty"`
-	TruncatedFields    []string               `json:"truncatedFields,omitempty"`
+	Version                int                    `json:"version"`
+	RequestID              string                 `json:"requestId"`
+	Timestamp              int64                  `json:"timestamp"`
+	Protocol               string                 `json:"protocol"`
+	Model                  string                 `json:"model,omitempty"`
+	APIKeyID               string                 `json:"apiKeyId,omitempty"`
+	APIKeyName             string                 `json:"apiKeyName,omitempty"`
+	AccountID              string                 `json:"accountId,omitempty"`
+	AccountEmail           string                 `json:"accountEmail,omitempty"`
+	Endpoint               string                 `json:"endpoint,omitempty"`
+	AccountSelectionMs     int64                  `json:"accountSelectionMs,omitempty"`
+	AccountAttempts        int                    `json:"accountAttempts,omitempty"`
+	AccountQueueWaitMs     int64                  `json:"accountQueueWaitMs,omitempty"`
+	AccountQueueWaitCount  int                    `json:"accountQueueWaitCount,omitempty"`
+	RouteAffinityHit       bool                   `json:"routeAffinityHit,omitempty"`
+	Status                 string                 `json:"status"`
+	StatusCode             int                    `json:"statusCode"`
+	DurationMs             int64                  `json:"durationMs"`
+	FirstMeaningfulEventMs *int64                 `json:"firstMeaningfulEventMs,omitempty"`
+	LastMeaningfulEventMs  *int64                 `json:"lastMeaningfulEventMs,omitempty"`
+	MaxMeaningfulGapMs     *int64                 `json:"maxMeaningfulGapMs,omitempty"`
+	FirstToolFragmentMs    *int64                 `json:"firstToolFragmentMs,omitempty"`
+	LastToolFragmentMs     *int64                 `json:"lastToolFragmentMs,omitempty"`
+	ToolAssemblyMs         *int64                 `json:"toolAssemblyMs,omitempty"`
+	ToolResultRepairs      int                    `json:"toolResultRepairs,omitempty"`
+	ToolSchemaRepairs      int                    `json:"toolSchemaRepairs,omitempty"`
+	Request                requestDetailRequest   `json:"request"`
+	Response               requestDetailResponse  `json:"response"`
+	Attempts               []requestDetailAttempt `json:"attempts,omitempty"`
+	Timeline               []requestDetailEvent   `json:"timeline,omitempty"`
+	DroppedEvents          int                    `json:"droppedEvents,omitempty"`
+	TruncatedFields        []string               `json:"truncatedFields,omitempty"`
 }
 
 type requestDetailRequest struct {
@@ -1037,26 +1047,36 @@ func (t *requestDetailTrace) finalize(entry requestLogEntry) (requestDetail, boo
 		usage.CacheCreationInputTokens = entry.CacheCreationInputTokens
 	}
 	detail := requestDetail{
-		Version:            requestDetailStateVersion,
-		RequestID:          requestID,
-		Timestamp:          t.startedAt.Unix(),
-		Protocol:           protocol,
-		Model:              entry.Model,
-		APIKeyID:           entry.APIKeyID,
-		APIKeyName:         entry.APIKeyName,
-		AccountID:          entry.AccountID,
-		AccountEmail:       redactRequestDetailText(entry.AccountEmail),
-		Endpoint:           entry.Endpoint,
-		AccountSelectionMs: entry.AccountSelectionMs,
-		AccountAttempts:    entry.AccountAttempts,
-		RouteAffinityHit:   entry.RouteAffinityHit,
-		Status:             entry.Status,
-		StatusCode:         entry.StatusCode,
-		DurationMs:         entry.DurationMs,
-		Request:            t.request,
-		Attempts:           append([]requestDetailAttempt(nil), t.attempts...),
-		Timeline:           append([]requestDetailEvent(nil), t.timeline...),
-		DroppedEvents:      t.droppedEvents,
+		Version:                requestDetailStateVersion,
+		RequestID:              requestID,
+		Timestamp:              t.startedAt.Unix(),
+		Protocol:               protocol,
+		Model:                  entry.Model,
+		APIKeyID:               entry.APIKeyID,
+		APIKeyName:             entry.APIKeyName,
+		AccountID:              entry.AccountID,
+		AccountEmail:           redactRequestDetailText(entry.AccountEmail),
+		Endpoint:               entry.Endpoint,
+		AccountSelectionMs:     entry.AccountSelectionMs,
+		AccountAttempts:        entry.AccountAttempts,
+		AccountQueueWaitMs:     entry.AccountQueueWaitMs,
+		AccountQueueWaitCount:  entry.AccountQueueWaitCount,
+		RouteAffinityHit:       entry.RouteAffinityHit,
+		Status:                 entry.Status,
+		StatusCode:             entry.StatusCode,
+		DurationMs:             entry.DurationMs,
+		FirstMeaningfulEventMs: entry.FirstMeaningfulEventMs,
+		LastMeaningfulEventMs:  entry.LastMeaningfulEventMs,
+		MaxMeaningfulGapMs:     entry.MaxMeaningfulGapMs,
+		FirstToolFragmentMs:    entry.FirstToolFragmentMs,
+		LastToolFragmentMs:     entry.LastToolFragmentMs,
+		ToolAssemblyMs:         entry.ToolAssemblyMs,
+		ToolResultRepairs:      entry.ToolResultRepairs,
+		ToolSchemaRepairs:      entry.ToolSchemaRepairs,
+		Request:                t.request,
+		Attempts:               append([]requestDetailAttempt(nil), t.attempts...),
+		Timeline:               append([]requestDetailEvent(nil), t.timeline...),
+		DroppedEvents:          t.droppedEvents,
 		Response: requestDetailResponse{
 			VisibleOutput:            t.visible.string(),
 			VisibleOutputBytes:       t.visible.total,

@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -1015,8 +1016,9 @@ func ensureObjectSchema(schema interface{}) interface{} {
 		return map[string]interface{}{"type": "object"}
 	}
 	cleaned := cloneSchemaMap(m)
+	lowerSchemaCompositions(cleaned)
 	cleanSchema(cleaned)
-	if _, hasType := cleaned["type"]; !hasType {
+	if schemaType, ok := cleaned["type"].(string); !ok || !strings.EqualFold(schemaType, "object") {
 		cleaned["type"] = "object"
 	}
 	return cleaned
@@ -1040,8 +1042,104 @@ func cloneSchemaValue(v interface{}) interface{} {
 			cloned = append(cloned, cloneSchemaValue(item))
 		}
 		return cloned
+	case []map[string]interface{}:
+		cloned := make([]map[string]interface{}, 0, len(val))
+		for _, item := range val {
+			cloned = append(cloned, cloneSchemaMap(item))
+		}
+		return cloned
 	default:
 		return v
+	}
+}
+
+// lowerSchemaCompositions converts JSON Schema composition keywords into the
+// conservative object shape accepted by Kiro. Kiro's tool validator rejects a
+// top-level oneOf/anyOf/allOf even when the schema also contains a valid object
+// definition. Dropping those keywords without first merging their object
+// properties would make valid tool arguments disappear, so object branches are
+// merged into the surrounding properties map before the composition is removed.
+// Primitive-only branches become an open property schema after the keyword is
+// removed, which is permissive but remains callable and wire-compatible.
+func lowerSchemaCompositions(m map[string]interface{}) {
+	if m == nil {
+		return
+	}
+
+	// Normalize nested schemas first so branches are safe to merge and no
+	// composition keyword survives below the root.
+	for _, value := range m {
+		switch nested := value.(type) {
+		case map[string]interface{}:
+			lowerSchemaCompositions(nested)
+		case []interface{}:
+			for _, item := range nested {
+				if child, ok := item.(map[string]interface{}); ok {
+					lowerSchemaCompositions(child)
+				}
+			}
+		case []map[string]interface{}:
+			for _, child := range nested {
+				lowerSchemaCompositions(child)
+			}
+		}
+	}
+
+	for _, keyword := range []string{"oneOf", "anyOf", "allOf"} {
+		raw, exists := m[keyword]
+		if !exists {
+			continue
+		}
+		mergeComposedObjectBranches(m, raw)
+		delete(m, keyword)
+	}
+	// Kiro cannot resolve references in an inline tool schema. Keeping a
+	// dangling root or property reference produces the same deterministic 400
+	// as the composition keywords, so leave the affected node permissive.
+	delete(m, "$ref")
+}
+
+func mergeComposedObjectBranches(target map[string]interface{}, raw interface{}) {
+	var branches []interface{}
+	switch value := raw.(type) {
+	case []interface{}:
+		branches = value
+	case []map[string]interface{}:
+		branches = make([]interface{}, 0, len(value))
+		for _, branch := range value {
+			branches = append(branches, branch)
+		}
+	default:
+		return
+	}
+	properties, _ := target["properties"].(map[string]interface{})
+	if properties == nil {
+		properties = make(map[string]interface{})
+	}
+	mergedProperties := false
+	for _, value := range branches {
+		branch, ok := value.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		branchType, _ := branch["type"].(string)
+		branchProperties, hasProperties := branch["properties"].(map[string]interface{})
+		if !hasProperties && !strings.EqualFold(branchType, "object") {
+			continue
+		}
+		for name, property := range branchProperties {
+			if _, exists := properties[name]; !exists {
+				properties[name] = cloneSchemaValue(property)
+				mergedProperties = true
+			}
+		}
+		if _, hasType := target["type"]; !hasType && strings.EqualFold(branchType, "object") {
+			target["type"] = "object"
+		}
+	}
+	if mergedProperties || len(properties) > 0 {
+		target["properties"] = properties
+		target["type"] = "object"
 	}
 }
 
@@ -1076,6 +1174,10 @@ func cleanSchema(m map[string]interface{}) {
 				if sub, ok := item.(map[string]interface{}); ok {
 					cleanSchema(sub)
 				}
+			}
+		case []map[string]interface{}:
+			for _, sub := range val {
+				cleanSchema(sub)
 			}
 		}
 	}
@@ -2271,20 +2373,21 @@ func activeToolTurn(payload *KiroPayload, history, conversation []KiroHistoryMes
 	return conversation[len(conversation)-1].AssistantResponseMessage
 }
 
-func detachOrphanedToolResults(payload *KiroPayload) {
+func detachOrphanedToolResults(payload *KiroPayload) bool {
 	if payload == nil {
-		return
+		return false
 	}
 	current := &payload.ConversationState.CurrentMessage.UserInputMessage
 	context := current.UserInputMessageContext
 	if context == nil || len(context.ToolResults) == 0 {
-		return
+		return false
 	}
 	if ordered, ok := orderToolResultsForLastAssistant(payload.ConversationState.History, context.ToolResults); ok {
 		// Keep parallel results deterministic even when the client returned them
 		// in completion order rather than assistant declaration order.
+		changed := !sameToolResultOrder(context.ToolResults, ordered)
 		context.ToolResults = ordered
-		return
+		return changed
 	}
 
 	continuation := buildToolResultsContinuation(context.ToolResults)
@@ -2298,6 +2401,19 @@ func detachOrphanedToolResults(payload *KiroPayload) {
 	if len(context.Tools) == 0 {
 		current.UserInputMessageContext = nil
 	}
+	return true
+}
+
+func sameToolResultOrder(left, right []KiroToolResult) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i].ToolUseID != right[i].ToolUseID {
+			return false
+		}
+	}
+	return true
 }
 
 // repairKiroPayloadToolResults is the final defense before a payload is sent to
@@ -2310,20 +2426,25 @@ func repairKiroPayloadToolResults(payload *KiroPayload) {
 	if payload == nil {
 		return
 	}
+	payload.recordToolSchemaRepairs(sanitizeKiroPayloadToolSchemas(payload))
 
 	current := &payload.ConversationState.CurrentMessage.UserInputMessage
 	currentResults := []KiroToolResult(nil)
+	repaired := false
 	if context := current.UserInputMessageContext; context != nil && len(context.ToolResults) > 0 {
 		if ordered, ok := orderToolResultsForLastAssistant(payload.ConversationState.History, context.ToolResults); ok {
+			repaired = !sameToolResultOrder(context.ToolResults, ordered)
 			context.ToolResults = ordered
 			currentResults = ordered
 		} else {
-			detachOrphanedToolResults(payload)
+			repaired = detachOrphanedToolResults(payload) || repaired
 		}
 	}
 
 	if historyHasStructuredToolData(payload.ConversationState.History) {
+		before := payloadByteSize(payload)
 		payload.ConversationState.History = sanitizeKiroHistory(payload.ConversationState.History, currentResults)
+		repaired = repaired || payloadByteSize(payload) != before
 	}
 
 	// Sanitizing history can remove the assistant that justified the current
@@ -2331,11 +2452,40 @@ func repairKiroPayloadToolResults(payload *KiroPayload) {
 	// structured block.
 	if context := current.UserInputMessageContext; context != nil && len(context.ToolResults) > 0 {
 		if ordered, ok := orderToolResultsForLastAssistant(payload.ConversationState.History, context.ToolResults); ok {
+			repaired = !sameToolResultOrder(context.ToolResults, ordered) || repaired
 			context.ToolResults = ordered
 		} else {
-			detachOrphanedToolResults(payload)
+			repaired = detachOrphanedToolResults(payload) || repaired
 		}
 	}
+	if repaired {
+		payload.recordToolResultRepair()
+	}
+}
+
+// sanitizeKiroPayloadToolSchemas is the final schema guard for payloads that
+// were assembled outside the Claude/OpenAI translators (and for future
+// translation paths). It keeps the upstream request contract consistent even
+// when a caller injects a raw JSON Schema directly.
+func sanitizeKiroPayloadToolSchemas(payload *KiroPayload) int {
+	if payload == nil {
+		return 0
+	}
+	context := payload.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext
+	if context == nil || len(context.Tools) == 0 {
+		return 0
+	}
+	changed := 0
+	for i := range context.Tools {
+		before, _ := json.Marshal(context.Tools[i].ToolSpecification.InputSchema.JSON)
+		normalized := ensureObjectSchema(context.Tools[i].ToolSpecification.InputSchema.JSON)
+		after, _ := json.Marshal(normalized)
+		context.Tools[i].ToolSpecification.InputSchema.JSON = normalized
+		if !bytes.Equal(before, after) {
+			changed++
+		}
+	}
+	return changed
 }
 
 func historyHasStructuredToolData(history []KiroHistoryMessage) bool {
@@ -2343,8 +2493,10 @@ func historyHasStructuredToolData(history []KiroHistoryMessage) bool {
 		if assistant := message.AssistantResponseMessage; assistant != nil && len(assistant.ToolUses) > 0 {
 			return true
 		}
-		if user := message.UserInputMessage; user != nil && user.UserInputMessageContext != nil && len(user.UserInputMessageContext.ToolResults) > 0 {
-			return true
+		if user := message.UserInputMessage; user != nil && user.UserInputMessageContext != nil {
+			if len(user.UserInputMessageContext.Tools) > 0 || len(user.UserInputMessageContext.ToolResults) > 0 {
+				return true
+			}
 		}
 	}
 	return false

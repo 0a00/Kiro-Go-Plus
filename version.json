@@ -1,5 +1,5 @@
 {
-  "version": "1.2.59",
-  "changelog": "Add bounded long-term JSONL log archives with rotation, retention, secure redaction, Web configuration, and streaming download.\n增加有界长期 JSONL 日志归档，支持轮换、保留策略、安全脱敏、Web 配置和流式下载。",
+  "version": "1.2.60",
+  "changelog": "Harden tool/schema compatibility, add adaptive upstream queueing, and expose meaningful stream timing.\n强化工具与 Schema 兼容性，增加自适应上游排队，并记录有效流事件时序。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }

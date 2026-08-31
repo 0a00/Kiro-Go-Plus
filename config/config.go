@@ -180,15 +180,24 @@ type ApiKeyEntry struct {
 
 // UpstreamProtectionConfig controls local per-upstream concurrency and 429 backoff.
 type UpstreamProtectionConfig struct {
-	Enabled                       bool                      `json:"enabled"`
-	MaxPerAccountConcurrency      int                       `json:"maxPerAccountConcurrency,omitempty"`
-	MaxPerAccountModelConcurrency int                       `json:"maxPerAccountModelConcurrency,omitempty"`
-	PerModelConcurrency           map[string]int            `json:"perModelConcurrency,omitempty"`
-	PerProfileModelConcurrency    map[string]map[string]int `json:"perProfileModelConcurrency,omitempty"`
-	RateLimitCooldownMs           int                       `json:"rateLimitCooldownMs,omitempty"`
-	MaxRateLimitCooldownMs        int                       `json:"maxRateLimitCooldownMs,omitempty"`
-	RouteAffinityTTLSeconds       int                       `json:"routeAffinityTtlSeconds,omitempty"`
-	RouteAffinityMaxEntries       int                       `json:"routeAffinityMaxEntries,omitempty"`
+	Enabled                       bool `json:"enabled"`
+	MaxPerAccountConcurrency      int  `json:"maxPerAccountConcurrency,omitempty"`
+	MaxPerAccountModelConcurrency int  `json:"maxPerAccountModelConcurrency,omitempty"`
+	// ConcurrencyMode controls how the configured hard limits are applied.
+	// "adaptive" keeps a bounded internal soft limit and queues excess work;
+	// "hard" uses the configured limits as-is. Missing values migrate to
+	// adaptive so legacy values such as 10000 cannot disable protection by
+	// accident.
+	ConcurrencyMode                   string                    `json:"concurrencyMode,omitempty"`
+	SoftMaxPerAccountConcurrency      int                       `json:"softMaxPerAccountConcurrency,omitempty"`
+	SoftMaxPerAccountModelConcurrency int                       `json:"softMaxPerAccountModelConcurrency,omitempty"`
+	QueueCapacity                     int                       `json:"queueCapacity,omitempty"`
+	PerModelConcurrency               map[string]int            `json:"perModelConcurrency,omitempty"`
+	PerProfileModelConcurrency        map[string]map[string]int `json:"perProfileModelConcurrency,omitempty"`
+	RateLimitCooldownMs               int                       `json:"rateLimitCooldownMs,omitempty"`
+	MaxRateLimitCooldownMs            int                       `json:"maxRateLimitCooldownMs,omitempty"`
+	RouteAffinityTTLSeconds           int                       `json:"routeAffinityTtlSeconds,omitempty"`
+	RouteAffinityMaxEntries           int                       `json:"routeAffinityMaxEntries,omitempty"`
 }
 
 // PromptCacheConfig controls local prompt/KV cache simulation for usage reporting.
@@ -553,7 +562,7 @@ const (
 )
 
 // Version current version
-const Version = "1.2.59"
+const Version = "1.2.60"
 
 var (
 	cfg           *Config
@@ -636,6 +645,7 @@ func loadLocked() error {
 	}
 	passwordMigrated := false
 	promptCacheModeMigrated := false
+	upstreamProtectionMigrated := false
 	if strings.TrimSpace(c.Password) == "" {
 		c.Password = "changeme"
 	}
@@ -648,7 +658,26 @@ func loadLocked() error {
 		passwordMigrated = true
 	}
 	if !rawConfigHasKey(data, "upstreamProtection") {
-		c.UpstreamProtection.Enabled = true
+		c.UpstreamProtection = defaultUpstreamProtectionConfig()
+		upstreamProtectionMigrated = true
+	} else {
+		defaults := defaultUpstreamProtectionConfig()
+		if !rawConfigHasNestedKey(data, "upstreamProtection", "concurrencyMode") {
+			c.UpstreamProtection.ConcurrencyMode = defaults.ConcurrencyMode
+			upstreamProtectionMigrated = true
+		}
+		if !rawConfigHasNestedKey(data, "upstreamProtection", "softMaxPerAccountConcurrency") {
+			c.UpstreamProtection.SoftMaxPerAccountConcurrency = defaults.SoftMaxPerAccountConcurrency
+			upstreamProtectionMigrated = true
+		}
+		if !rawConfigHasNestedKey(data, "upstreamProtection", "softMaxPerAccountModelConcurrency") {
+			c.UpstreamProtection.SoftMaxPerAccountModelConcurrency = defaults.SoftMaxPerAccountModelConcurrency
+			upstreamProtectionMigrated = true
+		}
+		if !rawConfigHasNestedKey(data, "upstreamProtection", "queueCapacity") {
+			c.UpstreamProtection.QueueCapacity = defaults.QueueCapacity
+			upstreamProtectionMigrated = true
+		}
 	}
 	if !rawConfigHasKey(data, "promptCacheEnabled") {
 		c.PromptCacheEnabled = defaultPromptCacheConfig().Enabled
@@ -825,7 +854,7 @@ func loadLocked() error {
 			overageMigrated = true
 		}
 	}
-	if overageMigrated || fingerprintMigrated || passwordMigrated || secretsMigrated || promptCacheModeMigrated {
+	if upstreamProtectionMigrated || overageMigrated || fingerprintMigrated || passwordMigrated || secretsMigrated || promptCacheModeMigrated {
 		if err := saveLocked(); err != nil {
 			return err
 		}
@@ -951,15 +980,19 @@ func rawConfigHasNestedKey(data []byte, parent, key string) bool {
 
 func defaultUpstreamProtectionConfig() UpstreamProtectionConfig {
 	return UpstreamProtectionConfig{
-		Enabled:                       true,
-		MaxPerAccountConcurrency:      10,
-		MaxPerAccountModelConcurrency: 5,
-		PerModelConcurrency:           map[string]int{},
-		PerProfileModelConcurrency:    map[string]map[string]int{},
-		RateLimitCooldownMs:           2000,
-		MaxRateLimitCooldownMs:        60000,
-		RouteAffinityTTLSeconds:       3600,
-		RouteAffinityMaxEntries:       20000,
+		Enabled:                           true,
+		MaxPerAccountConcurrency:          10,
+		MaxPerAccountModelConcurrency:     5,
+		ConcurrencyMode:                   "adaptive",
+		SoftMaxPerAccountConcurrency:      16,
+		SoftMaxPerAccountModelConcurrency: 5,
+		QueueCapacity:                     256,
+		PerModelConcurrency:               map[string]int{},
+		PerProfileModelConcurrency:        map[string]map[string]int{},
+		RateLimitCooldownMs:               2000,
+		MaxRateLimitCooldownMs:            60000,
+		RouteAffinityTTLSeconds:           3600,
+		RouteAffinityMaxEntries:           20000,
 	}
 }
 
@@ -977,6 +1010,29 @@ func normalizeUpstreamProtectionLocked() {
 	}
 	if up.MaxPerAccountModelConcurrency > 10000 {
 		up.MaxPerAccountModelConcurrency = 10000
+	}
+	mode := strings.ToLower(strings.TrimSpace(up.ConcurrencyMode))
+	if mode != "adaptive" && mode != "hard" {
+		mode = defaults.ConcurrencyMode
+	}
+	up.ConcurrencyMode = mode
+	if up.SoftMaxPerAccountConcurrency <= 0 {
+		up.SoftMaxPerAccountConcurrency = defaults.SoftMaxPerAccountConcurrency
+	}
+	if up.SoftMaxPerAccountConcurrency > 1000 {
+		up.SoftMaxPerAccountConcurrency = 1000
+	}
+	if up.SoftMaxPerAccountModelConcurrency <= 0 {
+		up.SoftMaxPerAccountModelConcurrency = defaults.SoftMaxPerAccountModelConcurrency
+	}
+	if up.SoftMaxPerAccountModelConcurrency > 1000 {
+		up.SoftMaxPerAccountModelConcurrency = 1000
+	}
+	if up.QueueCapacity <= 0 {
+		up.QueueCapacity = defaults.QueueCapacity
+	}
+	if up.QueueCapacity > 100000 {
+		up.QueueCapacity = 100000
 	}
 	if up.PerModelConcurrency == nil {
 		up.PerModelConcurrency = map[string]int{}
@@ -1733,6 +1789,10 @@ func GetUpstreamProtectionConfig() UpstreamProtectionConfig {
 	up := cfg.UpstreamProtection
 	if up.MaxPerAccountConcurrency <= 0 ||
 		up.MaxPerAccountModelConcurrency <= 0 ||
+		up.ConcurrencyMode == "" ||
+		up.SoftMaxPerAccountConcurrency <= 0 ||
+		up.SoftMaxPerAccountModelConcurrency <= 0 ||
+		up.QueueCapacity <= 0 ||
 		up.PerModelConcurrency == nil ||
 		up.PerProfileModelConcurrency == nil ||
 		up.RateLimitCooldownMs <= 0 ||
@@ -1745,6 +1805,20 @@ func GetUpstreamProtectionConfig() UpstreamProtectionConfig {
 		}
 		if up.MaxPerAccountModelConcurrency <= 0 {
 			up.MaxPerAccountModelConcurrency = defaults.MaxPerAccountModelConcurrency
+		}
+		mode := strings.ToLower(strings.TrimSpace(up.ConcurrencyMode))
+		if mode != "adaptive" && mode != "hard" {
+			mode = defaults.ConcurrencyMode
+		}
+		up.ConcurrencyMode = mode
+		if up.SoftMaxPerAccountConcurrency <= 0 {
+			up.SoftMaxPerAccountConcurrency = defaults.SoftMaxPerAccountConcurrency
+		}
+		if up.SoftMaxPerAccountModelConcurrency <= 0 {
+			up.SoftMaxPerAccountModelConcurrency = defaults.SoftMaxPerAccountModelConcurrency
+		}
+		if up.QueueCapacity <= 0 {
+			up.QueueCapacity = defaults.QueueCapacity
 		}
 		if up.PerModelConcurrency == nil {
 			up.PerModelConcurrency = map[string]int{}

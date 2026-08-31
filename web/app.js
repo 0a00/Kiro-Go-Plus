@@ -773,6 +773,7 @@
 	const endpointCircuits = (((data || {}).networkCircuits || {}).endpoints || []).filter(s => s.state === 'open').length;
 	const proxyCircuits = (((data || {}).networkCircuits || {}).proxies || []).filter(s => s.state === 'open').length;
     const accountEndpointCooldowns = (((data || {}).accountEndpointRoutes || {}).cooldowns || []).length;
+    const queue = (data && data.queue) || {};
     el.innerHTML =
       '<div class="request-summary-item"><span>' + escapeHtml(t('requests.protection')) + '</span><strong>' + escapeHtml(cfg.enabled === false ? t('common.disabled') : t('common.enabled')) + '</strong></div>' +
       '<div class="request-summary-item"><span>' + escapeHtml(t('requests.inFlight')) + '</span><strong>' + active + '</strong></div>' +
@@ -780,7 +781,12 @@
 	  '<div class="request-summary-item"><span>' + escapeHtml(t('requests.affinity')) + '</span><strong>' + ((data && data.routeAffinityCount) || 0) + '</strong></div>' +
 	  '<div class="request-summary-item"><span>' + escapeHtml(t('requests.endpointCircuits')) + '</span><strong>' + endpointCircuits + '</strong></div>' +
 	  '<div class="request-summary-item"><span>' + escapeHtml(t('requests.accountEndpointCooldowns')) + '</span><strong>' + accountEndpointCooldowns + '</strong></div>' +
-	  '<div class="request-summary-item"><span>' + escapeHtml(t('requests.proxyCircuits')) + '</span><strong>' + proxyCircuits + '</strong></div>';
+		  '<div class="request-summary-item"><span>' + escapeHtml(t('requests.proxyCircuits')) + '</span><strong>' + proxyCircuits + '</strong></div>';
+	  if (queue.capacity) {
+	    el.innerHTML +=
+	      '<div class="request-summary-item"><span>' + escapeHtml(t('requests.waitQueue')) + '</span><strong>' + escapeHtml(String(queue.waiting || 0)) + ' / ' + escapeHtml(String(queue.capacity)) + '</strong></div>' +
+	      '<div class="request-summary-item"><span>' + escapeHtml(t('requests.concurrencyMode')) + '</span><strong>' + escapeHtml(String(queue.mode || 'adaptive')) + '</strong></div>';
+	  }
   }
 
   function renderRequests(items) {
@@ -831,6 +837,12 @@
       if (item.toolTruncationCount) {
         outcomeParts.push(t('requests.toolRecovery', item.toolTruncationCount, item.toolRecoveryAttempts || 0));
       }
+      if (item.toolResultRepairs) {
+        outcomeParts.push(t('requests.toolResultRepairs', item.toolResultRepairs));
+      }
+      if (item.toolSchemaRepairs) {
+        outcomeParts.push(t('requests.toolSchemaRepairs', item.toolSchemaRepairs));
+      }
       const outcome = outcomeParts.join(' · ') || '-';
       const toolPayloadTitle = item.toolArgumentBytes
         ? ' · ' + t('requests.toolPayload', item.toolArgumentBytes, item.toolFragmentCount || 0)
@@ -843,6 +855,11 @@
       const firstToolOutputDuration = formatRequestDuration(item.firstToolOutputMs);
       const firstContentDuration = formatRequestDuration(item.firstContentMs);
       const maxStreamGapDuration = formatRequestDuration(item.maxStreamGapMs);
+      const firstMeaningfulEventDuration = formatRequestDuration(item.firstMeaningfulEventMs);
+      const lastMeaningfulEventDuration = formatRequestDuration(item.lastMeaningfulEventMs);
+      const maxMeaningfulGapDuration = formatRequestDuration(item.maxMeaningfulGapMs);
+      const firstToolFragmentDuration = formatRequestDuration(item.firstToolFragmentMs);
+      const lastToolFragmentDuration = formatRequestDuration(item.lastToolFragmentMs);
       const toolAssemblyDuration = formatRequestDuration(item.toolAssemblyMs);
       const totalDuration = formatRequestDuration(item.durationMs);
       const durationItems = [];
@@ -852,6 +869,9 @@
         if (item.routeAffinityHit) selectionParts.push(t('requests.affinityHit'));
         durationItems.push([t('requests.accountSelection'), selectionParts.join(' · '), true]);
       }
+      if (item.accountQueueWaitMs || item.accountQueueWaitCount) {
+        durationItems.push([t('requests.accountQueueWait'), formatRequestDuration(item.accountQueueWaitMs || 0) + ' · ' + t('requests.accountQueueWaitCount', item.accountQueueWaitCount || 0), true]);
+      }
       durationItems.push(...[
         [t('requests.upstreamActivity'), upstreamActivityDuration, item.upstreamFirstActivityMs],
         [t('requests.firstSseEvent'), firstSSEEventDuration, item.firstSseEventMs],
@@ -860,6 +880,11 @@
         [t('requests.firstToolOutput'), firstToolOutputDuration, item.firstToolOutputMs],
         [t('requests.firstContent'), firstContentDuration, item.firstContentMs],
         [t('requests.maxStreamGap'), maxStreamGapDuration, item.maxStreamGapMs],
+        [t('requests.firstMeaningfulEvent'), firstMeaningfulEventDuration, item.firstMeaningfulEventMs],
+        [t('requests.lastMeaningfulEvent'), lastMeaningfulEventDuration, item.lastMeaningfulEventMs],
+        [t('requests.maxMeaningfulGap'), maxMeaningfulGapDuration, item.maxMeaningfulGapMs],
+        [t('requests.firstToolFragment'), firstToolFragmentDuration, item.firstToolFragmentMs],
+        [t('requests.lastToolFragment'), lastToolFragmentDuration, item.lastToolFragmentMs],
         [t('requests.toolAssembly'), toolAssemblyDuration, item.toolAssemblyMs],
         [t('requests.totalDuration'), totalDuration, item.durationMs]
       ].filter(part => part[2] !== null && part[2] !== undefined));
@@ -2702,6 +2727,10 @@
     $('upstreamProtectionEnabled').checked = d.enabled !== false;
     $('upstreamMaxPerAccountConcurrency').value = d.maxPerAccountConcurrency || 10;
     $('upstreamMaxPerAccountModelConcurrency').value = d.maxPerAccountModelConcurrency || 5;
+    $('upstreamConcurrencyMode').value = d.concurrencyMode === 'hard' ? 'hard' : 'adaptive';
+    $('upstreamSoftMaxPerAccountConcurrency').value = d.softMaxPerAccountConcurrency || 16;
+    $('upstreamSoftMaxPerAccountModelConcurrency').value = d.softMaxPerAccountModelConcurrency || 5;
+    $('upstreamQueueCapacity').value = d.queueCapacity || 256;
     $('upstreamRateLimitCooldownMs').value = d.rateLimitCooldownMs || 2000;
     $('upstreamMaxRateLimitCooldownMs').value = d.maxRateLimitCooldownMs || 60000;
     $('upstreamRouteAffinityTTLSeconds').value = d.routeAffinityTtlSeconds || 3600;
@@ -2722,6 +2751,10 @@
       enabled: $('upstreamProtectionEnabled').checked,
       maxPerAccountConcurrency: Math.max(1, Math.round(Number($('upstreamMaxPerAccountConcurrency').value) || 10)),
       maxPerAccountModelConcurrency: Math.max(1, Math.round(Number($('upstreamMaxPerAccountModelConcurrency').value) || 5)),
+      concurrencyMode: $('upstreamConcurrencyMode').value === 'hard' ? 'hard' : 'adaptive',
+      softMaxPerAccountConcurrency: Math.max(1, Math.min(1000, Math.round(Number($('upstreamSoftMaxPerAccountConcurrency').value) || 16))),
+      softMaxPerAccountModelConcurrency: Math.max(1, Math.min(1000, Math.round(Number($('upstreamSoftMaxPerAccountModelConcurrency').value) || 5))),
+      queueCapacity: Math.max(1, Math.min(100000, Math.round(Number($('upstreamQueueCapacity').value) || 256))),
       rateLimitCooldownMs: Math.max(100, Math.round(Number($('upstreamRateLimitCooldownMs').value) || 2000)),
       maxRateLimitCooldownMs: Math.max(100, Math.round(Number($('upstreamMaxRateLimitCooldownMs').value) || 60000)),
       routeAffinityTtlSeconds: Math.max(60, Math.round(Number($('upstreamRouteAffinityTTLSeconds').value) || 3600)),

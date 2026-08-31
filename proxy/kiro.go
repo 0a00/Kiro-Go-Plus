@@ -325,12 +325,16 @@ type KiroPayload struct {
 	maxToolFragmentCount      int
 	toolTruncationCount       int
 	toolRecoveryAttempts      int
+	toolResultRepairs         int
+	toolSchemaRepairs         int
 	toolRecoveryHintApplied   bool
 	// promptCacheTTL preserves an explicit Claude cache-control TTL across
 	// translation. It is intentionally not serialized to the Kiro API.
 	promptCacheTTL        time.Duration
 	accountSelectionMs    int64
 	accountAttempts       int
+	accountQueueWaitMs    int64
+	accountQueueWaitCount int
 	routeAffinityHit      bool
 	requestTiming         *requestFirstContentTimer
 	promptCacheDiagnostic promptCacheDiagnostic
@@ -352,9 +356,13 @@ func (p *KiroPayload) beginStreamMetrics(startedAt time.Time) {
 	p.maxToolFragmentCount = 0
 	p.toolTruncationCount = 0
 	p.toolRecoveryAttempts = 0
+	p.toolResultRepairs = 0
+	p.toolSchemaRepairs = 0
 	p.toolRecoveryHintApplied = false
 	p.accountSelectionMs = 0
 	p.accountAttempts = 0
+	p.accountQueueWaitMs = 0
+	p.accountQueueWaitCount = 0
 	p.routeAffinityHit = false
 	p.promptCacheDiagnostic = promptCacheDiagnostic{}
 	p.hasCacheDiagnostic = false
@@ -389,6 +397,29 @@ func (p *KiroPayload) accountSelectionMetrics() (int64, int, bool) {
 	return p.accountSelectionMs, p.accountAttempts, p.routeAffinityHit
 }
 
+func (p *KiroPayload) recordAccountQueueWait(elapsed time.Duration, count int) {
+	if p == nil {
+		return
+	}
+	ms := elapsed.Milliseconds()
+	if ms < 0 {
+		ms = 0
+	}
+	p.streamMetricsMu.Lock()
+	p.accountQueueWaitMs += ms
+	p.accountQueueWaitCount += count
+	p.streamMetricsMu.Unlock()
+}
+
+func (p *KiroPayload) accountQueueMetrics() (int64, int) {
+	if p == nil {
+		return 0, 0
+	}
+	p.streamMetricsMu.Lock()
+	defer p.streamMetricsMu.Unlock()
+	return p.accountQueueWaitMs, p.accountQueueWaitCount
+}
+
 func (p *KiroPayload) beginRequestTiming(startedAt time.Time) *requestFirstContentTimer {
 	if p == nil {
 		return newRequestFirstContentTimer(startedAt)
@@ -408,6 +439,60 @@ func (p *KiroPayload) requestTimingTracker() *requestFirstContentTimer {
 	p.streamMetricsMu.Lock()
 	defer p.streamMetricsMu.Unlock()
 	return p.requestTiming
+}
+
+func (p *KiroPayload) recordMeaningfulStreamEvent() {
+	if p == nil {
+		return
+	}
+	if timer := p.requestTimingTracker(); timer != nil {
+		timer.MarkMeaningfulEvent()
+	}
+}
+
+func (p *KiroPayload) recordToolStreamFragment() {
+	if p == nil {
+		return
+	}
+	if timer := p.requestTimingTracker(); timer != nil {
+		timer.MarkToolFragment()
+	}
+}
+
+func (p *KiroPayload) recordToolResultRepair() {
+	if p == nil {
+		return
+	}
+	p.streamMetricsMu.Lock()
+	p.toolResultRepairs++
+	p.streamMetricsMu.Unlock()
+}
+
+func (p *KiroPayload) toolResultRepairCount() int {
+	if p == nil {
+		return 0
+	}
+	p.streamMetricsMu.Lock()
+	defer p.streamMetricsMu.Unlock()
+	return p.toolResultRepairs
+}
+
+func (p *KiroPayload) recordToolSchemaRepairs(count int) {
+	if p == nil || count <= 0 {
+		return
+	}
+	p.streamMetricsMu.Lock()
+	p.toolSchemaRepairs += count
+	p.streamMetricsMu.Unlock()
+}
+
+func (p *KiroPayload) toolSchemaRepairCount() int {
+	if p == nil {
+		return 0
+	}
+	p.streamMetricsMu.Lock()
+	defer p.streamMetricsMu.Unlock()
+	return p.toolSchemaRepairs
 }
 
 func (p *KiroPayload) setPromptCacheDiagnostic(diagnostic promptCacheDiagnostic) {
@@ -632,6 +717,10 @@ type KiroStreamCallback struct {
 	OnCredits         func(credits float64)
 	OnContextUsage    func(percentage float64)
 	OnStopReason      func(reason string)
+	// Internal observability hooks. They are invoked for semantic upstream
+	// events and tool fragments before any response buffering/translation.
+	onMeaningfulEvent func()
+	onToolFragment    func()
 	detailTrace       *requestDetailTrace
 	detailToolNameMap map[string]string
 	streamDiagnostics *eventStreamDiagnostics
@@ -1041,6 +1130,22 @@ endpointLoop:
 			} else {
 				callbackCopy := *attemptCallback
 				attemptCallback = &callbackCopy
+			}
+			if payload != nil {
+				previousMeaningfulHook := attemptCallback.onMeaningfulEvent
+				previousToolHook := attemptCallback.onToolFragment
+				attemptCallback.onMeaningfulEvent = func() {
+					if previousMeaningfulHook != nil {
+						previousMeaningfulHook()
+					}
+					payload.recordMeaningfulStreamEvent()
+				}
+				attemptCallback.onToolFragment = func() {
+					if previousToolHook != nil {
+						previousToolHook()
+					}
+					payload.recordToolStreamFragment()
+				}
 			}
 			attemptCallback.streamDiagnostics = attemptDiagnostics
 			wrappedCallback, meaningfulGate := wrapMeaningfulStreamCallback(attemptCallback, func() {

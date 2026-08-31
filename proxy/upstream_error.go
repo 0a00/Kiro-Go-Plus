@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"kiro-go/config"
 	"kiro-go/internal/outboundipv6"
+	accountpool "kiro-go/pool"
 	"net"
 	"net/http"
 	"strconv"
@@ -153,6 +154,20 @@ func mapDownstreamError(err error) downstreamError {
 		mapped.Status = http.StatusGatewayTimeout
 		return mapped
 	}
+	var busyErr *accountpool.UpstreamBusyError
+	if errors.As(err, &busyErr) && busyErr != nil {
+		mapped.Status = http.StatusTooManyRequests
+		mapped.ClaudeType = "rate_limit_error"
+		mapped.OpenAIType = "rate_limit_error"
+		if busyErr.RetryAfter > 0 {
+			seconds := int64((busyErr.RetryAfter + time.Second - 1) / time.Second)
+			if seconds < 1 {
+				seconds = 1
+			}
+			mapped.RetryAfter = strconv.FormatInt(seconds, 10)
+		}
+		return mapped
+	}
 
 	upstreamErr, ok := asUpstreamError(err)
 	if !ok {
@@ -260,6 +275,15 @@ func classifyUpstreamHTTPError(statusCode int, endpoint string, body []byte) *Up
 		// Kiro rejects malformed conversation structure deterministically. Retrying
 		// another account or endpoint with the same payload only repeats the 400;
 		// the translator must flatten/repair the tool results first.
+		err.Kind = UpstreamErrorClientRequest
+		err.RetryAcrossAccounts = false
+		err.RetryAcrossEndpoints = false
+	case strings.Contains(combined, "tool_schema_invalid") ||
+		(strings.Contains(combined, "input_schema") &&
+			(strings.Contains(combined, "oneof") || strings.Contains(combined, "anyof") || strings.Contains(combined, "allof"))):
+		// Tool schema composition is a deterministic request incompatibility, not
+		// an account or endpoint failure. Do not burn retry budget on identical
+		// schemas; the translator should lower it before dispatch when possible.
 		err.Kind = UpstreamErrorClientRequest
 		err.RetryAcrossAccounts = false
 		err.RetryAcrossEndpoints = false

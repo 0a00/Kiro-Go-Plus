@@ -458,10 +458,11 @@ func (h *Handler) handleResponsesNonStream(
 				Error:          busyErr.Error(),
 			})
 			h.recordDiagnosticFailureForPayload("openai.responses", model, nil, 429, busyErr, payload)
-			w.Header().Set("Retry-After", "1")
+			w.Header().Set("Retry-After", retryAfterSeconds(upstreamBusyRetryAfter(busyErr)))
 			h.sendOpenAIError(w, 429, "rate_limit_error", busyErr.Error())
 			return
 		}
+		h.recordNoAvailableAccounts(payload, "openai.responses", model, startedAt, firstContent.Value())
 		h.sendOpenAIError(w, 503, "server_error", "No available accounts")
 		return
 	}
@@ -1141,11 +1142,13 @@ func (h *Handler) handleResponsesStream(
 				Error:          busyErr.Error(),
 			}
 			h.recordDiagnosticFailureForPayload("openai.responses.stream", model, nil, 429, busyErr, payload)
+			w.Header().Set("Retry-After", retryAfterSeconds(upstreamBusyRetryAfter(busyErr)))
 			sendFailure("rate_limit_error", busyErr.Error())
 			entry.DurationMs = requestDurationMs(startedAt)
 			h.recordRequestLogForPayload(payload, entry)
 			return
 		}
+		h.recordNoAvailableAccounts(payload, "openai.responses.stream", model, startedAt, firstContent.Value())
 		sendFailure("server_error", "No available accounts")
 		return
 	}

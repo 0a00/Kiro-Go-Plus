@@ -23,19 +23,24 @@ var errAccountSelectionTimeout = errors.New("account selection timed out")
 // unlimited polling bounded and cancellation-aware. Selection time is
 // accumulated only while looking for an account, not during upstream calls.
 type accountAttemptController struct {
-	requestCtx        context.Context
-	shutdownCtx       context.Context
-	maxAttempts       int
-	attempts          int
-	rounds            int
-	excluded          map[string]bool
-	wait              func(time.Duration) bool
-	selectionDeadline time.Time
-	selectionTimeout  time.Duration
-	selectionStarted  time.Time
-	selectionElapsed  time.Duration
-	selectionActive   bool
-	selectionTimedOut bool
+	requestCtx         context.Context
+	shutdownCtx        context.Context
+	maxAttempts        int
+	attempts           int
+	rounds             int
+	excluded           map[string]bool
+	wait               func(time.Duration) bool
+	selectionDeadline  time.Time
+	selectionTimeout   time.Duration
+	selectionStarted   time.Time
+	selectionElapsed   time.Duration
+	selectionActive    bool
+	selectionTimedOut  bool
+	queueWaitElapsed   time.Duration
+	queueWaitCount     int
+	queueWaitReported  time.Duration
+	queueCountReported int
+	waitQueueFull      bool
 }
 
 func newAccountAttemptController(requestCtx, shutdownCtx context.Context, maxAttempts int) *accountAttemptController {
@@ -60,6 +65,23 @@ func (h *Handler) newAccountAttemptController(requestCtx context.Context) *accou
 	retry := config.GetRetryConfig()
 	controller := newAccountAttemptController(requestCtx, shutdownCtx, retry.MaxAccountAttempts)
 	controller.setSelectionTimeout(time.Duration(retry.AccountSelectionTimeoutSeconds) * time.Second)
+	// Unlimited account rotation must wait on pool state changes rather than
+	// waking every request on a fixed timer. The controller still owns the
+	// overall selection deadline; the pool only supplies an efficient wake-up
+	// when a slot is released or an account becomes routable.
+	if h != nil && h.pool != nil {
+		controller.wait = func(delay time.Duration) bool {
+			if remaining := controller.selectionTimeRemaining(); remaining > 0 && remaining < delay {
+				delay = remaining
+			}
+			startedAt := time.Now()
+			ok, waitErr := h.pool.WaitForAvailabilityWithStatus(requestCtx, delay)
+			controller.waitQueueFull = errors.Is(waitErr, accountpool.ErrAvailabilityQueueFull)
+			controller.queueWaitElapsed += time.Since(startedAt)
+			controller.queueWaitCount++
+			return ok
+		}
+	}
 	return controller
 }
 
@@ -125,6 +147,17 @@ func (c *accountAttemptController) nextRound(retryAfter time.Duration) bool {
 	clear(c.excluded)
 	c.rounds++
 	return true
+}
+
+func (c *accountAttemptController) waitQueueBusy(model string) *accountpool.UpstreamBusyError {
+	if c == nil || !c.waitQueueFull {
+		return nil
+	}
+	return &accountpool.UpstreamBusyError{
+		Model:       model,
+		RetryAfter:  time.Second,
+		Description: "account availability wait queue is full",
+	}
 }
 
 func (c *accountAttemptController) roundDelay(retryAfter time.Duration) time.Duration {
@@ -211,6 +244,14 @@ func isAccountSelectionTimeout(err error) bool {
 	return errors.Is(err, errAccountSelectionTimeout)
 }
 
+func upstreamBusyRetryAfter(err error) time.Duration {
+	var busy *accountpool.UpstreamBusyError
+	if errors.As(err, &busy) && busy != nil && busy.RetryAfter > 0 {
+		return busy.RetryAfter
+	}
+	return time.Second
+}
+
 func (h *Handler) acquireNextAccountForRequest(controller *accountAttemptController, model, routeKey string, payloads ...*KiroPayload) (account *config.Account, guard *accountpool.UpstreamRequestGuard, busyResult *accountpool.UpstreamBusyError) {
 	startedAt := time.Now()
 	defer func() {
@@ -222,6 +263,11 @@ func (h *Handler) acquireNextAccountForRequest(controller *accountAttemptControl
 		}
 		affinityHit := guard != nil && guard.AffinityHit()
 		payloads[0].recordAccountSelection(time.Since(startedAt), controller.attempts, affinityHit)
+		queueElapsed := controller.queueWaitElapsed - controller.queueWaitReported
+		queueCount := controller.queueWaitCount - controller.queueCountReported
+		controller.queueWaitReported = controller.queueWaitElapsed
+		controller.queueCountReported = controller.queueWaitCount
+		payloads[0].recordAccountQueueWait(queueElapsed, queueCount)
 	}()
 	if controller == nil || !controller.beginSelection() {
 		return nil, nil, nil
@@ -236,9 +282,15 @@ func (h *Handler) acquireNextAccountForRequest(controller *accountAttemptControl
 			if controller.nextRound(busy.RetryAfter) {
 				continue
 			}
+			if queueBusy := controller.waitQueueBusy(model); queueBusy != nil {
+				return nil, nil, queueBusy
+			}
 			return nil, nil, busy
 		}
 		if !controller.nextRound(0) {
+			if queueBusy := controller.waitQueueBusy(model); queueBusy != nil {
+				return nil, nil, queueBusy
+			}
 			return nil, nil, nil
 		}
 	}

@@ -163,6 +163,31 @@ func TestRequestStreamTimingSeparatesOutputsAndSSEMetrics(t *testing.T) {
 	}
 }
 
+func TestRequestStreamTimingSeparatesMeaningfulEventsFromHeartbeats(t *testing.T) {
+	timer := newRequestFirstContentTimer(time.Now())
+	timer.MarkSSEEvent(true)
+	time.Sleep(3 * time.Millisecond)
+	timer.MarkMeaningfulEvent()
+	time.Sleep(3 * time.Millisecond)
+	timer.MarkToolFragment()
+	timer.MarkSSEEvent(true)
+
+	entry := requestLogEntry{}
+	timer.Apply(&entry)
+	if entry.FirstMeaningfulEventMs == nil || entry.LastMeaningfulEventMs == nil || entry.MaxMeaningfulGapMs == nil {
+		t.Fatalf("missing meaningful-event timing: %+v", entry)
+	}
+	if entry.FirstToolFragmentMs == nil || entry.LastToolFragmentMs == nil {
+		t.Fatalf("missing tool-fragment timing: %+v", entry)
+	}
+	if *entry.MaxMeaningfulGapMs < 1 || *entry.LastMeaningfulEventMs < *entry.FirstMeaningfulEventMs {
+		t.Fatalf("invalid meaningful timing: %+v", entry)
+	}
+	if *entry.FirstMeaningfulEventMs < *entry.FirstSSEEventMs {
+		t.Fatalf("heartbeat was incorrectly counted as meaningful event: %+v", entry)
+	}
+}
+
 func TestRequestLogPersistenceRejectsCorruptFileAndRecovers(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "request_log.json")
 	if err := os.WriteFile(path, []byte(`{"version":1,"entries":`), 0o600); err != nil {

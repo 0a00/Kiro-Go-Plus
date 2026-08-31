@@ -70,6 +70,34 @@ func TestExplicitThinkingBudgetRaisesOnlyServerDefaultOutput(t *testing.T) {
 	}
 }
 
+func TestNormalizeClaudeThinkingBudgetPreservesExplicitMaxTokens(t *testing.T) {
+	req := &ClaudeRequest{
+		MaxTokens: 8192,
+		Thinking:  &ClaudeThinkingConfig{Type: "enabled", BudgetTokens: 10240},
+	}
+	changed, err := normalizeClaudeThinkingBudget(req)
+	if err != nil || !changed {
+		t.Fatalf("normalization failed: changed=%v err=%v", changed, err)
+	}
+	if req.MaxTokens != 8192 || req.Thinking.BudgetTokens != 8191 {
+		t.Fatalf("unexpected normalized limits: max=%d budget=%d", req.MaxTokens, req.Thinking.BudgetTokens)
+	}
+	if msg := validateClaudeThinkingConfig(req.Thinking, req.MaxTokens); msg != "" {
+		t.Fatalf("normalized request is still invalid: %s", msg)
+	}
+}
+
+func TestNormalizeClaudeThinkingBudgetRejectsImpossibleTinyMax(t *testing.T) {
+	req := &ClaudeRequest{
+		MaxTokens: 1024,
+		Thinking:  &ClaudeThinkingConfig{Type: "enabled", BudgetTokens: 2048},
+	}
+	changed, err := normalizeClaudeThinkingBudget(req)
+	if changed || err == nil {
+		t.Fatalf("expected impossible budget to be rejected: changed=%v err=%v", changed, err)
+	}
+}
+
 func TestOpenAITokenBudgetAliasesRespectPrecedence(t *testing.T) {
 	initTokenBudgetTestConfig(t, 64000, 500000)
 	req := &OpenAIRequest{

@@ -46,31 +46,36 @@ type AccountHealthSnapshot struct {
 
 // AccountPool 账号池
 type AccountPool struct {
-	mu               sync.RWMutex
-	accounts         []config.Account
-	accountIndex     map[string]int
-	totalAccounts    int
-	currentIndex     atomic.Uint64
-	cooldowns        map[string]time.Time // 账号冷却时间
-	cooldownKinds    map[string]accountCooldownKind
-	errorCounts      map[string]int             // 连续错误计数
-	modelLists       map[string]map[string]bool // accountID → set of modelIDs (from ListAvailableModels)
-	accountUpstream  map[string]upstreamRuntimeState
-	upstream         map[upstreamStateKey]upstreamRuntimeState
-	profiles         map[profileStateKey]upstreamRuntimeState
-	weightedCurrent  map[string]int64
-	affinity         map[string]routeAffinityEntry
-	modelNegative    map[modelAvailabilityKey]time.Time
-	lastSuccess      map[string]time.Time
-	healthStats      map[string]accountHealthState
-	refreshFailures  map[string]time.Time
-	refreshCursor    int
-	stateSaveMu      sync.Mutex
-	stateSaveTimer   *time.Timer
-	statsSaveMu      sync.Mutex
-	statsSaveTimer   *time.Timer
-	dirtyStats       map[string]struct{}
-	configGeneration uint64
+	mu              sync.RWMutex
+	accounts        []config.Account
+	accountIndex    map[string]int
+	totalAccounts   int
+	currentIndex    atomic.Uint64
+	cooldowns       map[string]time.Time // 账号冷却时间
+	cooldownKinds   map[string]accountCooldownKind
+	errorCounts     map[string]int             // 连续错误计数
+	modelLists      map[string]map[string]bool // accountID → set of modelIDs (from ListAvailableModels)
+	accountUpstream map[string]upstreamRuntimeState
+	upstream        map[upstreamStateKey]upstreamRuntimeState
+	profiles        map[profileStateKey]upstreamRuntimeState
+	weightedCurrent map[string]int64
+	affinity        map[string]routeAffinityEntry
+	modelNegative   map[modelAvailabilityKey]time.Time
+	lastSuccess     map[string]time.Time
+	healthStats     map[string]accountHealthState
+	refreshFailures map[string]time.Time
+	refreshCursor   int
+	// availabilityNotify is closed and replaced whenever a slot or account
+	// state changes. Waiting requests subscribe to the current channel instead
+	// of polling the whole pool on a fixed timer.
+	availabilityNotify chan struct{}
+	waitingRequests    int
+	stateSaveMu        sync.Mutex
+	stateSaveTimer     *time.Timer
+	statsSaveMu        sync.Mutex
+	statsSaveTimer     *time.Timer
+	dirtyStats         map[string]struct{}
+	configGeneration   uint64
 }
 
 type modelAvailabilityKey struct {
@@ -87,22 +92,23 @@ var (
 func GetPool() *AccountPool {
 	poolOnce.Do(func() {
 		pool = &AccountPool{
-			cooldowns:        make(map[string]time.Time),
-			cooldownKinds:    make(map[string]accountCooldownKind),
-			accountIndex:     make(map[string]int),
-			errorCounts:      make(map[string]int),
-			modelLists:       make(map[string]map[string]bool),
-			accountUpstream:  make(map[string]upstreamRuntimeState),
-			upstream:         make(map[upstreamStateKey]upstreamRuntimeState),
-			profiles:         make(map[profileStateKey]upstreamRuntimeState),
-			weightedCurrent:  make(map[string]int64),
-			affinity:         make(map[string]routeAffinityEntry),
-			modelNegative:    make(map[modelAvailabilityKey]time.Time),
-			lastSuccess:      make(map[string]time.Time),
-			healthStats:      make(map[string]accountHealthState),
-			refreshFailures:  make(map[string]time.Time),
-			dirtyStats:       make(map[string]struct{}),
-			configGeneration: config.GetGeneration(),
+			cooldowns:          make(map[string]time.Time),
+			cooldownKinds:      make(map[string]accountCooldownKind),
+			accountIndex:       make(map[string]int),
+			errorCounts:        make(map[string]int),
+			modelLists:         make(map[string]map[string]bool),
+			accountUpstream:    make(map[string]upstreamRuntimeState),
+			upstream:           make(map[upstreamStateKey]upstreamRuntimeState),
+			profiles:           make(map[profileStateKey]upstreamRuntimeState),
+			weightedCurrent:    make(map[string]int64),
+			affinity:           make(map[string]routeAffinityEntry),
+			modelNegative:      make(map[modelAvailabilityKey]time.Time),
+			lastSuccess:        make(map[string]time.Time),
+			healthStats:        make(map[string]accountHealthState),
+			refreshFailures:    make(map[string]time.Time),
+			availabilityNotify: make(chan struct{}),
+			dirtyStats:         make(map[string]struct{}),
+			configGeneration:   config.GetGeneration(),
 		}
 		pool.Reload()
 		pool.loadRuntimeState()
@@ -162,6 +168,7 @@ func (p *AccountPool) Reload() {
 			delete(p.weightedCurrent, id)
 		}
 	}
+	p.signalAvailabilityLocked()
 }
 
 // UpdateAccountRegion refreshes the pool's routing copy after the field has
@@ -242,6 +249,7 @@ func (p *AccountPool) SetModelList(accountID string, modelIDs []string) {
 		}
 	}
 	p.modelLists[accountID] = set
+	p.signalAvailabilityLocked()
 	p.mu.Unlock()
 	p.scheduleRuntimeStateSave()
 }
@@ -611,6 +619,7 @@ func (p *AccountPool) RecordSuccess(id string) {
 	p.clearTransientCooldownLocked(id, now)
 	p.errorCounts[id] = 0
 	p.lastSuccess[id] = now
+	p.signalAvailabilityLocked()
 	p.mu.Unlock()
 	p.scheduleRuntimeStateSave()
 }
@@ -651,6 +660,7 @@ func (p *AccountPool) RecordError(id string, isQuotaError bool) {
 	} else if p.errorCounts[id] >= 3 {
 		p.setCooldownLocked(id, time.Now().Add(time.Minute), accountCooldownTransient)
 	}
+	p.signalAvailabilityLocked()
 	p.mu.Unlock()
 	p.scheduleRuntimeStateSave()
 	if updated {
@@ -806,6 +816,7 @@ func (p *AccountPool) SetRefreshFailureCooldown(accountID string, until time.Tim
 		p.refreshFailures = make(map[string]time.Time)
 	}
 	p.refreshFailures[accountID] = until
+	p.signalAvailabilityLocked()
 	p.mu.Unlock()
 	p.scheduleRuntimeStateSave()
 }
@@ -813,6 +824,7 @@ func (p *AccountPool) SetRefreshFailureCooldown(accountID string, until time.Tim
 func (p *AccountPool) ClearRefreshFailureCooldown(accountID string) {
 	p.mu.Lock()
 	delete(p.refreshFailures, accountID)
+	p.signalAvailabilityLocked()
 	p.mu.Unlock()
 	p.scheduleRuntimeStateSave()
 }
@@ -831,6 +843,7 @@ func (p *AccountPool) ClearAccountCooldowns(ids map[string]bool) {
 		delete(p.errorCounts, id)
 		delete(p.refreshFailures, id)
 	}
+	p.signalAvailabilityLocked()
 	p.mu.Unlock()
 	p.scheduleRuntimeStateSave()
 }

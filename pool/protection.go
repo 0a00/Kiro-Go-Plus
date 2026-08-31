@@ -1,6 +1,8 @@
 package pool
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"kiro-go/config"
 	"math/rand"
@@ -39,6 +41,137 @@ type UpstreamBusyError struct {
 	Model       string
 	RetryAfter  time.Duration
 	Description string
+}
+
+// ErrAvailabilityQueueFull indicates that the bounded internal wait queue
+// cannot accept another request. Callers should expose this as a retryable
+// capacity response rather than as a missing-account error.
+var ErrAvailabilityQueueFull = errors.New("upstream availability queue is full")
+
+// WaitForAvailability is the compatibility boolean wrapper around
+// WaitForAvailabilityWithStatus. It returns false for queue-full and canceled
+// waits, and true for a normal wake-up or timer expiry.
+func (p *AccountPool) WaitForAvailability(ctx context.Context, delay time.Duration) bool {
+	ok, _ := p.WaitForAvailabilityWithStatus(ctx, delay)
+	return ok
+}
+
+// WaitForAvailabilityWithStatus blocks until an upstream slot may have become
+// available or the supplied delay/context expires. Releases and account-state
+// changes broadcast on a generation channel, so a burst of waiting requests
+// does not repeatedly scan the whole pool on a fixed timer.
+//
+// A nil error means the caller may perform another selection round. The queue
+// sentinel distinguishes bounded-capacity rejection from an empty pool; a
+// context error preserves client cancellation semantics.
+func (p *AccountPool) WaitForAvailabilityWithStatus(ctx context.Context, delay time.Duration) (bool, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if delay <= 0 {
+		delay = time.Millisecond
+	}
+	if p == nil {
+		return waitForAvailabilityDelay(ctx, delay)
+	}
+
+	up := config.GetUpstreamProtectionConfig()
+	p.mu.Lock()
+	p.ensureProtectionMapsLocked()
+	if err := ctx.Err(); err != nil {
+		p.mu.Unlock()
+		return false, err
+	}
+	if !up.Enabled {
+		p.mu.Unlock()
+		return waitForAvailabilityDelay(ctx, delay)
+	}
+	if up.QueueCapacity > 0 && p.waitingRequests >= up.QueueCapacity {
+		p.mu.Unlock()
+		return false, ErrAvailabilityQueueFull
+	}
+	p.waitingRequests++
+	notify := p.availabilityNotify
+	p.mu.Unlock()
+
+	defer func() {
+		p.mu.Lock()
+		if p.waitingRequests > 0 {
+			p.waitingRequests--
+		}
+		p.mu.Unlock()
+	}()
+
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-notify:
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		return true, nil
+	case <-timer.C:
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		return true, nil
+	case <-ctx.Done():
+		return false, ctx.Err()
+	}
+}
+
+func waitForAvailabilityDelay(ctx context.Context, delay time.Duration) (bool, error) {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		return true, nil
+	case <-ctx.Done():
+		return false, ctx.Err()
+	}
+}
+
+// AvailabilitySnapshot exposes only queue counters; account identities and
+// credentials remain outside this operational view.
+func (p *AccountPool) AvailabilitySnapshot() (waiting, capacity int) {
+	if p == nil {
+		return 0, 0
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.waitingRequests, config.GetUpstreamProtectionConfig().QueueCapacity
+}
+
+// NotifyAvailability wakes queued requests after an operator changes
+// protection settings without rebuilding the account pool.
+func (p *AccountPool) NotifyAvailability() {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	p.ensureProtectionMapsLocked()
+	p.signalAvailabilityLocked()
+	p.mu.Unlock()
+}
+
+func (p *AccountPool) signalAvailabilityLocked() {
+	if p == nil {
+		return
+	}
+	// Avoid allocating and closing a channel for every successful request when
+	// nobody is waiting. A future waiter subscribes to the current generation.
+	if p.waitingRequests == 0 {
+		return
+	}
+	if p.availabilityNotify == nil {
+		p.availabilityNotify = make(chan struct{})
+		return
+	}
+	close(p.availabilityNotify)
+	p.availabilityNotify = make(chan struct{})
 }
 
 func (e *UpstreamBusyError) Error() string {
@@ -174,6 +307,7 @@ func (p *AccountPool) RecordUpstreamRateLimitedWithRetryAfter(accountID, profile
 			delete(p.affinity, key)
 		}
 	}
+	p.signalAvailabilityLocked()
 	p.mu.Unlock()
 	p.scheduleRuntimeStateSave()
 	return cooldown
@@ -212,6 +346,7 @@ func (p *AccountPool) RecordUpstreamSuccess(accountID, profileArn, model string)
 			}
 		}
 	}
+	p.signalAvailabilityLocked()
 	p.mu.Unlock()
 	p.scheduleRuntimeStateSave()
 }
@@ -291,7 +426,14 @@ func (p *AccountPool) ProtectionSnapshot() map[string]interface{} {
 	}
 
 	return map[string]interface{}{
-		"config":             up,
+		"config": up,
+		"queue": map[string]interface{}{
+			"waiting":          p.waitingRequests,
+			"capacity":         up.QueueCapacity,
+			"mode":             up.ConcurrencyMode,
+			"softAccountLimit": up.SoftMaxPerAccountConcurrency,
+			"softModelLimit":   up.SoftMaxPerAccountModelConcurrency,
+		},
 		"accountStates":      accounts,
 		"accountModelStates": upstream,
 		"profileModelStates": profiles,
@@ -300,6 +442,9 @@ func (p *AccountPool) ProtectionSnapshot() map[string]interface{} {
 }
 
 func (p *AccountPool) ensureProtectionMapsLocked() {
+	if p.availabilityNotify == nil {
+		p.availabilityNotify = make(chan struct{})
+	}
 	if p.cooldowns == nil {
 		p.cooldowns = make(map[string]time.Time)
 	}
@@ -443,6 +588,7 @@ func (p *AccountPool) releaseUpstreamSlot(accountID, profileArn, model string) {
 			p.profiles[pkey] = pstate
 		}
 	}
+	p.signalAvailabilityLocked()
 }
 
 func (p *AccountPool) rememberRouteAffinityLocked(routeKey, accountID string, now time.Time, up config.UpstreamProtectionConfig) {
@@ -478,24 +624,36 @@ func (p *AccountPool) pruneRouteAffinityLocked(now time.Time, up config.Upstream
 }
 
 func accountConcurrencyLimit(up config.UpstreamProtectionConfig, account *config.Account) int {
+	hard := 0
 	if account != nil && account.MaxConcurrency > 0 {
-		return account.MaxConcurrency
+		hard = account.MaxConcurrency
+	} else if up.MaxPerAccountConcurrency > 0 {
+		hard = up.MaxPerAccountConcurrency
+	} else {
+		hard = 10
 	}
-	if up.MaxPerAccountConcurrency > 0 {
-		return up.MaxPerAccountConcurrency
+	if !strings.EqualFold(strings.TrimSpace(up.ConcurrencyMode), "hard") &&
+		up.SoftMaxPerAccountConcurrency > 0 && up.SoftMaxPerAccountConcurrency < hard {
+		return up.SoftMaxPerAccountConcurrency
 	}
-	return 10
+	return hard
 }
 
 func accountModelLimit(up config.UpstreamProtectionConfig, model string) int {
 	model = normalizeProtectionModel(model)
+	hard := 0
 	if limit, ok := up.PerModelConcurrency[model]; ok && limit > 0 {
-		return limit
+		hard = limit
+	} else if up.MaxPerAccountModelConcurrency > 0 {
+		hard = up.MaxPerAccountModelConcurrency
+	} else {
+		hard = 5
 	}
-	if up.MaxPerAccountModelConcurrency > 0 {
-		return up.MaxPerAccountModelConcurrency
+	if !strings.EqualFold(strings.TrimSpace(up.ConcurrencyMode), "hard") &&
+		up.SoftMaxPerAccountModelConcurrency > 0 && up.SoftMaxPerAccountModelConcurrency < hard {
+		return up.SoftMaxPerAccountModelConcurrency
 	}
-	return 5
+	return hard
 }
 
 func profileLimit(up config.UpstreamProtectionConfig, profileArn, model string) int {

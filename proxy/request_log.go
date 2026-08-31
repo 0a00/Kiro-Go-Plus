@@ -7,6 +7,7 @@ import (
 	"io"
 	"kiro-go/config"
 	"kiro-go/logger"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -37,6 +38,8 @@ type requestLogEntry struct {
 	Endpoint                 string   `json:"endpoint,omitempty"`
 	AccountSelectionMs       int64    `json:"accountSelectionMs,omitempty"`
 	AccountAttempts          int      `json:"accountAttempts,omitempty"`
+	AccountQueueWaitMs       int64    `json:"accountQueueWaitMs,omitempty"`
+	AccountQueueWaitCount    int      `json:"accountQueueWaitCount,omitempty"`
 	RouteAffinityHit         bool     `json:"routeAffinityHit,omitempty"`
 	Status                   string   `json:"status"`
 	StatusCode               int      `json:"statusCode"`
@@ -47,6 +50,11 @@ type requestLogEntry struct {
 	FirstToolOutputMs        *int64   `json:"firstToolOutputMs,omitempty"`
 	FirstContentMs           *int64   `json:"firstContentMs,omitempty"`
 	MaxStreamGapMs           *int64   `json:"maxStreamGapMs,omitempty"`
+	FirstMeaningfulEventMs   *int64   `json:"firstMeaningfulEventMs,omitempty"`
+	LastMeaningfulEventMs    *int64   `json:"lastMeaningfulEventMs,omitempty"`
+	MaxMeaningfulGapMs       *int64   `json:"maxMeaningfulGapMs,omitempty"`
+	FirstToolFragmentMs      *int64   `json:"firstToolFragmentMs,omitempty"`
+	LastToolFragmentMs       *int64   `json:"lastToolFragmentMs,omitempty"`
 	HeartbeatCount           int      `json:"heartbeatCount,omitempty"`
 	ToolAssemblyMs           *int64   `json:"toolAssemblyMs,omitempty"`
 	DurationMs               int64    `json:"durationMs"`
@@ -80,6 +88,8 @@ type requestLogEntry struct {
 	ToolFragmentCount        int      `json:"toolFragmentCount,omitempty"`
 	ToolTruncationCount      int      `json:"toolTruncationCount,omitempty"`
 	ToolRecoveryAttempts     int      `json:"toolRecoveryAttempts,omitempty"`
+	ToolResultRepairs        int      `json:"toolResultRepairs,omitempty"`
+	ToolSchemaRepairs        int      `json:"toolSchemaRepairs,omitempty"`
 	StopReason               string   `json:"stopReason,omitempty"`
 	Credits                  float64  `json:"credits,omitempty"`
 	Error                    string   `json:"error,omitempty"`
@@ -371,6 +381,25 @@ func (h *Handler) recordCanceledRequestForPayload(payload *KiroPayload, protocol
 	})
 }
 
+func (h *Handler) recordNoAvailableAccounts(payload *KiroPayload, protocol, model string, startedAt time.Time, firstContentMs *int64) {
+	if h == nil {
+		return
+	}
+	err := fmt.Errorf("no available accounts")
+	h.recordFailure()
+	h.recordDiagnosticFailureForPayload(protocol, model, nil, http.StatusServiceUnavailable, err, payload)
+	h.recordRequestLogForPayload(payload, requestLogEntry{
+		Timestamp:      time.Now().Unix(),
+		Protocol:       protocol,
+		Model:          model,
+		Status:         "failed",
+		StatusCode:     http.StatusServiceUnavailable,
+		FirstContentMs: firstContentMs,
+		DurationMs:     requestDurationMs(startedAt),
+		Error:          err.Error(),
+	})
+}
+
 func (h *Handler) recordRequestLogForPayload(payload *KiroPayload, entry requestLogEntry) {
 	if payload != nil {
 		entry.RequestID = requestIDFromContext(payload.requestContext)
@@ -406,7 +435,10 @@ func (h *Handler) recordRequestLogForPayload(payload *KiroPayload, entry request
 		entry.ToolFragmentCount = toolFragmentCount
 		entry.ToolTruncationCount = toolTruncationCount
 		entry.ToolRecoveryAttempts = toolRecoveryAttempts
+		entry.ToolResultRepairs = payload.toolResultRepairCount()
+		entry.ToolSchemaRepairs = payload.toolSchemaRepairCount()
 		entry.AccountSelectionMs, entry.AccountAttempts, entry.RouteAffinityHit = payload.accountSelectionMetrics()
+		entry.AccountQueueWaitMs, entry.AccountQueueWaitCount = payload.accountQueueMetrics()
 		payload.requestTimingTracker().Apply(&entry)
 		payload.applyPromptCacheDiagnostic(&entry)
 		entry.DetailAvailable = h.recordRequestDetailForContext(payload.requestContext, entry)
@@ -429,15 +461,21 @@ func requestDurationMs(start time.Time) int64 {
 }
 
 type requestFirstContentTimer struct {
-	startedAt          time.Time
-	firstContentMs     atomic.Int64
-	firstSSEEventMs    atomic.Int64
-	firstThinkingMs    atomic.Int64
-	firstVisibleTextMs atomic.Int64
-	firstToolOutputMs  atomic.Int64
-	lastSSEEventNanos  atomic.Int64
-	maxStreamGapMs     atomic.Int64
-	heartbeatCount     atomic.Int64
+	startedAt              time.Time
+	firstContentMs         atomic.Int64
+	firstSSEEventMs        atomic.Int64
+	firstThinkingMs        atomic.Int64
+	firstVisibleTextMs     atomic.Int64
+	firstToolOutputMs      atomic.Int64
+	lastSSEEventNanos      atomic.Int64
+	maxStreamGapMs         atomic.Int64
+	firstMeaningfulEventMs atomic.Int64
+	lastMeaningfulEventMs  atomic.Int64
+	lastMeaningfulNanos    atomic.Int64
+	maxMeaningfulGapMs     atomic.Int64
+	firstToolFragmentMs    atomic.Int64
+	lastToolFragmentMs     atomic.Int64
+	heartbeatCount         atomic.Int64
 }
 
 func newRequestFirstContentTimer(startedAt time.Time) *requestFirstContentTimer {
@@ -449,6 +487,12 @@ func newRequestFirstContentTimer(startedAt time.Time) *requestFirstContentTimer 
 	timer.firstToolOutputMs.Store(-1)
 	timer.lastSSEEventNanos.Store(-1)
 	timer.maxStreamGapMs.Store(-1)
+	timer.firstMeaningfulEventMs.Store(-1)
+	timer.lastMeaningfulEventMs.Store(-1)
+	timer.lastMeaningfulNanos.Store(-1)
+	timer.maxMeaningfulGapMs.Store(-1)
+	timer.firstToolFragmentMs.Store(-1)
+	timer.lastToolFragmentMs.Store(-1)
 	return timer
 }
 
@@ -490,6 +534,53 @@ func (t *requestFirstContentTimer) MarkToolOutput() {
 	}
 	t.markFirst(&t.firstToolOutputMs)
 	t.markFirst(&t.firstContentMs)
+}
+
+// MarkMeaningfulEvent records semantic upstream activity. Transport heartbeats
+// and metadata-only progress are intentionally excluded, so a long tool wait
+// remains visible instead of being reduced to the heartbeat interval.
+func (t *requestFirstContentTimer) MarkMeaningfulEvent() {
+	if t == nil {
+		return
+	}
+	now := time.Now()
+	elapsed := now.Sub(t.startedAt).Milliseconds()
+	if elapsed < 0 {
+		elapsed = 0
+	}
+	t.firstMeaningfulEventMs.CompareAndSwap(-1, elapsed)
+	t.lastMeaningfulEventMs.Store(elapsed)
+	nanos := now.UnixNano()
+	previous := t.lastMeaningfulNanos.Swap(nanos)
+	if previous < 0 {
+		return
+	}
+	gap := (nanos - previous) / int64(time.Millisecond)
+	if gap < 0 {
+		gap = 0
+	}
+	for {
+		current := t.maxMeaningfulGapMs.Load()
+		if gap <= current || t.maxMeaningfulGapMs.CompareAndSwap(current, gap) {
+			return
+		}
+	}
+}
+
+// MarkToolFragment records the first and last semantic fragment of a tool call.
+// Completion/assembly duration is tracked separately by KiroPayload.
+func (t *requestFirstContentTimer) MarkToolFragment() {
+	if t == nil {
+		return
+	}
+	t.MarkMeaningfulEvent()
+	now := time.Now()
+	elapsed := now.Sub(t.startedAt).Milliseconds()
+	if elapsed < 0 {
+		elapsed = 0
+	}
+	t.firstToolFragmentMs.CompareAndSwap(-1, elapsed)
+	t.lastToolFragmentMs.Store(elapsed)
 }
 
 func (t *requestFirstContentTimer) MarkSSEEvent(heartbeat bool) {
@@ -553,6 +644,11 @@ func (t *requestFirstContentTimer) Apply(entry *requestLogEntry) {
 	setRequestTimingValue(&entry.FirstVisibleTextMs, t.firstVisibleTextMs.Load())
 	setRequestTimingValue(&entry.FirstToolOutputMs, t.firstToolOutputMs.Load())
 	setRequestTimingValue(&entry.MaxStreamGapMs, t.maxStreamGapMs.Load())
+	setRequestTimingValue(&entry.FirstMeaningfulEventMs, t.firstMeaningfulEventMs.Load())
+	setRequestTimingValue(&entry.LastMeaningfulEventMs, t.lastMeaningfulEventMs.Load())
+	setRequestTimingValue(&entry.MaxMeaningfulGapMs, t.maxMeaningfulGapMs.Load())
+	setRequestTimingValue(&entry.FirstToolFragmentMs, t.firstToolFragmentMs.Load())
+	setRequestTimingValue(&entry.LastToolFragmentMs, t.lastToolFragmentMs.Load())
 	if entry.HeartbeatCount == 0 {
 		entry.HeartbeatCount = int(t.heartbeatCount.Load())
 	}

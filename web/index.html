@@ -790,6 +790,27 @@
             <input type="number" id="upstreamMaxPerAccountModelConcurrency" min="1" step="1" />
           </div>
           <div class="form-group">
+            <label data-i18n="settings.upstreamConcurrencyMode"></label>
+            <select id="upstreamConcurrencyMode">
+              <option value="adaptive" data-i18n="settings.upstreamConcurrencyAdaptive"></option>
+              <option value="hard" data-i18n="settings.upstreamConcurrencyHard"></option>
+            </select>
+            <small data-i18n="settings.upstreamConcurrencyModeHint"></small>
+          </div>
+          <div class="form-group">
+            <label data-i18n="settings.upstreamSoftLimits"></label>
+            <div class="input-row">
+              <input type="number" id="upstreamSoftMaxPerAccountConcurrency" min="1" max="1000" step="1" />
+              <input type="number" id="upstreamSoftMaxPerAccountModelConcurrency" min="1" max="1000" step="1" />
+            </div>
+            <small data-i18n="settings.upstreamSoftLimitsHint"></small>
+          </div>
+          <div class="form-group">
+            <label data-i18n="settings.upstreamQueueCapacity"></label>
+            <input type="number" id="upstreamQueueCapacity" min="1" max="100000" step="1" />
+            <small data-i18n="settings.upstreamQueueCapacityHint"></small>
+          </div>
+          <div class="form-group">
             <label data-i18n="settings.upstreamCooldown"></label>
             <div class="input-row">
               <input type="number" id="upstreamRateLimitCooldownMs" min="100" step="100" />
