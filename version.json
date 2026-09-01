@@ -1,5 +1,5 @@
 {
-  "version": "1.2.61",
-  "changelog": "Add one-per-line Kiro API Key batch import with bounded region discovery, partial results, and credential-safe deduplication.\n增加 Kiro API Key 一行一个批量导入、有限并发地区探测、部分成功结果和凭据安全去重。",
+  "version": "1.2.62",
+  "changelog": "Enforce explicit plain-text output budgets, preserve structured tool arguments, and reduce false-positive production warnings.\n增加纯文本显式输出预算兜底、保留结构化工具参数，并减少生产测试误报。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }

@@ -236,6 +236,8 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 	kiroPayload := OpenAIToKiro(openaiReq, thinking)
 	kiroPayload.requestContext = r.Context()
 	kiroPayload.contextWindowTokens = contextWindowTokens
+	kiroPayload.clientOutputTokenLimit = openaiReq.MaxTokens
+	kiroPayload.enforceClientOutputLimit = openaiReq.MaxTokens > 0 && len(openaiReq.Tools) == 0
 	truncatePayloadToLimit(kiroPayload, kiroPayload.hasSystemPriming)
 	if finalInputTokens := estimateKiroPayloadTokens(kiroPayload); finalInputTokens > 0 {
 		estimatedInputTokens = finalInputTokens

@@ -312,6 +312,8 @@ type KiroPayload struct {
 	deferTextUntilComplete    bool
 	streamThinkingPrecommit   bool
 	streamToolUseDeltas       bool
+	clientOutputTokenLimit    int
+	enforceClientOutputLimit  bool
 	toolUsePolicy             string
 	tokenRefreshMu            sync.Mutex
 	tokenRefreshAttempts      map[string]int
@@ -719,11 +721,12 @@ type KiroStreamCallback struct {
 	OnStopReason      func(reason string)
 	// Internal observability hooks. They are invoked for semantic upstream
 	// events and tool fragments before any response buffering/translation.
-	onMeaningfulEvent func()
-	onToolFragment    func()
-	detailTrace       *requestDetailTrace
-	detailToolNameMap map[string]string
-	streamDiagnostics *eventStreamDiagnostics
+	onMeaningfulEvent  func()
+	onToolFragment     func()
+	outputLimitReached func() bool
+	detailTrace        *requestDetailTrace
+	detailToolNameMap  map[string]string
+	streamDiagnostics  *eventStreamDiagnostics
 }
 
 // KiroTokenUsage preserves upstream cache accounting when the event stream
@@ -940,6 +943,7 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 		}
 		callback = &wrapped
 	}
+	callback = applyClientOutputTokenLimit(payload, callback)
 
 	// Build endpoint list before profile lookup. Legacy/custom endpoints that do
 	// not require a profile must not pay for a potentially slow profile probe.
@@ -1623,6 +1627,13 @@ func parseEventStreamWithOptions(body io.Reader, callback *KiroStreamCallback, o
 				callback.OnText(decoded.reasoning, true)
 			}
 		}
+		if callback.outputLimitReached != nil && callback.outputLimitReached() {
+			sawExplicitCompletion = true
+			if callback.OnStopReason != nil {
+				callback.OnStopReason("max_tokens")
+			}
+			break
+		}
 		for _, toolPayload := range decoded.toolPayloads {
 			sawOutput = true
 			if err = handleToolUseEvent(toolPayload, pendingToolUses, callback); err != nil {
@@ -1706,6 +1717,58 @@ func parseEventStreamWithOptions(body io.Reader, callback *KiroStreamCallback, o
 		callback.OnComplete(tokenUsage.InputTokens, tokenUsage.OutputTokens)
 	}
 	return nil
+}
+
+type clientOutputTokenLimiter struct {
+	remaining int
+	reached   bool
+}
+
+func (l *clientOutputTokenLimiter) take(text string) string {
+	if l == nil || l.reached || text == "" {
+		return ""
+	}
+	tokens := estimateWireTokens(text)
+	if tokens <= l.remaining {
+		l.remaining -= tokens
+		if l.remaining <= 0 {
+			l.reached = true
+		}
+		return text
+	}
+	clipped := fitTextToTokenBudget(text, l.remaining)
+	l.remaining = 0
+	l.reached = true
+	return clipped
+}
+
+// applyClientOutputTokenLimit enforces the effective client/default output
+// budget for plain-text requests when an upstream endpoint ignores maxTokens.
+// Tool requests deliberately bypass this guard so partial JSON arguments are
+// never sent to a client.
+func applyClientOutputTokenLimit(payload *KiroPayload, callback *KiroStreamCallback) *KiroStreamCallback {
+	if payload == nil || callback == nil || !payload.enforceClientOutputLimit || payload.clientOutputTokenLimit <= 0 || callback.OnText == nil {
+		return callback
+	}
+	limiter := &clientOutputTokenLimiter{remaining: payload.clientOutputTokenLimit}
+	wrapped := *callback
+	onText := callback.OnText
+	wrapped.OnText = func(text string, isThinking bool) {
+		if clipped := limiter.take(text); clipped != "" {
+			onText(clipped, isThinking)
+		}
+	}
+	onStopReason := callback.OnStopReason
+	wrapped.OnStopReason = func(reason string) {
+		if limiter.reached {
+			reason = "max_tokens"
+		}
+		if onStopReason != nil {
+			onStopReason(reason)
+		}
+	}
+	wrapped.outputLimitReached = func() bool { return limiter.reached }
+	return &wrapped
 }
 
 // parseAndCloseEventStream guarantees that the upstream body and idle timer are

@@ -2213,6 +2213,8 @@ func (h *Handler) handleClaudeMessages(w http.ResponseWriter, r *http.Request) {
 	kiroPayload := ClaudeToKiro(&req, thinking)
 	kiroPayload.requestContext = r.Context()
 	kiroPayload.contextWindowTokens = contextWindowTokens
+	kiroPayload.clientOutputTokenLimit = req.MaxTokens
+	kiroPayload.enforceClientOutputLimit = req.MaxTokens > 0 && len(req.Tools) == 0
 	truncatePayloadToLimit(kiroPayload, kiroPayload.hasSystemPriming)
 	if finalInputTokens := estimateKiroPayloadTokens(kiroPayload); finalInputTokens > 0 {
 		estimatedInputTokens = finalInputTokens
@@ -3468,6 +3470,8 @@ func (h *Handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 	kiroPayload := OpenAIToKiro(&req, thinking)
 	kiroPayload.requestContext = r.Context()
 	kiroPayload.contextWindowTokens = contextWindowTokens
+	kiroPayload.clientOutputTokenLimit = req.MaxTokens
+	kiroPayload.enforceClientOutputLimit = req.MaxTokens > 0 && len(req.Tools) == 0
 	truncatePayloadToLimit(kiroPayload, kiroPayload.hasSystemPriming)
 	if finalInputTokens := estimateKiroPayloadTokens(kiroPayload); finalInputTokens > 0 {
 		estimatedInputTokens = finalInputTokens

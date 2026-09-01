@@ -178,6 +178,7 @@ func wrapMeaningfulStreamCallback(target *KiroStreamCallback, onActivity func(),
 				target.OnProgress()
 			}
 		},
+		outputLimitReached: target.outputLimitReached,
 	}
 	return wrapper, gate
 }

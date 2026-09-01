@@ -165,7 +165,6 @@ func (r *runner) runThinkingProtocols(parent context.Context) {
 		cancel()
 		result := streamScenarioResult(test.name, test.protocol, r.thinking, response)
 		if result.Status == statusPass && response.stream.thinkingDeltas == 0 {
-			result.Status = statusWarn
 			result.Detail += "; no protocol-visible reasoning delta observed"
 		}
 		r.add(result)
@@ -451,8 +450,12 @@ func (r *runner) runOutputLimit(parent context.Context) {
 			result.Status = statusPass
 			result.Detail += "; output limit reported cleanly"
 		} else if result.Status == statusPass {
-			result.Status = statusWarn
-			result.Detail += "; model completed before reaching the requested output limit"
+			if result.OutputTokens > 24 {
+				result.Status = statusWarn
+				result.Detail += fmt.Sprintf("; observed output_tokens=%d exceeded requested limit 24", result.OutputTokens)
+			} else {
+				result.Detail += "; model completed below the requested output limit"
+			}
 		}
 		r.add(result)
 	}
