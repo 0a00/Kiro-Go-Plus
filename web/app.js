@@ -2972,7 +2972,7 @@
     $('logArchiveEnabled').checked = cfg.enabled === true;
     $('logArchiveIncludeDetails').checked = cfg.includeDetails === true;
     $('logArchiveRetentionDays').value = Number.isFinite(Number(cfg.retentionDays)) ? cfg.retentionDays : 90;
-    $('logArchiveMaxMiB').value = Math.round((Number(cfg.maxBytes) || 1073741824) / 1048576);
+    $('logArchiveMaxMiB').value = Math.round((Number(cfg.maxBytes) || 4294967296) / 1048576);
     renderLogArchiveStatus(d);
   }
 

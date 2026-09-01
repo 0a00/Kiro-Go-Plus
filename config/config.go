@@ -367,9 +367,12 @@ const (
 	DefaultLogArchiveRetentionDays = 90
 	MinLogArchiveRetentionDays     = 0
 	MaxLogArchiveRetentionDays     = 3650
-	DefaultLogArchiveMaxBytes      = int64(1 << 30)
-	MinLogArchiveMaxBytes          = int64(64 << 20)
-	MaxLogArchiveMaxBytes          = int64(10 << 30)
+	// Keep full-detail production diagnostics from reaching the capacity limit
+	// after only a short investigation window. The archive remains bounded by
+	// MaxLogArchiveMaxBytes and retention cleanup.
+	DefaultLogArchiveMaxBytes = int64(4 << 30)
+	MinLogArchiveMaxBytes     = int64(64 << 20)
+	MaxLogArchiveMaxBytes     = int64(10 << 30)
 )
 
 // WebSearchConfig controls the Anthropic web_search compatibility shim.
