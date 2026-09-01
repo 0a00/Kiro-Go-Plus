@@ -1385,13 +1385,22 @@ endpointLoop:
 				continue endpointLoop
 			}
 			if !meaningfulGate.hasActionableOutput() {
-				retry := payload != nil && payload.attemptBudget.recordEmpty()
+				retry, emptyBudgetExhausted := false, false
+				if payload != nil {
+					retry, emptyBudgetExhausted = payload.attemptBudget.recordEmpty()
+				}
 				// A telemetry-only 200 is endpoint-local until proven otherwise. Once
 				// same-endpoint empty retries are exhausted, try the remaining endpoint
 				// variants for this account before spending another account attempt.
 				lastErr = newEmptyResponseErrorWithDiagnostics(ep.Name, true, attemptDiagnostics)
 				if payload != nil {
 					payload.attemptBudget.recordFailure(ep.Name, lastErr)
+				}
+				if emptyBudgetExhausted {
+					lastErr = newEmptyResponseLimitError(payload.attemptBudget, lastErr)
+					payload.attemptBudget.recordFailure(ep.Name, lastErr)
+					detailTrace.recordAttempt(accountID, accountEmail, ep.Name, endpointHost, attemptStartedAt, http.StatusOK, "empty_response_budget_exhausted", lastErr, requestDetailRetryReason(lastErr))
+					return lastErr
 				}
 				retrySameEndpoint := retry && endpointAttempt < preOutputStreamRetries
 				attemptStatus := "empty_response"

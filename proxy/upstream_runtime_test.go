@@ -205,6 +205,38 @@ func TestRetryBudgetErrorDoesNotDuplicateEndpointPrefix(t *testing.T) {
 	}
 }
 
+func TestUpstreamAttemptBudgetBoundsRepeatedEmptyResponses(t *testing.T) {
+	budget := &upstreamAttemptBudget{maxEmpty: 2, maxEmptyTotal: 3}
+
+	if retry, exhausted := budget.recordEmpty(); !retry || exhausted {
+		t.Fatalf("first empty response = retry=%v exhausted=%v", retry, exhausted)
+	}
+	if retry, exhausted := budget.recordEmpty(); !retry || exhausted {
+		t.Fatalf("second empty response = retry=%v exhausted=%v", retry, exhausted)
+	}
+	if retry, exhausted := budget.recordEmpty(); retry || !exhausted {
+		t.Fatalf("third empty response = retry=%v exhausted=%v", retry, exhausted)
+	}
+	if got := budget.snapshot().EmptyResponses; got != 3 {
+		t.Fatalf("empty response count = %d, want 3", got)
+	}
+}
+
+func TestEmptyResponseLimitErrorIsRetryBudgetFailure(t *testing.T) {
+	budget := &upstreamAttemptBudget{emptyResponses: 6}
+	err := newEmptyResponseLimitError(budget, newEmptyResponseError("Kiro Runtime", true))
+	upstreamErr, ok := asUpstreamError(err)
+	if !ok || upstreamErr.Kind != UpstreamErrorRetryBudget {
+		t.Fatalf("unexpected error: %#v", err)
+	}
+	if shouldRetryAcrossAccounts(err) || shouldRetryAcrossEndpoints(err) {
+		t.Fatalf("empty response limit should stop failover: %#v", upstreamErr)
+	}
+	if !strings.Contains(err.Error(), "after 6 empty responses") {
+		t.Fatalf("missing empty response count: %v", err)
+	}
+}
+
 func TestStripEndpointPrefixTerminatesForNestedPrefix(t *testing.T) {
 	message := "HTTP 200: from AmazonQ: from AmazonQ: empty response"
 	got := stripEndpointPrefix(message, "AmazonQ")

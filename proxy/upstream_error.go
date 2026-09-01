@@ -417,6 +417,21 @@ func newEmptyResponseErrorWithDiagnostics(endpoint string, retryEndpoints bool, 
 	}
 }
 
+func newEmptyResponseLimitError(budget *upstreamAttemptBudget, last error) *UpstreamError {
+	message := "upstream returned repeated responses without actionable text or a complete tool call"
+	if budget != nil {
+		snapshot := budget.snapshot()
+		message = fmt.Sprintf("%s after %d empty responses", message, snapshot.EmptyResponses)
+	}
+	if last != nil {
+		message += "; last failure: " + last.Error()
+	}
+	return &UpstreamError{
+		Kind:    UpstreamErrorRetryBudget,
+		Message: message,
+	}
+}
+
 func newStreamTruncatedError(endpoint string, cause error) *UpstreamError {
 	return &UpstreamError{
 		Kind:                 UpstreamErrorStreamTruncated,
@@ -586,6 +601,7 @@ type upstreamAttemptBudget struct {
 	emptyResponses int
 	maxAttempts    int
 	maxEmpty       int
+	maxEmptyTotal  int
 	startedAt      time.Time
 	maxDuration    time.Duration
 	lastEndpoint   string
@@ -594,23 +610,25 @@ type upstreamAttemptBudget struct {
 }
 
 type upstreamAttemptBudgetSnapshot struct {
-	Attempts     int
-	MaxAttempts  int
-	Elapsed      time.Duration
-	MaxDuration  time.Duration
-	LastEndpoint string
-	LastError    string
+	Attempts       int
+	EmptyResponses int
+	MaxAttempts    int
+	Elapsed        time.Duration
+	MaxDuration    time.Duration
+	LastEndpoint   string
+	LastError      string
 }
 
 func newUpstreamAttemptBudget() *upstreamAttemptBudget {
 	retry := config.GetRetryConfig()
 	now := time.Now
 	return &upstreamAttemptBudget{
-		maxAttempts: retry.MaxUpstreamAttempts,
-		maxEmpty:    retry.EmptyResponseRetries,
-		startedAt:   now(),
-		maxDuration: time.Duration(retry.MaxRetryDurationSeconds) * time.Second,
-		now:         now,
+		maxAttempts:   retry.MaxUpstreamAttempts,
+		maxEmpty:      retry.EmptyResponseRetries,
+		maxEmptyTotal: 6,
+		startedAt:     now(),
+		maxDuration:   time.Duration(retry.MaxRetryDurationSeconds) * time.Second,
+		now:           now,
 	}
 }
 
@@ -680,12 +698,13 @@ func (b *upstreamAttemptBudget) snapshot() upstreamAttemptBudgetSnapshot {
 		elapsed = 0
 	}
 	return upstreamAttemptBudgetSnapshot{
-		Attempts:     b.attempts,
-		MaxAttempts:  b.maxAttempts,
-		Elapsed:      elapsed,
-		MaxDuration:  b.maxDuration,
-		LastEndpoint: b.lastEndpoint,
-		LastError:    b.lastError,
+		Attempts:       b.attempts,
+		EmptyResponses: b.emptyResponses,
+		MaxAttempts:    b.maxAttempts,
+		Elapsed:        elapsed,
+		MaxDuration:    b.maxDuration,
+		LastEndpoint:   b.lastEndpoint,
+		LastError:      b.lastError,
 	}
 }
 
@@ -696,15 +715,21 @@ func (b *upstreamAttemptBudget) currentTimeLocked() time.Time {
 	return time.Now()
 }
 
-func (b *upstreamAttemptBudget) recordEmpty() bool {
+func (b *upstreamAttemptBudget) recordEmpty() (retry bool, exhausted bool) {
 	if b == nil {
-		return false
+		return false, false
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.emptyResponses >= b.maxEmpty {
-		return false
+	if b.maxEmptyTotal > 0 && b.emptyResponses >= b.maxEmptyTotal {
+		return false, true
 	}
 	b.emptyResponses++
-	return true
+	if b.maxEmptyTotal > 0 && b.emptyResponses >= b.maxEmptyTotal {
+		return false, true
+	}
+	if b.maxEmpty <= 0 || b.emptyResponses > b.maxEmpty {
+		return false, false
+	}
+	return true, false
 }
