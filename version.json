@@ -1,5 +1,5 @@
 {
-  "version": "1.2.62",
-  "changelog": "Enforce explicit plain-text output budgets, preserve structured tool arguments, and reduce false-positive production warnings.\n增加纯文本显式输出预算兜底、保留结构化工具参数，并减少生产测试误报。",
+  "version": "1.2.63",
+  "changelog": "Switch endpoints after telemetry-only 200 responses, enforce explicit plain-text output budgets, and reduce false-positive production warnings.\n200 telemetry-only 响应耗尽同端点重试后切换其他端点，增加纯文本显式输出预算兜底，并减少生产测试误报。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }

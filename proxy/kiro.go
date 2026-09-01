@@ -1386,7 +1386,10 @@ endpointLoop:
 			}
 			if !meaningfulGate.hasActionableOutput() {
 				retry := payload != nil && payload.attemptBudget.recordEmpty()
-				lastErr = newEmptyResponseErrorWithDiagnostics(ep.Name, retry, attemptDiagnostics)
+				// A telemetry-only 200 is endpoint-local until proven otherwise. Once
+				// same-endpoint empty retries are exhausted, try the remaining endpoint
+				// variants for this account before spending another account attempt.
+				lastErr = newEmptyResponseErrorWithDiagnostics(ep.Name, true, attemptDiagnostics)
 				if payload != nil {
 					payload.attemptBudget.recordFailure(ep.Name, lastErr)
 				}
@@ -1407,6 +1410,9 @@ endpointLoop:
 					continue
 				}
 				if retry {
+					continue endpointLoop
+				}
+				if shouldRetryAcrossEndpoints(lastErr) {
 					continue endpointLoop
 				}
 				return lastErr

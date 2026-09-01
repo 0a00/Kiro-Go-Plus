@@ -320,6 +320,53 @@ func TestCallKiroAPIRetriesEmptyStreamOnSameEndpoint(t *testing.T) {
 	}
 }
 
+func TestCallKiroAPISwitchesEndpointAfterTelemetryOnlyResponse(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	retry := config.GetRetryConfig()
+	retry.EmptyResponseRetries = 0
+	retry.PreOutputStreamRetries = func() *int { value := 0; return &value }()
+	if err := config.UpdateRetryConfig(retry); err != nil {
+		t.Fatalf("update retry config: %v", err)
+	}
+	_ = config.UpdatePreferredEndpoint("telemetry-only")
+	_ = config.UpdateEndpointFallback(true)
+
+	var firstRequests, secondRequests atomic.Int32
+	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		firstRequests.Add(1)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(awsEventStreamFrame(t, "meteringEvent", map[string]interface{}{"usage": 1.0}))
+	}))
+	defer first.Close()
+	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		secondRequests.Add(1)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "endpoint-fallback"}))
+		_, _ = w.Write(awsEventStreamFrame(t, "meteringEvent", map[string]interface{}{"usage": 1.0}))
+	}))
+	defer second.Close()
+
+	oldEndpoints := kiroEndpoints
+	kiroEndpoints = []kiroEndpoint{
+		{Key: "telemetry-only", URL: first.URL, Name: "Telemetry Only"},
+		{Key: "fallback", URL: second.URL, Name: "Fallback"},
+	}
+	t.Cleanup(func() { kiroEndpoints = oldEndpoints })
+
+	var output strings.Builder
+	err := CallKiroAPI(&config.Account{ID: "telemetry-fallback", AccessToken: "token"}, &KiroPayload{}, &KiroStreamCallback{
+		OnText: func(text string, _ bool) { output.WriteString(text) },
+	})
+	if err != nil || output.String() != "endpoint-fallback" {
+		t.Fatalf("endpoint fallback failed: err=%v output=%q", err, output.String())
+	}
+	if firstRequests.Load() != 1 || secondRequests.Load() != 1 {
+		t.Fatalf("unexpected endpoint requests: telemetry=%d fallback=%d", firstRequests.Load(), secondRequests.Load())
+	}
+}
+
 func TestCallKiroAPIDoesNotRetryAfterVisibleOutput(t *testing.T) {
 	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatalf("init config: %v", err)
