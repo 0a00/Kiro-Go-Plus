@@ -79,7 +79,23 @@ func (h *Handler) newAccountAttemptController(requestCtx context.Context) *accou
 			controller.waitQueueFull = errors.Is(waitErr, accountpool.ErrAvailabilityQueueFull)
 			controller.queueWaitElapsed += time.Since(startedAt)
 			controller.queueWaitCount++
-			return ok
+			if !ok {
+				return false
+			}
+			// RecordError also broadcasts the availability generation. That wake-up
+			// can happen while every account is still cooling, so never let it turn
+			// unlimited failover into a hot loop. Keep the configured backoff as a
+			// floor; a genuinely released slot is still picked up on the next scan.
+			if elapsed := time.Since(startedAt); elapsed < delay {
+				remaining := delay - elapsed
+				if deadline := controller.selectionTimeRemaining(); deadline > 0 && deadline < remaining {
+					remaining = deadline
+				}
+				if remaining > 0 && !controller.waitForDelay(remaining) {
+					return false
+				}
+			}
+			return controller.stopErr() == nil
 		}
 	}
 	return controller

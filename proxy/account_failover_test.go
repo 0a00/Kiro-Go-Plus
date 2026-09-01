@@ -258,6 +258,30 @@ func TestUnlimitedAccountPollingStillHonorsUpstreamAttemptCap(t *testing.T) {
 	}
 }
 
+func TestUnlimitedAccountPollingKeepsBackoffAfterAvailabilityBroadcast(t *testing.T) {
+	controller := newAccountAttemptController(context.Background(), nil, 0)
+	controller.setSelectionTimeout(time.Second)
+	controller.wait = func(delay time.Duration) bool {
+		started := time.Now()
+		// Simulate RecordError waking the availability waiter immediately.
+		if delay != 500*time.Millisecond {
+			t.Fatalf("unexpected initial backoff: %s", delay)
+		}
+		controller.queueWaitCount++
+		if elapsed := time.Since(started); elapsed < delay {
+			time.Sleep(delay - elapsed)
+		}
+		return true
+	}
+	started := time.Now()
+	if !controller.nextRound(0) {
+		t.Fatal("unlimited controller did not continue after a retry wait")
+	}
+	if elapsed := time.Since(started); elapsed < 450*time.Millisecond {
+		t.Fatalf("retry round bypassed minimum backoff: %s", elapsed)
+	}
+}
+
 func TestFiniteAccountPollingStillHonorsUpstreamAttemptCap(t *testing.T) {
 	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatalf("config.Init: %v", err)
