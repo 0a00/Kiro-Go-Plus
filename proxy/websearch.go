@@ -274,13 +274,19 @@ func (h *Handler) handleClaudeWebSearch(ctx context.Context, w http.ResponseWrit
 
 func (h *Handler) callWebSearchMCP(ctx context.Context, model, query string) (*webSearchResults, error) {
 	attempts := h.newAccountAttemptController(ctx)
+	if attempts.maxAttempts == 0 {
+		// Web search capability failures are cached independently per account.
+		// Probe the current pool once instead of entering the general unlimited
+		// account-wait loop after every account has confirmed it cannot serve MCP.
+		attempts.maxAttempts = maxInt(h.pool.Count(), 1)
+	}
 	excluded := attempts.excluded
 	var lastErr error
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil, classifyRequestCancellation("Kiro MCP WebSearch", err)
 		}
-		account, guard, busy := h.acquireNextAccountForRequest(attempts, model, "")
+		account, guard, busy := h.acquireNextAccountForRequest(attempts, webSearchEndpointRouteModel, "")
 		if busy != nil {
 			lastErr = busy
 			break
@@ -318,11 +324,16 @@ func (h *Handler) callWebSearchMCP(ctx context.Context, model, query string) (*w
 		release()
 		if err == nil {
 			h.pool.RecordSuccess(account.ID)
+			h.pool.ClearModelUnavailable(account.ID, webSearchEndpointRouteModel)
 			return results, nil
 		}
 		excluded[account.ID] = true
 		lastErr = err
-		h.handleAccountFailureForModel(account, model, err)
+		if isWebSearchCapabilityUnavailable(err) {
+			h.pool.RecordModelUnavailable(account.ID, webSearchEndpointRouteModel)
+		} else {
+			h.handleAccountFailureForModel(account, webSearchEndpointRouteModel, err)
+		}
 		if !shouldRetryAcrossAccounts(err) {
 			break
 		}
@@ -358,6 +369,9 @@ func webSearchRegionCandidates(account *config.Account) []string {
 	// The profile ARN identifies the Kiro data-plane region. account.Region is
 	// the OIDC region and can legitimately differ for external IdP accounts.
 	add(kiroRegion(account))
+	if account != nil && strings.TrimSpace(account.ProfileArn) == "" {
+		add(account.Region)
+	}
 	add("us-east-1")
 	return regions
 }
@@ -403,7 +417,10 @@ func callMCPWebSearchContext(ctx context.Context, account *config.Account, query
 			if strings.TrimSpace(account.ProfileArn) != "" {
 				endpoints = []kiroEndpoint{webSearchRouteEndpoints[0]}
 			} else {
-				endpoints = nil
+				// Runtime MCP requires a profile ARN. A profile-less OAuth account
+				// can still use the Q MCP route, so select that compatible plane even
+				// when generation endpoint fallback is disabled.
+				endpoints = []kiroEndpoint{webSearchRouteEndpoints[1]}
 			}
 		} else {
 			endpoints = []kiroEndpoint{webSearchRouteEndpoints[1]}
@@ -461,7 +478,11 @@ func callMCPWebSearchURL(ctx context.Context, account *config.Account, rawURL st
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Connection", "close")
-	applyKiroBaseHeaders(req, account, buildRuntimeHeaderValues(account, host))
+	headerValues := buildStreamingHeaderValues(account, host)
+	if strings.HasPrefix(strings.ToLower(host), "runtime.") {
+		headerValues = buildRuntimeHeaderValues(account, host)
+	}
+	applyKiroBaseHeaders(req, account, headerValues)
 	req.Header.Set("Amz-Sdk-Request", "attempt=1; max=3")
 	req.Header.Set("Amz-Sdk-Invocation-Id", uuid.New().String())
 	if profileArn := strings.TrimSpace(account.ProfileArn); profileArn != "" {
@@ -530,6 +551,29 @@ func callMCPWebSearchURL(ctx context.Context, account *config.Account, rawURL st
 		return nil, fmt.Errorf("MCP web_search returned an invalid payload: %w", parseErr)
 	}
 	return nil, fmt.Errorf("MCP web_search response contains no parseable text result")
+}
+
+func isWebSearchCapabilityUnavailable(err error) bool {
+	if err == nil {
+		return false
+	}
+	if upstreamErr, ok := asUpstreamError(err); ok {
+		switch upstreamErr.Kind {
+		case UpstreamErrorEndpointUnavailable, UpstreamErrorModelUnavailable:
+			return true
+		case UpstreamErrorForbidden, UpstreamErrorClientRequest:
+			// Continue with text checks below; some MCP installations report
+			// unsupported tools as a JSON-RPC client error.
+		default:
+			return false
+		}
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "not supported") ||
+		strings.Contains(message, "unsupported") ||
+		strings.Contains(message, "not available") ||
+		strings.Contains(message, "unknown tool") ||
+		strings.Contains(message, "tool returned an error result")
 }
 
 func webSearchSummary(query string, results *webSearchResults) string {

@@ -1,5 +1,5 @@
 {
-  "version": "1.2.66",
-  "changelog": "Add visible batch progress and cancellation for large credential imports.\n增加大批量凭证导入的分批进度、失败统计和可取消处理。",
+  "version": "1.2.67",
+  "changelog": "Restore model discovery and Web Search compatibility for ordinary accounts.\n修复普通账号模型列表刷新与 Web Search 兼容路由。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }

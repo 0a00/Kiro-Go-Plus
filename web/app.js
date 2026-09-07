@@ -1561,7 +1561,8 @@
       const res = await api('/accounts/' + id + '/models/refresh', { method: 'POST' });
       const d = await res.json();
       dismiss();
-      if (d.success) toast(t('detail.refreshModelCache') + ' · ' + (d.count || 0), 'success');
+      if (d.success && d.source === 'compatibility') toast(t('detail.modelCompatibilityLoaded', d.count || 0), 'warning', { duration: 8000 });
+      else if (d.success) toast(t('detail.refreshModelCache') + ' · ' + (d.count || 0), 'success');
       else toast(t('common.failed') + (d.error ? ': ' + d.error : ''), 'error');
     } catch (e) {
       dismiss();
@@ -1693,14 +1694,17 @@
           if (b.modelId === 'auto') return 1;
           return (a.rateMultiplier || 1) - (b.rateMultiplier || 1);
         });
-        c.innerHTML = sorted.map(m => {
+        const sourceNotice = d.source === 'compatibility'
+          ? '<p class="message message-warning">' + escapeHtml(t('detail.modelCompatibilityHint')) + '</p>'
+          : '';
+        c.innerHTML = sourceNotice + (sorted.map(m => {
           const ratio = m.rateMultiplier || 1;
           return '<div class="model-item">' +
             '<div class="model-name">' + escapeHtml(m.modelId) + '</div>' +
             '<div class="model-credit"><span class="credit-ratio">' + escapeHtml(t('detail.creditMultiplier', ratio)) + '</span></div>' +
             '<div class="model-info">' + escapeHtml(m.description || '') + '</div>' +
             '</div>';
-        }).join('') || '<p class="empty-state">' + escapeHtml(t('detail.noModels')) + '</p>';
+        }).join('') || '<p class="empty-state">' + escapeHtml(t('detail.noModels')) + '</p>');
       } else {
         c.innerHTML = '<p class="message message-error">' + escapeHtml(t('detail.loadFailed')) + ': ' + escapeHtml(d.error || '') + '</p>';
         toast(t('detail.loadFailed') + (d.error ? ': ' + d.error : ''), 'error');
@@ -1935,6 +1939,7 @@
       const res = await api('/accounts/' + id + '/models/cached');
       const d = await res.json();
       testModalModels = Array.isArray(d.models) ? d.models.slice().sort() : [];
+      testModalModelError = d.source === 'compatibility';
     } catch (e) {
       testModalModelError = true;
     } finally {
@@ -1982,6 +1987,8 @@
         if (check.count != null) details.push('count=' + check.count);
         if (check.subscriptionTitle) details.push(check.subscriptionTitle);
         if (check.usageLimit) details.push('usage=' + check.usageCurrent + '/' + check.usageLimit);
+        if (check.source === 'compatibility') details.push(t('detail.modelCompatibilitySource'));
+        if (check.warning) details.push(check.warning);
         addTestLog(label + ' ok' + (details.length ? ' (' + details.join(', ') + ')' : ''), 'ok');
       } else {
         const details = [];

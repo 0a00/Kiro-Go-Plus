@@ -13,6 +13,7 @@ import (
 	"net/http"
 	neturl "net/url"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -614,17 +615,37 @@ func ListAvailableModels(account *config.Account) ([]ModelInfo, error) {
 
 const modelListEndpointRouteModel = "__models__"
 
+const (
+	modelListSourceManagement    = "upstream"
+	modelListSourceLegacy        = "legacy"
+	modelListSourceCompatibility = "compatibility"
+)
+
+type modelListSnapshot struct {
+	Models  []ModelInfo
+	Source  string
+	Warning string
+}
+
 var modelListRouteEndpoints = []kiroEndpoint{
 	{Key: "management-models", Name: "Kiro Management Models"},
 	{Key: "legacy-models", Name: "Legacy Kiro Models"},
 }
 
 func ListAvailableModelsContext(ctx context.Context, account *config.Account) ([]ModelInfo, error) {
+	snapshot, err := listAvailableModelsSnapshotContext(ctx, account)
+	return snapshot.Models, err
+}
+
+func listAvailableModelsSnapshotContext(ctx context.Context, account *config.Account) (modelListSnapshot, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if err := ensureRestProfileArnContext(ctx, account); err != nil {
-		return nil, fmt.Errorf("resolve profileArn: %w", err)
+		if modelListCompatibilityFallbackAllowed(account, err) {
+			return compatibilityModelListSnapshot(account), nil
+		}
+		return modelListSnapshot{}, fmt.Errorf("resolve profileArn: %w", err)
 	}
 	endpoints := append([]kiroEndpoint(nil), modelListRouteEndpoints...)
 	preferred := preferredEndpointForAccount(account)
@@ -646,7 +667,10 @@ func ListAvailableModelsContext(ctx context.Context, account *config.Account) ([
 	var err error
 	endpoints, err = sharedAccountEndpointRoutes.availableEndpoints(accountID, modelListEndpointRouteModel, "auto", endpoints)
 	if err != nil {
-		return nil, err
+		if modelListCompatibilityFallbackAllowed(account, err) {
+			return compatibilityModelListSnapshot(account), nil
+		}
+		return modelListSnapshot{}, err
 	}
 
 	var lastErr error
@@ -659,18 +683,94 @@ func ListAvailableModelsContext(ctx context.Context, account *config.Account) ([
 			models, lastErr = listAvailableModelsLegacyContext(ctx, account)
 		}
 		if lastErr == nil {
+			if len(models) == 0 {
+				lastErr = &UpstreamError{
+					Kind: UpstreamErrorEndpointUnavailable, Endpoint: endpoint.Name,
+					Message:              "model discovery returned no models",
+					RetryAcrossEndpoints: true, RetryAcrossAccounts: true,
+				}
+				sharedAccountEndpointRoutes.recordFailure(accountID, modelListEndpointRouteModel, endpoint, lastErr)
+				continue
+			}
 			sharedAccountEndpointRoutes.recordSuccess(accountID, modelListEndpointRouteModel, endpoint)
-			return models, nil
+			source := modelListSourceLegacy
+			if endpoint.Key == "management-models" {
+				source = modelListSourceManagement
+			}
+			return modelListSnapshot{Models: models, Source: source}, nil
 		}
 		sharedAccountEndpointRoutes.recordFailure(accountID, modelListEndpointRouteModel, endpoint, lastErr)
 		if !shouldRetryControlPlaneEndpoint(lastErr) {
-			return nil, lastErr
+			return modelListSnapshot{}, lastErr
 		}
 	}
-	if lastErr != nil {
-		return nil, lastErr
+	if modelListCompatibilityFallbackAllowed(account, lastErr) {
+		return compatibilityModelListSnapshot(account), nil
 	}
-	return nil, fmt.Errorf("no model-list endpoint is available")
+	if lastErr != nil {
+		return modelListSnapshot{}, lastErr
+	}
+	return modelListSnapshot{}, fmt.Errorf("no model-list endpoint is available")
+}
+
+func modelListCompatibilityFallbackAllowed(account *config.Account, err error) bool {
+	if account == nil || isKiroAPIKeyAccount(account) || err == nil {
+		return false
+	}
+	if upstreamErr, ok := asUpstreamError(err); ok {
+		switch upstreamErr.Kind {
+		case UpstreamErrorEndpointUnavailable:
+			return true
+		case UpstreamErrorRateLimit:
+			return strings.EqualFold(strings.TrimSpace(upstreamErr.Endpoint), "account endpoints")
+		case UpstreamErrorForbidden, UpstreamErrorClientRequest:
+			text := strings.ToLower(upstreamErr.Error())
+			return strings.Contains(text, "not supported") ||
+				strings.Contains(text, "not available") ||
+				strings.Contains(text, "not authorized") ||
+				strings.Contains(text, "access denied")
+		default:
+			return false
+		}
+	}
+	text := strings.ToLower(err.Error())
+	return strings.Contains(text, "returned no models") ||
+		strings.Contains(text, "not supported") ||
+		strings.Contains(text, "not available")
+}
+
+func compatibilityModelListSnapshot(account *config.Account) modelListSnapshot {
+	models := compatibilityModelInfos()
+	warning := "upstream model discovery is unavailable for this account type; showing compatibility candidates"
+	logger.Infof("[ModelsCache] Using %d compatibility models for %s after model discovery was unavailable", len(models), accountEmailForLog(account))
+	return modelListSnapshot{Models: models, Source: modelListSourceCompatibility, Warning: warning}
+}
+
+func compatibilityModelInfos() []ModelInfo {
+	ids := make([]string, 0, len(builtInKiroModels))
+	for id := range builtInKiroModels {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	models := make([]ModelInfo, 0, len(ids))
+	for _, id := range ids {
+		if discovered, ok := getDiscoveredModelMetadata(id); ok {
+			models = append(models, discovered)
+			continue
+		}
+		provider := "Anthropic"
+		inputs := []string{"text", "image"}
+		if strings.HasPrefix(id, "gpt-") {
+			provider = "OpenAI"
+			inputs = []string{"text"}
+		}
+		models = append(models, ModelInfo{
+			ModelId: id, ModelName: id, Provider: provider,
+			Description: "Compatibility candidate; upstream model discovery unavailable",
+			InputTypes:  inputs, RateMultiplier: 1,
+		})
+	}
+	return models
 }
 
 func shouldRetryControlPlaneEndpoint(err error) bool {

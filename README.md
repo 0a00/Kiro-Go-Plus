@@ -96,6 +96,8 @@ For production troubleshooting, start with metadata-only archive retention for 3
 
 Unlisted-model pass-through is disabled by default. Enable it only when Kiro has released a model that is not yet in the local registry; IDs are syntax-checked locally, while upstream Kiro remains the final availability validator.
 
+Some ordinary Builder ID and Social accounts can generate normally while the upstream does not expose `ListAvailableModels` or Runtime MCP. The admin panel shows a clearly labeled compatibility candidate list for those accounts; real generation failures still feed the account-model negative cache, so missing control-plane permission is not treated as a dead account. Web Search uses the compatible Q MCP route for accounts without a Profile ARN and tracks search capability independently from generation routing, including when the generation endpoint is fixed to Runtime.
+
 ## Quick Start
 
 ### 1. Clone and configure

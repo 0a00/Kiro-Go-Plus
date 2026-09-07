@@ -454,6 +454,77 @@ func TestListAvailableModelsFallsBackFromManagementToLegacyAndLearnsRoute(t *tes
 	}
 }
 
+func TestListAvailableModelsUsesCompatibilitySnapshotForUnsupportedBuilderID(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	clearProfileArnResolutionCooldowns()
+	sharedAccountEndpointRoutes.reset()
+	t.Cleanup(clearProfileArnResolutionCooldowns)
+	t.Cleanup(sharedAccountEndpointRoutes.reset)
+	var profileCalls, managementCalls, legacyCalls int32
+	kiroRestHttpStore.Store(&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch {
+		case req.URL.Path == "/ListAvailableProfiles":
+			atomic.AddInt32(&profileCalls, 1)
+		case req.URL.Host == "management.us-east-1.kiro.dev":
+			atomic.AddInt32(&managementCalls, 1)
+		case req.URL.Path == "/ListAvailableModels":
+			atomic.AddInt32(&legacyCalls, 1)
+		default:
+			t.Fatalf("unexpected request: %s", req.URL.String())
+		}
+		return &http.Response{
+			StatusCode: http.StatusForbidden,
+			Body:       io.NopCloser(strings.NewReader(`{"message":"AWS Builder ID is not supported for this operation."}`)),
+			Header:     make(http.Header),
+		}, nil
+	})})
+	t.Cleanup(func() { InitKiroHttpClient("") })
+
+	account := &config.Account{
+		ID: "ordinary-builder", AccessToken: "token", AuthMethod: "idc",
+		Provider: "BuilderId", Region: "us-east-1",
+	}
+	snapshot, err := listAvailableModelsSnapshotContext(context.Background(), account)
+	if err != nil {
+		t.Fatalf("compatibility model snapshot failed: %v", err)
+	}
+	if snapshot.Source != modelListSourceCompatibility || len(snapshot.Models) == 0 || snapshot.Warning == "" {
+		t.Fatalf("unexpected compatibility snapshot: %+v", snapshot)
+	}
+	second, err := listAvailableModelsSnapshotContext(context.Background(), account)
+	if err != nil || second.Source != modelListSourceCompatibility || len(second.Models) == 0 {
+		t.Fatalf("cooled compatibility snapshot failed: snapshot=%+v err=%v", second, err)
+	}
+	if profileCalls != 1 || managementCalls != 1 || legacyCalls != 1 {
+		t.Fatalf("unexpected control-plane calls: profiles=%d management=%d legacy=%d", profileCalls, managementCalls, legacyCalls)
+	}
+}
+
+func TestListAvailableModelsDoesNotHideAuthenticationFailure(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	clearProfileArnResolutionCooldowns()
+	t.Cleanup(clearProfileArnResolutionCooldowns)
+	kiroRestHttpStore.Store(&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusUnauthorized,
+			Body:       io.NopCloser(strings.NewReader(`{"message":"token expired"}`)),
+			Header:     make(http.Header),
+		}, nil
+	})})
+	t.Cleanup(func() { InitKiroHttpClient("") })
+
+	snapshot, err := listAvailableModelsSnapshotContext(context.Background(), &config.Account{
+		ID: "expired-builder", AccessToken: "expired", Provider: "BuilderId", Region: "us-east-1",
+	})
+	if err == nil || snapshot.Source == modelListSourceCompatibility {
+		t.Fatalf("authentication failure was hidden by compatibility models: snapshot=%+v err=%v", snapshot, err)
+	}
+}
+
 func TestKiroControlPlaneRegionCandidatesUseProfileThenAccountRegion(t *testing.T) {
 	account := &config.Account{
 		AuthMethod: "idc",

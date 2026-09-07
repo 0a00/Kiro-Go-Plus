@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"kiro-go/config"
+	accountpool "kiro-go/pool"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -262,7 +263,7 @@ func TestMCPWebSearchFallsBackFromRuntimeToQAndLearnsRoute(t *testing.T) {
 	}
 }
 
-func TestMCPWebSearchFixedRuntimeWithoutProfileDoesNotUseQ(t *testing.T) {
+func TestMCPWebSearchFixedRuntimeWithoutProfileUsesCompatibleQRoute(t *testing.T) {
 	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatalf("init config: %v", err)
 	}
@@ -284,18 +285,84 @@ func TestMCPWebSearchFixedRuntimeWithoutProfileDoesNotUseQ(t *testing.T) {
 	}
 	t.Cleanup(func() { webSearchRouteEndpoints = oldEndpoints })
 
-	_, err := callMCPWebSearchContext(context.Background(), &config.Account{
+	results, err := callMCPWebSearchContext(context.Background(), &config.Account{
 		ID:                 "runtime-without-profile",
 		AuthMethod:         "api_key",
 		KiroApiKey:         "ksk_test",
 		AccessToken:        "ksk_test",
 		EndpointPreference: "runtime",
 	}, "kiro")
-	if err == nil || !strings.Contains(err.Error(), "no compatible MCP endpoint") {
-		t.Fatalf("expected incompatible runtime MCP error, got %v", err)
+	if err != nil || results == nil || results.Results == nil {
+		t.Fatalf("profile-less account did not use compatible Q MCP route: results=%+v err=%v", results, err)
 	}
-	if calls != 0 {
-		t.Fatalf("fixed runtime request unexpectedly fell back to Q: calls=%d", calls)
+	if calls != 1 {
+		t.Fatalf("Q MCP route calls=%d, want 1", calls)
+	}
+}
+
+func TestMCPWebSearchQRouteUsesStreamingClientHeaders(t *testing.T) {
+	var userAgent string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		userAgent = r.Header.Get("User-Agent")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","result":{"content":[{"type":"text","text":"{\"results\":[]}"}]}}`))
+	}))
+	defer server.Close()
+
+	if _, err := callMCPWebSearchURL(context.Background(), &config.Account{AccessToken: "token"}, server.URL, []byte(`{}`), "query"); err != nil {
+		t.Fatalf("Q MCP request failed: %v", err)
+	}
+	if !strings.Contains(strings.ToLower(userAgent), "api/codewhispererstreaming") {
+		t.Fatalf("Q MCP used the wrong client identity: %q", userAgent)
+	}
+}
+
+func TestWebSearchChecksUnlimitedAccountPoolOnlyOnce(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	retry := config.GetRetryConfig()
+	retry.MaxAccountAttempts = 0
+	if err := config.UpdateRetryConfig(retry); err != nil {
+		t.Fatalf("enable unlimited account attempts: %v", err)
+	}
+	for _, id := range []string{"websearch-unsupported-a", "websearch-unsupported-b"} {
+		if err := config.AddAccount(config.Account{
+			ID: id, Enabled: true, AccessToken: "ksk_test", KiroApiKey: "ksk_test_" + id,
+			AuthMethod: "api_key", Region: "us-east-1",
+		}); err != nil {
+			t.Fatalf("add account %s: %v", id, err)
+		}
+	}
+	p := accountpool.GetPool()
+	p.Reload()
+	sharedAccountEndpointRoutes.reset()
+	t.Cleanup(sharedAccountEndpointRoutes.reset)
+
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"message":"MCP route is not available"}`))
+	}))
+	defer server.Close()
+	oldEndpoints := webSearchRouteEndpoints
+	webSearchRouteEndpoints = []kiroEndpoint{
+		{Key: "runtime-mcp", URL: server.URL, Name: "Kiro Runtime MCP", RequiresProfileArn: true},
+		{Key: "q-mcp", URL: server.URL, Name: "Kiro Q MCP"},
+	}
+	t.Cleanup(func() { webSearchRouteEndpoints = oldEndpoints })
+
+	h := &Handler{pool: p}
+	started := time.Now()
+	if _, err := h.callWebSearchMCP(context.Background(), "claude-sonnet-4.5", "query"); err == nil {
+		t.Fatal("expected unsupported web search error")
+	}
+	if calls != 2 {
+		t.Fatalf("web search calls=%d, want one per account", calls)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("unsupported pool waited too long: %s", elapsed)
 	}
 }
 

@@ -1801,13 +1801,19 @@ func (h *Handler) fetchAndCacheAccountModels(account *config.Account) error {
 }
 
 func (h *Handler) fetchAndCacheAccountModelsContext(ctx context.Context, account *config.Account) error {
+	_, err := h.fetchAndCacheAccountModelsSnapshotContext(ctx, account)
+	return err
+}
+
+func (h *Handler) fetchAndCacheAccountModelsSnapshotContext(ctx context.Context, account *config.Account) (modelListSnapshot, error) {
 	if err := h.ensureValidTokenContext(ctx, account); err != nil {
-		return fmt.Errorf("token refresh failed: %w", err)
+		return modelListSnapshot{}, fmt.Errorf("token refresh failed: %w", err)
 	}
-	models, err := ListAvailableModelsContext(ctx, account)
+	snapshot, err := listAvailableModelsSnapshotContext(ctx, account)
 	if err != nil {
-		return err
+		return modelListSnapshot{}, err
 	}
+	models := snapshot.Models
 	modelIDs := make([]string, 0, len(models))
 	for _, m := range models {
 		modelIDs = append(modelIDs, m.ModelId)
@@ -1825,8 +1831,8 @@ func (h *Handler) fetchAndCacheAccountModelsContext(ctx context.Context, account
 	h.modelsCacheTime = time.Now().Unix()
 	h.modelsCacheMu.Unlock()
 
-	logger.Infof("[ModelsCache] Refreshed %d models for account %s", len(models), account.Email)
-	return nil
+	logger.Infof("[ModelsCache] Refreshed %d models for account %s (source=%s)", len(models), account.Email, snapshot.Source)
+	return snapshot, nil
 }
 
 func (h *Handler) pruneModelsByAccount(accounts []config.Account) {
@@ -1887,14 +1893,17 @@ func (h *Handler) apiRefreshAccountModels(w http.ResponseWriter, r *http.Request
 		account.ExpiresAt = latest.ExpiresAt
 		account.ProfileArn = latest.ProfileArn
 	}
-	if err := h.fetchAndCacheAccountModels(account); err != nil {
+	snapshot, err := h.fetchAndCacheAccountModelsSnapshotContext(r.Context(), account)
+	if err != nil {
 		w.WriteHeader(500)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": true,
-		"count":   len(h.pool.GetModelList(id)),
+		"count":   len(snapshot.Models),
+		"source":  snapshot.Source,
+		"warning": snapshot.Warning,
 	})
 }
 
@@ -4877,6 +4886,7 @@ func (h *Handler) apiUpdateAccount(w http.ResponseWriter, r *http.Request, id st
 	h.pool.Reload()
 	if oldEndpointPreference != updatedAccount.EndpointPreference {
 		sharedAccountEndpointRoutes.forgetAccount(id)
+		h.pool.ClearModelUnavailable(id, webSearchEndpointRouteModel)
 	}
 	// 账号从禁用→启用时，自动拉取并缓存模型列表
 	if !oldEnabled && updatedAccount.Enabled {
@@ -7427,10 +7437,13 @@ func (h *Handler) apiTestAccount(w http.ResponseWriter, r *http.Request, id stri
 		})
 	}
 
-	if err := h.fetchAndCacheAccountModels(account); err != nil {
+	if snapshot, err := h.fetchAndCacheAccountModelsSnapshotContext(r.Context(), account); err != nil {
 		checks = append(checks, failedAccountTestCheck("models", err.Error()))
 	} else {
-		checks = append(checks, accountTestCheck{Name: "models", Success: true, Count: len(h.pool.GetModelList(account.ID))})
+		checks = append(checks, accountTestCheck{
+			Name: "models", Success: true, Count: len(snapshot.Models),
+			Source: snapshot.Source, Warning: snapshot.Warning,
+		})
 	}
 
 	// Build a minimal chat payload
@@ -7472,8 +7485,12 @@ func (h *Handler) apiTestAccount(w http.ResponseWriter, r *http.Request, id stri
 
 	if config.GetWebSearchConfig().Enabled {
 		if results, err := callMCPWebSearch(account, "Kiro IDE release notes"); err != nil {
+			if isWebSearchCapabilityUnavailable(err) {
+				h.pool.RecordModelUnavailable(account.ID, webSearchEndpointRouteModel)
+			}
 			checks = append(checks, failedAccountTestCheck("websearch", err.Error()))
 		} else {
+			h.pool.ClearModelUnavailable(account.ID, webSearchEndpointRouteModel)
 			checks = append(checks, accountTestCheck{Name: "websearch", Success: true, Count: len(results.Results)})
 		}
 	}
@@ -7513,6 +7530,8 @@ type accountTestCheck struct {
 	OverageCapability  string  `json:"overageCapability,omitempty"`
 	OverageCheckedAt   int64   `json:"overageCheckedAt,omitempty"`
 	AvailableModelHint string  `json:"availableModelHint,omitempty"`
+	Source             string  `json:"source,omitempty"`
+	Warning            string  `json:"warning,omitempty"`
 }
 
 func failedAccountTestCheck(name, err string) accountTestCheck {
@@ -7702,6 +7721,7 @@ func (h *Handler) apiRefreshAccount(w http.ResponseWriter, r *http.Request, id s
 						return
 					}
 				}
+				h.pool.ClearModelUnavailable(id, webSearchEndpointRouteModel)
 			}
 		}
 
@@ -7719,6 +7739,7 @@ func (h *Handler) apiRefreshAccount(w http.ResponseWriter, r *http.Request, id s
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
+	h.pool.ClearModelUnavailable(id, webSearchEndpointRouteModel)
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": true,
@@ -7883,36 +7904,52 @@ func (h *Handler) apiGetAccountModels(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 
-	models, err := ListAvailableModelsContext(r.Context(), account)
+	if latest := h.pool.GetByID(id); latest != nil {
+		account.AccessToken = latest.AccessToken
+		account.RefreshToken = latest.RefreshToken
+		account.ExpiresAt = latest.ExpiresAt
+		account.ProfileArn = latest.ProfileArn
+	}
+	snapshot, err := h.fetchAndCacheAccountModelsSnapshotContext(r.Context(), account)
 	if err != nil {
 		w.WriteHeader(500)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
 
-	// 同步更新路由缓存
-	modelIDs := make([]string, 0, len(models))
-	for _, m := range models {
-		modelIDs = append(modelIDs, m.ModelId)
-	}
-	h.pool.SetModelList(id, modelIDs)
-	h.modelsCacheMu.Lock()
-	h.cachedModels = mergeUniqueModels(h.cachedModels, models)
-	h.modelsCacheTime = time.Now().Unix()
-	h.modelsCacheMu.Unlock()
-
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": true,
-		"models":  models,
+		"models":  snapshot.Models,
+		"source":  snapshot.Source,
+		"warning": snapshot.Warning,
 	})
 }
 
 // apiGetAccountModelsCached 返回账号已缓存的模型列表（不实时拉取）
 func (h *Handler) apiGetAccountModelsCached(w http.ResponseWriter, r *http.Request, id string) {
 	models := h.pool.GetModelList(id)
+	source := "cache"
+	warning := ""
+	if len(models) == 0 {
+		for _, account := range config.GetAccounts() {
+			if account.ID != id || isKiroAPIKeyAccount(&account) {
+				continue
+			}
+			compatibility := compatibilityModelInfos()
+			models = make([]string, 0, len(compatibility))
+			for _, model := range compatibility {
+				models = append(models, model.ModelId)
+			}
+			source = modelListSourceCompatibility
+			warning = "upstream model discovery has not produced a list; showing compatibility candidates"
+			break
+		}
+	}
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": true,
 		"models":  models,
+		"source":  source,
+		"warning": warning,
 	})
 }
 
