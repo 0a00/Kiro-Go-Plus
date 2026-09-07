@@ -8,6 +8,7 @@ import (
 	"kiro-go/config"
 	"kiro-go/internal/awsregion"
 	"kiro-go/internal/httpbody"
+	"kiro-go/logger"
 	"net/http"
 	"net/url"
 	"strings"
@@ -382,7 +383,17 @@ func callMCPWebSearchContext(ctx context.Context, account *config.Account, query
 	}
 	if !isKiroAPIKeyAccount(account) {
 		if err := ensureRestProfileArnContext(ctx, account); err != nil {
-			return nil, fmt.Errorf("resolve profileArn: %w", err)
+			// Q MCP does not require a Kiro profile ARN. Builder ID accounts
+			// commonly cannot resolve one, while their Q web-search route is
+			// still usable; let endpoint selection below choose that route.
+			if strings.TrimSpace(account.ProfileArn) == "" &&
+				strings.EqualFold(strings.TrimSpace(account.Provider), "BuilderId") &&
+				(strings.Contains(strings.ToLower(err.Error()), "no available kiro profile") ||
+					strings.Contains(strings.ToLower(err.Error()), "profile arn unsupported")) {
+				logger.Debugf("[WebSearch] Continuing without profile ARN for Builder ID account %s: %v", accountEmailForLog(account), err)
+			} else {
+				return nil, fmt.Errorf("resolve profileArn: %w", err)
+			}
 		}
 	}
 	body, err := json.Marshal(mcpRequest{
