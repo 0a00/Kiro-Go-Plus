@@ -454,6 +454,43 @@ func TestListAvailableModelsFallsBackFromManagementToLegacyAndLearnsRoute(t *tes
 	}
 }
 
+func TestListAvailableModelsRuntimePreferenceStillTriesLegacyForOrdinaryAccount(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	sharedAccountEndpointRoutes.reset()
+	t.Cleanup(sharedAccountEndpointRoutes.reset)
+	var managementCalls, legacyCalls int32
+	kiroRestHttpStore.Store(&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch {
+		case req.URL.Path == "/ListAvailableProfiles":
+			return &http.Response{StatusCode: http.StatusForbidden,
+				Body: io.NopCloser(strings.NewReader(`{"message":"AWS Builder ID is not supported for this operation."}`)), Header: make(http.Header)}, nil
+		case req.URL.Host == "management.us-east-1.kiro.dev":
+			atomic.AddInt32(&managementCalls, 1)
+			return &http.Response{StatusCode: http.StatusForbidden,
+				Body: io.NopCloser(strings.NewReader(`{"message":"not supported"}`)), Header: make(http.Header)}, nil
+		case req.URL.Path == "/ListAvailableModels":
+			atomic.AddInt32(&legacyCalls, 1)
+			return &http.Response{StatusCode: http.StatusOK,
+				Body: io.NopCloser(strings.NewReader(`{"models":[{"modelId":"ordinary-real-model"}]}`)), Header: make(http.Header)}, nil
+		default:
+			t.Fatalf("unexpected models request: %s", req.URL.String())
+			return nil, nil
+		}
+	})})
+	t.Cleanup(func() { InitKiroHttpClient("") })
+
+	account := &config.Account{ID: "ordinary-runtime", AccessToken: "token", Provider: "BuilderId", Region: "us-east-1"}
+	models, err := listAvailableModelsSnapshotContext(context.Background(), account)
+	if err != nil || models.Source != modelListSourceLegacy || len(models.Models) != 1 || models.Models[0].ModelId != "ordinary-real-model" {
+		t.Fatalf("expected real legacy models, snapshot=%+v err=%v", models, err)
+	}
+	if managementCalls != 1 || legacyCalls != 1 {
+		t.Fatalf("expected both discovery endpoints to be tried, management=%d legacy=%d", managementCalls, legacyCalls)
+	}
+}
+
 func TestListAvailableModelsUsesCompatibilitySnapshotForUnsupportedBuilderID(t *testing.T) {
 	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatalf("init config: %v", err)

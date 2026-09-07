@@ -648,17 +648,13 @@ func listAvailableModelsSnapshotContext(ctx context.Context, account *config.Acc
 		return modelListSnapshot{}, fmt.Errorf("resolve profileArn: %w", err)
 	}
 	endpoints := append([]kiroEndpoint(nil), modelListRouteEndpoints...)
+	// Model discovery is independent from the generation endpoint preference.
+	// In particular, ordinary/Builder ID accounts may expose the legacy model
+	// list even when the runtime endpoint is selected for generation.
 	preferred := preferredEndpointForAccount(account)
 	if preferred == "kiro" || preferred == "codewhisperer" || preferred == "amazonq" ||
 		(preferred == "auto" && !accountPrefersRuntime(account)) {
 		endpoints = moveEndpointFirst(endpoints, "legacy-models")
-	}
-	if preferred != "" && preferred != "auto" && !config.GetEndpointFallback() {
-		if preferred == "runtime" {
-			endpoints = endpoints[:1]
-		} else {
-			endpoints = []kiroEndpoint{modelListRouteEndpoints[1]}
-		}
 	}
 	accountID := ""
 	if account != nil {
