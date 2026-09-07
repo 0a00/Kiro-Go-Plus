@@ -50,3 +50,34 @@ func TestApiKeyBatchCreateRejectsEmptyInput(t *testing.T) {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
 }
+
+func TestApiKeyModelFallbackOverrideAPI(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	created, err := config.AddApiKey(config.ApiKeyEntry{Key: "sk-fallback-api", Enabled: true})
+	if err != nil {
+		t.Fatalf("add key: %v", err)
+	}
+	h := &Handler{}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/admin/api/api-keys/"+created.ID, strings.NewReader(`{"modelFallbackEnabled":false}`))
+	h.apiUpdateApiKey(rec, req, created.ID)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	got := config.GetApiKeyEntry(created.ID)
+	if got == nil || got.ModelFallbackEnabled == nil || *got.ModelFallbackEnabled {
+		t.Fatalf("override was not persisted: %+v", got)
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPut, "/admin/api/api-keys/"+created.ID, strings.NewReader(`{"modelFallbackEnabled":null}`))
+	h.apiUpdateApiKey(rec, req, created.ID)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("clear status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if got := config.GetApiKeyEntry(created.ID); got == nil || got.ModelFallbackEnabled != nil {
+		t.Fatalf("override was not cleared: %+v", got)
+	}
+}

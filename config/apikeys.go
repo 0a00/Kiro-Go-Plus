@@ -27,6 +27,12 @@ func ListApiKeys() []ApiKeyEntry {
 	}
 	out := make([]ApiKeyEntry, len(cfg.ApiKeys))
 	copy(out, cfg.ApiKeys)
+	for i := range out {
+		if out[i].ModelFallbackEnabled != nil {
+			value := *out[i].ModelFallbackEnabled
+			out[i].ModelFallbackEnabled = &value
+		}
+	}
 	return out
 }
 
@@ -40,6 +46,10 @@ func GetApiKeyEntry(id string) *ApiKeyEntry {
 	for i := range cfg.ApiKeys {
 		if cfg.ApiKeys[i].ID == id {
 			cp := cfg.ApiKeys[i]
+			if cp.ModelFallbackEnabled != nil {
+				value := *cp.ModelFallbackEnabled
+				cp.ModelFallbackEnabled = &value
+			}
 			return &cp
 		}
 	}
@@ -166,6 +176,12 @@ func UpdateApiKey(id string, patch ApiKeyEntry) error {
 	cfg.ApiKeys[idx].MaxConcurrency = patch.MaxConcurrency
 	cfg.ApiKeys[idx].QueueCapacity = patch.QueueCapacity
 	cfg.ApiKeys[idx].QueueTimeoutMs = patch.QueueTimeoutMs
+	if patch.ModelFallbackEnabled == nil {
+		cfg.ApiKeys[idx].ModelFallbackEnabled = nil
+	} else {
+		value := *patch.ModelFallbackEnabled
+		cfg.ApiKeys[idx].ModelFallbackEnabled = &value
+	}
 	if patch.Migrated {
 		cfg.ApiKeys[idx].Migrated = true
 	}
@@ -200,6 +216,10 @@ func FindApiKeyByValue(key string) *ApiKeyEntry {
 	for i := range cfg.ApiKeys {
 		if cfg.ApiKeys[i].Key == key {
 			cp := cfg.ApiKeys[i]
+			if cp.ModelFallbackEnabled != nil {
+				value := *cp.ModelFallbackEnabled
+				cp.ModelFallbackEnabled = &value
+			}
 			return &cp
 		}
 	}

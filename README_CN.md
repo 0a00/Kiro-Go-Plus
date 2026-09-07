@@ -58,6 +58,30 @@ Token 预算优先级为：请求显式参数、模型专属配置、Web 全局�
 
 长工具保护默认开启，近似上限为 8192 Token，截断后最多恢复重试 1 次。预先切换备用模型默认关闭，因为不同账号支持的模型并不一致。
 
+模型兜底路由默认关闭，可在 **设置 > 模型与生成 > 模型兜底路由** 开启。规则支持精确、前缀、包含和正则匹配，例如将所有 Claude 请求切换到 Sonnet 4.5：
+
+```json
+{
+  "enabled": true,
+  "defaultTrigger": "model_unavailable",
+  "maxHops": 1,
+  "rules": [
+    {
+      "id": "claude-to-sonnet45",
+      "name": "Claude -> Sonnet 4.5",
+      "enabled": true,
+      "matchType": "prefix",
+      "sourceModel": "claude-",
+      "targetModel": "claude-sonnet-4.5",
+      "trigger": "model_unavailable",
+      "apiKeyIds": []
+    }
+  ]
+}
+```
+
+`apiKeyIds` 留空表示所有 Key；填写 UUID 后只对指定 Key 生效。每个 API Key 还可以选择继承全局设置、单独启用或单独禁用。`model_unavailable` 只在模型不可用或无有效上游输出时切换，`upstream_error` 会将限流、超时和临时上游错误也纳入兜底，`always` 会在请求发出前直接路由到目标模型。流式请求一旦已经向客户端发送正文、思考或工具片段，不会重放到另一个模型。
+
 客户端显式输出上限会继续透传给 Kiro；当端点忽略过小的上限时，纯文本响应会由代理再次兜底并以协议规定的 `max_tokens`/长度信号结束流。带工具的请求保留完整结构化参数，避免截断工具 JSON；上游预算不一致仍会记录到诊断信息。
 
 标记为“空闲超时”的项目按活动计算：工具分片组装和高风险工具可提交输出窗口，会在收到思考、进度或工具分片时续期，因此不会限制持续产生事件的请求总时长。只有上游持续没有字节时，流式事件空闲超时才会触发；单请求重试总时长预算仍是最终上限。

@@ -915,6 +915,37 @@
           </div>
         </div>
 
+        <!-- Scoped model fallback routes -->
+        <div class="card settings-card" data-settings-group="generation">
+          <div class="card-header"><span class="card-title" data-i18n="settings.modelFallback"></span></div>
+          <div class="form-group">
+            <label class="flex items-center gap-2">
+              <span class="switch"><input type="checkbox" id="modelFallbackEnabled" /><span class="slider"></span></span>
+              <span data-i18n="settings.modelFallbackEnabled"></span>
+            </label>
+            <small data-i18n="settings.modelFallbackHint"></small>
+          </div>
+          <div class="form-group">
+            <label data-i18n="settings.modelFallbackTrigger"></label>
+            <select id="modelFallbackDefaultTrigger">
+              <option value="model_unavailable" data-i18n="settings.modelFallbackTriggerUnavailable"></option>
+              <option value="upstream_error" data-i18n="settings.modelFallbackTriggerError"></option>
+              <option value="always" data-i18n="settings.modelFallbackTriggerAlways"></option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label data-i18n="settings.modelFallbackMaxHops"></label>
+            <input type="number" id="modelFallbackMaxHops" min="1" max="5" step="1" value="1" />
+          </div>
+          <div class="form-group">
+            <label data-i18n="settings.modelFallbackRules"></label>
+            <textarea id="modelFallbackRulesJson" class="font-mono" rows="10"
+              placeholder='[{"id":"claude-default","name":"Claude to Sonnet 4.5","enabled":true,"matchType":"prefix","sourceModel":"claude-","targetModel":"claude-sonnet-4.5","trigger":"model_unavailable","apiKeyIds":[]}]'></textarea>
+            <small data-i18n="settings.modelFallbackRulesHint"></small>
+          </div>
+          <button class="btn btn-primary" id="saveModelFallbackBtn" data-i18n="settings.saveModelFallback"></button>
+        </div>
+
         <!-- Diagnostics settings -->
         <div class="card settings-card" data-settings-group="diagnostics">
           <div class="card-header"><span class="card-title" data-i18n="settings.diagnostics"></span></div>
@@ -1506,6 +1537,15 @@
             <span class="switch"><input type="checkbox" id="apiKeyForm_enabled" checked /><span class="slider"></span></span>
             <span data-i18n="apiKeys.formEnabled"></span>
           </label>
+        </div>
+        <div class="form-group">
+          <label data-i18n="apiKeys.formModelFallback"></label>
+          <select id="apiKeyForm_modelFallbackEnabled">
+            <option value="inherit" data-i18n="apiKeys.formModelFallbackInherit"></option>
+            <option value="enabled" data-i18n="apiKeys.formModelFallbackEnabled"></option>
+            <option value="disabled" data-i18n="apiKeys.formModelFallbackDisabled"></option>
+          </select>
+          <small data-i18n="apiKeys.formModelFallbackHint"></small>
         </div>
         <div class="form-group">
           <label data-i18n="apiKeys.limitTokens"></label>

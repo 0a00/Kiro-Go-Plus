@@ -13,44 +13,46 @@ const maxApiKeyBatchEntries = 1000
 // apiKeyView is the response payload for listing/inspecting API keys. The Key field
 // is masked so admins can identify entries without exposing the secret.
 type apiKeyView struct {
-	ID                string  `json:"id"`
-	Name              string  `json:"name,omitempty"`
-	KeyMasked         string  `json:"keyMasked"`
-	Enabled           bool    `json:"enabled"`
-	Migrated          bool    `json:"migrated,omitempty"`
-	CreatedAt         int64   `json:"createdAt"`
-	LastUsedAt        int64   `json:"lastUsedAt,omitempty"`
-	TokenLimit        int64   `json:"tokenLimit,omitempty"`
-	CreditLimit       float64 `json:"creditLimit,omitempty"`
-	RequestsPerMinute int     `json:"requestsPerMinute,omitempty"`
-	TokensPerMinute   int64   `json:"tokensPerMinute,omitempty"`
-	MaxConcurrency    int     `json:"maxConcurrency,omitempty"`
-	QueueCapacity     int     `json:"queueCapacity,omitempty"`
-	QueueTimeoutMs    int     `json:"queueTimeoutMs,omitempty"`
-	TokensUsed        int64   `json:"tokensUsed"`
-	CreditsUsed       float64 `json:"creditsUsed"`
-	RequestsCount     int64   `json:"requestsCount"`
+	ID                   string  `json:"id"`
+	Name                 string  `json:"name,omitempty"`
+	KeyMasked            string  `json:"keyMasked"`
+	Enabled              bool    `json:"enabled"`
+	ModelFallbackEnabled *bool   `json:"modelFallbackEnabled,omitempty"`
+	Migrated             bool    `json:"migrated,omitempty"`
+	CreatedAt            int64   `json:"createdAt"`
+	LastUsedAt           int64   `json:"lastUsedAt,omitempty"`
+	TokenLimit           int64   `json:"tokenLimit,omitempty"`
+	CreditLimit          float64 `json:"creditLimit,omitempty"`
+	RequestsPerMinute    int     `json:"requestsPerMinute,omitempty"`
+	TokensPerMinute      int64   `json:"tokensPerMinute,omitempty"`
+	MaxConcurrency       int     `json:"maxConcurrency,omitempty"`
+	QueueCapacity        int     `json:"queueCapacity,omitempty"`
+	QueueTimeoutMs       int     `json:"queueTimeoutMs,omitempty"`
+	TokensUsed           int64   `json:"tokensUsed"`
+	CreditsUsed          float64 `json:"creditsUsed"`
+	RequestsCount        int64   `json:"requestsCount"`
 }
 
 func toApiKeyView(e config.ApiKeyEntry) apiKeyView {
 	return apiKeyView{
-		ID:                e.ID,
-		Name:              e.Name,
-		KeyMasked:         config.MaskApiKey(e.Key),
-		Enabled:           e.Enabled,
-		Migrated:          e.Migrated,
-		CreatedAt:         e.CreatedAt,
-		LastUsedAt:        e.LastUsedAt,
-		TokenLimit:        e.TokenLimit,
-		CreditLimit:       e.CreditLimit,
-		RequestsPerMinute: e.RequestsPerMinute,
-		TokensPerMinute:   e.TokensPerMinute,
-		MaxConcurrency:    e.MaxConcurrency,
-		QueueCapacity:     e.QueueCapacity,
-		QueueTimeoutMs:    e.QueueTimeoutMs,
-		TokensUsed:        e.TokensUsed,
-		CreditsUsed:       e.CreditsUsed,
-		RequestsCount:     e.RequestsCount,
+		ID:                   e.ID,
+		Name:                 e.Name,
+		KeyMasked:            config.MaskApiKey(e.Key),
+		Enabled:              e.Enabled,
+		ModelFallbackEnabled: cloneOptionalBool(e.ModelFallbackEnabled),
+		Migrated:             e.Migrated,
+		CreatedAt:            e.CreatedAt,
+		LastUsedAt:           e.LastUsedAt,
+		TokenLimit:           e.TokenLimit,
+		CreditLimit:          e.CreditLimit,
+		RequestsPerMinute:    e.RequestsPerMinute,
+		TokensPerMinute:      e.TokensPerMinute,
+		MaxConcurrency:       e.MaxConcurrency,
+		QueueCapacity:        e.QueueCapacity,
+		QueueTimeoutMs:       e.QueueTimeoutMs,
+		TokensUsed:           e.TokensUsed,
+		CreditsUsed:          e.CreditsUsed,
+		RequestsCount:        e.RequestsCount,
 	}
 }
 
@@ -74,16 +76,39 @@ func (h *Handler) apiGetApiKey(w http.ResponseWriter, r *http.Request, id string
 }
 
 type apiKeyCreateRequest struct {
-	Name              string  `json:"name,omitempty"`
-	Key               string  `json:"key,omitempty"`
-	Enabled           *bool   `json:"enabled,omitempty"`
-	TokenLimit        int64   `json:"tokenLimit,omitempty"`
-	CreditLimit       float64 `json:"creditLimit,omitempty"`
-	RequestsPerMinute int     `json:"requestsPerMinute,omitempty"`
-	TokensPerMinute   int64   `json:"tokensPerMinute,omitempty"`
-	MaxConcurrency    int     `json:"maxConcurrency,omitempty"`
-	QueueCapacity     int     `json:"queueCapacity,omitempty"`
-	QueueTimeoutMs    int     `json:"queueTimeoutMs,omitempty"`
+	Name                 string          `json:"name,omitempty"`
+	Key                  string          `json:"key,omitempty"`
+	Enabled              *bool           `json:"enabled,omitempty"`
+	ModelFallbackEnabled json.RawMessage `json:"modelFallbackEnabled,omitempty"`
+	TokenLimit           int64           `json:"tokenLimit,omitempty"`
+	CreditLimit          float64         `json:"creditLimit,omitempty"`
+	RequestsPerMinute    int             `json:"requestsPerMinute,omitempty"`
+	TokensPerMinute      int64           `json:"tokensPerMinute,omitempty"`
+	MaxConcurrency       int             `json:"maxConcurrency,omitempty"`
+	QueueCapacity        int             `json:"queueCapacity,omitempty"`
+	QueueTimeoutMs       int             `json:"queueTimeoutMs,omitempty"`
+}
+
+func cloneOptionalBool(value *bool) *bool {
+	if value == nil {
+		return nil
+	}
+	copyValue := *value
+	return &copyValue
+}
+
+func decodeOptionalBool(raw json.RawMessage) (*bool, bool, error) {
+	if len(raw) == 0 {
+		return nil, false, nil
+	}
+	if strings.EqualFold(strings.TrimSpace(string(raw)), "null") {
+		return nil, true, nil
+	}
+	var value bool
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return nil, true, fmt.Errorf("modelFallbackEnabled must be a boolean or null")
+	}
+	return &value, true, nil
 }
 
 func (h *Handler) apiCreateApiKey(w http.ResponseWriter, r *http.Request) {
@@ -98,6 +123,12 @@ func (h *Handler) apiCreateApiKey(w http.ResponseWriter, r *http.Request) {
 	if req.Enabled != nil {
 		enabled = *req.Enabled
 	}
+	fallbackEnabled, _, err := decodeOptionalBool(req.ModelFallbackEnabled)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
 	if err := validateApiKeyAdmissionLimits(req.RequestsPerMinute, req.TokensPerMinute, req.MaxConcurrency, req.QueueCapacity, req.QueueTimeoutMs); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
@@ -110,16 +141,17 @@ func (h *Handler) apiCreateApiKey(w http.ResponseWriter, r *http.Request) {
 	}
 
 	entry, err := config.AddApiKey(config.ApiKeyEntry{
-		Name:              req.Name,
-		Key:               keyValue,
-		Enabled:           enabled,
-		TokenLimit:        req.TokenLimit,
-		CreditLimit:       req.CreditLimit,
-		RequestsPerMinute: req.RequestsPerMinute,
-		TokensPerMinute:   req.TokensPerMinute,
-		MaxConcurrency:    req.MaxConcurrency,
-		QueueCapacity:     req.QueueCapacity,
-		QueueTimeoutMs:    req.QueueTimeoutMs,
+		Name:                 req.Name,
+		Key:                  keyValue,
+		Enabled:              enabled,
+		ModelFallbackEnabled: cloneOptionalBool(fallbackEnabled),
+		TokenLimit:           req.TokenLimit,
+		CreditLimit:          req.CreditLimit,
+		RequestsPerMinute:    req.RequestsPerMinute,
+		TokensPerMinute:      req.TokensPerMinute,
+		MaxConcurrency:       req.MaxConcurrency,
+		QueueCapacity:        req.QueueCapacity,
+		QueueTimeoutMs:       req.QueueTimeoutMs,
 	})
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -189,16 +221,17 @@ func (h *Handler) apiCreateApiKeysBatch(w http.ResponseWriter, r *http.Request) 
 }
 
 type apiKeyUpdateRequest struct {
-	Name              *string  `json:"name,omitempty"`
-	Key               *string  `json:"key,omitempty"`
-	Enabled           *bool    `json:"enabled,omitempty"`
-	TokenLimit        *int64   `json:"tokenLimit,omitempty"`
-	CreditLimit       *float64 `json:"creditLimit,omitempty"`
-	RequestsPerMinute *int     `json:"requestsPerMinute,omitempty"`
-	TokensPerMinute   *int64   `json:"tokensPerMinute,omitempty"`
-	MaxConcurrency    *int     `json:"maxConcurrency,omitempty"`
-	QueueCapacity     *int     `json:"queueCapacity,omitempty"`
-	QueueTimeoutMs    *int     `json:"queueTimeoutMs,omitempty"`
+	Name                 *string         `json:"name,omitempty"`
+	Key                  *string         `json:"key,omitempty"`
+	Enabled              *bool           `json:"enabled,omitempty"`
+	ModelFallbackEnabled json.RawMessage `json:"modelFallbackEnabled,omitempty"`
+	TokenLimit           *int64          `json:"tokenLimit,omitempty"`
+	CreditLimit          *float64        `json:"creditLimit,omitempty"`
+	RequestsPerMinute    *int            `json:"requestsPerMinute,omitempty"`
+	TokensPerMinute      *int64          `json:"tokensPerMinute,omitempty"`
+	MaxConcurrency       *int            `json:"maxConcurrency,omitempty"`
+	QueueCapacity        *int            `json:"queueCapacity,omitempty"`
+	QueueTimeoutMs       *int            `json:"queueTimeoutMs,omitempty"`
 }
 
 func (h *Handler) apiUpdateApiKey(w http.ResponseWriter, r *http.Request, id string) {
@@ -217,6 +250,15 @@ func (h *Handler) apiUpdateApiKey(w http.ResponseWriter, r *http.Request, id str
 	}
 
 	patch := *existing
+	fallbackEnabled, fallbackEnabledSet, err := decodeOptionalBool(req.ModelFallbackEnabled)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	if fallbackEnabledSet {
+		patch.ModelFallbackEnabled = cloneOptionalBool(fallbackEnabled)
+	}
 	if req.Name != nil {
 		patch.Name = *req.Name
 	}

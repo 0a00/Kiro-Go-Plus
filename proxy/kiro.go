@@ -305,31 +305,38 @@ type KiroPayload struct {
 	// integrity failure on the same account. It is internal request state and is
 	// intentionally not serialized to the upstream payload.
 	allowCoolingEndpointRetry bool
-	contextWindowTokens       int
-	hasSystemPriming          bool
-	requireActionableOutput   bool
-	requireToolUse            bool
-	deferTextUntilComplete    bool
-	streamThinkingPrecommit   bool
-	streamToolUseDeltas       bool
-	clientOutputTokenLimit    int
-	enforceClientOutputLimit  bool
-	toolUsePolicy             string
-	tokenRefreshMu            sync.Mutex
-	tokenRefreshAttempts      map[string]int
-	apiKeyRegionAttempts      map[string]int
-	streamMetricsMu           sync.Mutex
-	streamMetricsEnabled      bool
-	streamMetricsStartedAt    time.Time
-	firstUpstreamActivityMs   int64
-	maxToolAssemblyMs         int64
-	maxToolArgumentBytes      int
-	maxToolFragmentCount      int
-	toolTruncationCount       int
-	toolRecoveryAttempts      int
-	toolResultRepairs         int
-	toolSchemaRepairs         int
-	toolRecoveryHintApplied   bool
+	// Model fallback state is request-local and intentionally excluded from the
+	// upstream JSON payload.
+	modelFallbackInProgress  bool
+	modelFallbackApplied     bool
+	modelFallbackFrom        string
+	modelFallbackTo          string
+	modelFallbackRuleID      string
+	contextWindowTokens      int
+	hasSystemPriming         bool
+	requireActionableOutput  bool
+	requireToolUse           bool
+	deferTextUntilComplete   bool
+	streamThinkingPrecommit  bool
+	streamToolUseDeltas      bool
+	clientOutputTokenLimit   int
+	enforceClientOutputLimit bool
+	toolUsePolicy            string
+	tokenRefreshMu           sync.Mutex
+	tokenRefreshAttempts     map[string]int
+	apiKeyRegionAttempts     map[string]int
+	streamMetricsMu          sync.Mutex
+	streamMetricsEnabled     bool
+	streamMetricsStartedAt   time.Time
+	firstUpstreamActivityMs  int64
+	maxToolAssemblyMs        int64
+	maxToolArgumentBytes     int
+	maxToolFragmentCount     int
+	toolTruncationCount      int
+	toolRecoveryAttempts     int
+	toolResultRepairs        int
+	toolSchemaRepairs        int
+	toolRecoveryHintApplied  bool
 	// promptCacheTTL preserves an explicit Claude cache-control TTL across
 	// translation. It is intentionally not serialized to the Kiro API.
 	promptCacheTTL        time.Duration
@@ -586,6 +593,27 @@ func (p *KiroPayload) successfulEndpoint() string {
 	p.runtimeMu.RLock()
 	defer p.runtimeMu.RUnlock()
 	return p.selectedEndpoint
+}
+
+func (p *KiroPayload) recordModelFallback(from, to, ruleID string) {
+	if p == nil {
+		return
+	}
+	p.runtimeMu.Lock()
+	p.modelFallbackApplied = true
+	p.modelFallbackFrom = strings.TrimSpace(from)
+	p.modelFallbackTo = strings.TrimSpace(to)
+	p.modelFallbackRuleID = strings.TrimSpace(ruleID)
+	p.runtimeMu.Unlock()
+}
+
+func (p *KiroPayload) modelFallbackInfo() (applied bool, from, to, ruleID string) {
+	if p == nil {
+		return false, "", "", ""
+	}
+	p.runtimeMu.RLock()
+	defer p.runtimeMu.RUnlock()
+	return p.modelFallbackApplied, p.modelFallbackFrom, p.modelFallbackTo, p.modelFallbackRuleID
 }
 
 func (p *KiroPayload) takeTokenRefreshAttempt(account *config.Account) bool {
@@ -860,8 +888,10 @@ func getRequestEndpointsForAccount(preferred string, payload *KiroPayload, accou
 	return endpoints
 }
 
-// CallKiroAPI calls the Kiro streaming API, trying each configured endpoint with automatic fallback.
-func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroStreamCallback) error {
+// callKiroAPISingleModel calls the Kiro streaming API for one model, trying
+// each configured endpoint with automatic fallback. Model degradation is
+// handled by the public CallKiroAPI wrapper in model_fallback.go.
+func callKiroAPISingleModel(account *config.Account, payload *KiroPayload, callback *KiroStreamCallback) error {
 	requestContext := context.Background()
 	if payload != nil && payload.requestContext != nil {
 		requestContext = payload.requestContext
@@ -1272,7 +1302,7 @@ endpointLoop:
 				if upstreamErr, ok := asUpstreamError(lastErr); ok && upstreamErr.RefreshToken &&
 					payload != nil && payload.takeTokenRefreshAttempt(account) && !isKiroAPIKeyAccount(account) {
 					if refreshErr := sharedTokenRefreshCoordinator.RefreshContext(requestContext, account, true); refreshErr == nil {
-						return CallKiroAPI(account, payload, callback)
+						return callKiroAPISingleModel(account, payload, callback)
 					} else {
 						return classifyRefreshFailure(ep.Name, refreshErr)
 					}

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"kiro-go/config"
+	"kiro-go/logger"
 	"net/http"
 	"strings"
 	"sync"
@@ -212,6 +213,14 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 	thinkingCfg := config.GetThinkingConfig()
 	contextWindowTokens := applyOpenAITokenBudgetDefaults(openaiReq)
 	actualModel, thinking := ParseModelAndThinking(req.Model, thinkingCfg.Suffix)
+	apiKeyID := apiKeyIDFromContext(r.Context())
+	requestedModel := req.Model
+	var fallbackDecision modelFallbackDecision
+	if routedModel, decision, changed := h.resolveRequestModelRoute(req.Model, actualModel, apiKeyID); changed {
+		actualModel = routedModel
+		fallbackDecision = decision
+		logger.Warnf("[ModelFallback] routing %s to %s before dispatch (rule=%s)", requestedModel, actualModel, decision.Rule.ID)
+	}
 	if !h.requestedModelAvailable(req.Model, actualModel) {
 		h.sendOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "The requested model is not available")
 		return
@@ -238,13 +247,15 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 	kiroPayload.contextWindowTokens = contextWindowTokens
 	kiroPayload.clientOutputTokenLimit = openaiReq.MaxTokens
 	kiroPayload.enforceClientOutputLimit = openaiReq.MaxTokens > 0 && len(openaiReq.Tools) == 0
+	if fallbackDecision.TargetModel != "" {
+		kiroPayload.recordModelFallback(requestedModel, actualModel, fallbackDecision.Rule.ID)
+	}
 	truncatePayloadToLimit(kiroPayload, kiroPayload.hasSystemPriming)
 	if finalInputTokens := estimateKiroPayloadTokens(kiroPayload); finalInputTokens > 0 {
 		estimatedInputTokens = finalInputTokens
 	}
 	cacheProfile := h.promptCache.BuildKiroProfile(kiroPayload, estimatedInputTokens)
 
-	apiKeyID := apiKeyIDFromContext(r.Context())
 	namespaceConversationID(kiroPayload, requestConversationNamespace(r, apiKeyID))
 	respID := generateResponseID()
 	routeKey := responsesRouteKey(kiroPayload, req.PreviousResponseID, respID)

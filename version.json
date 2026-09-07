@@ -1,5 +1,5 @@
 {
-  "version": "1.2.64",
-  "changelog": "Prevent hot-loop account polling after tool-stream failures and improve long-task cancellation diagnostics.\n修复工具流失败后的账号忙循环轮询，并完善长任务客户端取消诊断。",
+  "version": "1.2.65",
+  "changelog": "Add scoped model fallback routing with per-API-key overrides.\n增加支持全局规则、按 Key 控制和多种触发方式的模型兜底路由。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }

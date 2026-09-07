@@ -33,6 +33,10 @@ type requestLogEntry struct {
 	APIKeyName               string   `json:"apiKeyName,omitempty"`
 	Protocol                 string   `json:"protocol"`
 	Model                    string   `json:"model"`
+	ModelFallbackApplied     bool     `json:"modelFallbackApplied,omitempty"`
+	ModelFallbackFrom        string   `json:"modelFallbackFrom,omitempty"`
+	ModelFallbackTo          string   `json:"modelFallbackTo,omitempty"`
+	ModelFallbackRuleID      string   `json:"modelFallbackRuleId,omitempty"`
 	AccountID                string   `json:"accountId,omitempty"`
 	AccountEmail             string   `json:"accountEmail,omitempty"`
 	Endpoint                 string   `json:"endpoint,omitempty"`
@@ -407,6 +411,7 @@ func (h *Handler) recordRequestLogForPayload(payload *KiroPayload, entry request
 			entry.Endpoint = payload.successfulEndpoint()
 		}
 		entry.APIKeyID = apiKeyIDFromContext(payload.requestContext)
+		entry.ModelFallbackApplied, entry.ModelFallbackFrom, entry.ModelFallbackTo, entry.ModelFallbackRuleID = payload.modelFallbackInfo()
 		if apiKey := config.GetApiKeyEntry(entry.APIKeyID); apiKey != nil {
 			entry.APIKeyName = apiKey.Name
 		}

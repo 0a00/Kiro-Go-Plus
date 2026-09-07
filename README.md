@@ -58,6 +58,30 @@ Pre-output stream retry defaults to one same-endpoint retry after 700 ms. It app
 
 Long-tool protection is enabled by default with one recovery retry and an 8192-token guidance limit. Optional preflight model fallback is disabled by default because model availability differs between accounts.
 
+Model fallback routing is disabled by default and can be configured under **Settings > Models & Generation > Model Fallback Routing**. Rules support exact, prefix, contains, and regular-expression matching. For example, route every Claude request to Sonnet 4.5:
+
+```json
+{
+  "enabled": true,
+  "defaultTrigger": "model_unavailable",
+  "maxHops": 1,
+  "rules": [
+    {
+      "id": "claude-to-sonnet45",
+      "name": "Claude -> Sonnet 4.5",
+      "enabled": true,
+      "matchType": "prefix",
+      "sourceModel": "claude-",
+      "targetModel": "claude-sonnet-4.5",
+      "trigger": "model_unavailable",
+      "apiKeyIds": []
+    }
+  ]
+}
+```
+
+An empty `apiKeyIds` list applies to every key; UUIDs restrict a rule to selected keys. Each API key can inherit the global setting, enable fallback, or disable it. `model_unavailable` switches only for unavailable models or upstream responses without actionable output; `upstream_error` also includes rate limits, timeouts, and transient upstream errors; `always` routes to the target before dispatch. A streamed request is never replayed after text, thinking, or tool fragments have reached the client.
+
 Explicit client output limits are forwarded to Kiro and enforced again for plain-text responses when an endpoint ignores a small limit; the proxy stops the stream with the protocol's `max_tokens`/length signal. Requests carrying tools keep complete structured arguments to avoid corrupting tool JSON, and upstream budget mismatches remain visible in diagnostics.
 
 Timeouts are activity-based where labeled as idle: tool-fragment assembly and high-risk actionable-output windows reset when thinking, progress, or tool fragments arrive, so they do not cap a sustained request's total duration. The stream idle timeout still applies when no upstream bytes arrive, and the request retry-duration budget remains the overall upper bound.

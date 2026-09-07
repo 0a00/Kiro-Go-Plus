@@ -196,7 +196,10 @@ func (h *Handler) runModelHealthProbe(parent context.Context, model string, kind
 		var visible, reasoning strings.Builder
 		var tools []KiroToolUse
 		startedAt := time.Now()
-		err := CallKiroAPI(account, payload, &KiroStreamCallback{
+		// Capability probes must test the requested model itself; a configured
+		// customer fallback must not turn an unavailable model into a false
+		// healthy result.
+		err := callKiroAPISingleModel(account, payload, &KiroStreamCallback{
 			OnText: func(text string, isThinking bool) {
 				if isThinking {
 					reasoning.WriteString(text)

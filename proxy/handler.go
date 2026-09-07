@@ -2066,6 +2066,12 @@ func (h *Handler) handleCountTokens(w http.ResponseWriter, r *http.Request) {
 	}
 
 	actualModel, thinking := resolveClaudeThinkingMode(req.Model, req.Thinking, thinkingCfg.Suffix)
+	requestedModel := req.Model
+	apiKeyID := apiKeyIDFromContext(r.Context())
+	if routedModel, decision, changed := h.resolveRequestModelRoute(req.Model, actualModel, apiKeyID); changed {
+		actualModel = routedModel
+		logger.Warnf("[ModelFallback] routing %s to %s for count_tokens (rule=%s)", requestedModel, actualModel, decision.Rule.ID)
+	}
 	req.Model = actualModel
 	h.prepareClaudeNativeEffort(&req, thinking)
 	effectiveReq := cloneClaudeRequestForThinking(&req, thinking)
@@ -2174,6 +2180,14 @@ func (h *Handler) handleClaudeMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	actualModel, thinking := resolveClaudeThinkingMode(req.Model, req.Thinking, thinkingCfg.Suffix)
+	apiKeyID := apiKeyIDFromContext(r.Context())
+	requestedModel := req.Model
+	var fallbackDecision modelFallbackDecision
+	if routedModel, decision, changed := h.resolveRequestModelRoute(req.Model, actualModel, apiKeyID); changed {
+		actualModel = routedModel
+		fallbackDecision = decision
+		logger.Warnf("[ModelFallback] routing %s to %s before dispatch (rule=%s)", requestedModel, actualModel, decision.Rule.ID)
+	}
 	if !h.requestedModelAvailable(req.Model, actualModel) {
 		h.sendClaudeError(w, http.StatusBadRequest, "invalid_request_error", "The requested model is not available")
 		return
@@ -2194,7 +2208,6 @@ func (h *Handler) handleClaudeMessages(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if config.GetWebSearchConfig().Enabled {
-		apiKeyID := apiKeyIDFromContext(r.Context())
 		if hasPureWebSearchTool(&req) {
 			h.handleClaudeWebSearch(r.Context(), w, &req, estimatedInputTokens, apiKeyID)
 			return
@@ -2215,6 +2228,9 @@ func (h *Handler) handleClaudeMessages(w http.ResponseWriter, r *http.Request) {
 	kiroPayload.contextWindowTokens = contextWindowTokens
 	kiroPayload.clientOutputTokenLimit = req.MaxTokens
 	kiroPayload.enforceClientOutputLimit = req.MaxTokens > 0 && len(req.Tools) == 0
+	if fallbackDecision.TargetModel != "" {
+		kiroPayload.recordModelFallback(requestedModel, actualModel, fallbackDecision.Rule.ID)
+	}
 	truncatePayloadToLimit(kiroPayload, kiroPayload.hasSystemPriming)
 	if finalInputTokens := estimateKiroPayloadTokens(kiroPayload); finalInputTokens > 0 {
 		estimatedInputTokens = finalInputTokens
@@ -2225,7 +2241,6 @@ func (h *Handler) handleClaudeMessages(w http.ResponseWriter, r *http.Request) {
 	cacheProfile := h.promptCache.BuildKiroProfile(kiroPayload, estimatedInputTokens)
 
 	// Stream or non-stream
-	apiKeyID := apiKeyIDFromContext(r.Context())
 	namespaceConversationID(kiroPayload, requestConversationNamespace(r, apiKeyID))
 	routeKey := kiroPayload.ConversationState.ConversationID
 	configureClaudeToolStreaming(kiroPayload, &req, thinking, thinkingResponseOpts, thinkingCfg)
@@ -3447,6 +3462,14 @@ func (h *Handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 	// 解析模型和 thinking 模式
 	thinkingCfg := config.GetThinkingConfig()
 	actualModel, thinking := ParseModelAndThinking(req.Model, thinkingCfg.Suffix)
+	apiKeyID := apiKeyIDFromContext(r.Context())
+	requestedModel := req.Model
+	var fallbackDecision modelFallbackDecision
+	if routedModel, decision, changed := h.resolveRequestModelRoute(req.Model, actualModel, apiKeyID); changed {
+		actualModel = routedModel
+		fallbackDecision = decision
+		logger.Warnf("[ModelFallback] routing %s to %s before dispatch (rule=%s)", requestedModel, actualModel, decision.Rule.ID)
+	}
 	if !h.requestedModelAvailable(req.Model, actualModel) {
 		h.sendOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "The requested model is not available")
 		return
@@ -3472,13 +3495,15 @@ func (h *Handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 	kiroPayload.contextWindowTokens = contextWindowTokens
 	kiroPayload.clientOutputTokenLimit = req.MaxTokens
 	kiroPayload.enforceClientOutputLimit = req.MaxTokens > 0 && len(req.Tools) == 0
+	if fallbackDecision.TargetModel != "" {
+		kiroPayload.recordModelFallback(requestedModel, actualModel, fallbackDecision.Rule.ID)
+	}
 	truncatePayloadToLimit(kiroPayload, kiroPayload.hasSystemPriming)
 	if finalInputTokens := estimateKiroPayloadTokens(kiroPayload); finalInputTokens > 0 {
 		estimatedInputTokens = finalInputTokens
 	}
 	cacheProfile := h.promptCache.BuildKiroProfile(kiroPayload, estimatedInputTokens)
 
-	apiKeyID := apiKeyIDFromContext(r.Context())
 	namespaceConversationID(kiroPayload, requestConversationNamespace(r, apiKeyID))
 	if req.Stream {
 		h.handleOpenAIStream(w, kiroPayload, req.Model, thinking, estimatedInputTokens, cacheProfile, apiKeyID)
@@ -4461,6 +4486,10 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 		h.apiGetModelRegistry(w, r)
 	case path == "/model-registry" && r.Method == "POST":
 		h.apiUpdateModelRegistry(w, r)
+	case path == "/model-fallback" && r.Method == "GET":
+		h.apiGetModelFallback(w, r)
+	case path == "/model-fallback" && r.Method == "POST":
+		h.apiUpdateModelFallback(w, r)
 	case path == "/model-health" && r.Method == "GET":
 		h.apiGetModelHealth(w, r)
 	case path == "/model-health/test" && r.Method == "POST":

@@ -843,6 +843,9 @@
       if (item.toolSchemaRepairs) {
         outcomeParts.push(t('requests.toolSchemaRepairs', item.toolSchemaRepairs));
       }
+      if (item.modelFallbackApplied && item.modelFallbackTo) {
+        outcomeParts.push(t('requests.modelFallback', item.modelFallbackTo));
+      }
       const outcome = outcomeParts.join(' · ') || '-';
       const toolPayloadTitle = item.toolArgumentBytes
         ? ' · ' + t('requests.toolPayload', item.toolArgumentBytes, item.toolFragmentCount || 0)
@@ -2002,6 +2005,7 @@
       loadLongToolConfig(),
       loadResponsesStorageConfig(),
       loadModelRegistryConfig(),
+      loadModelFallbackConfig(),
       loadModelHealth(),
       loadHealthConfig(),
       loadThinkingConfig(),
@@ -2289,6 +2293,47 @@
     const models = Array.isArray(d.models) ? d.models : [];
     $('modelRegistryJson').value = JSON.stringify(models, null, 2);
     if (!$('modelHealthModel').value.trim()) $('modelHealthModel').value = (models[0] && models[0].id) || 'claude-sonnet-4-6';
+  }
+
+  async function loadModelFallbackConfig() {
+    const res = await api('/model-fallback');
+    const d = await res.json();
+    $('modelFallbackEnabled').checked = d.enabled === true;
+    $('modelFallbackDefaultTrigger').value = d.defaultTrigger || 'model_unavailable';
+    $('modelFallbackMaxHops').value = d.maxHops || 1;
+    $('modelFallbackRulesJson').value = JSON.stringify(Array.isArray(d.rules) ? d.rules : [], null, 2);
+  }
+
+  async function saveModelFallbackConfig() {
+    let rules;
+    try {
+      rules = JSON.parse($('modelFallbackRulesJson').value || '[]');
+      if (!Array.isArray(rules)) throw new Error('rules must be an array');
+    } catch (e) {
+      toast(t('settings.modelFallbackInvalid') + ': ' + e.message, 'warning');
+      return;
+    }
+    const maxHops = Math.round(Number($('modelFallbackMaxHops').value) || 0);
+    if (maxHops < 1 || maxHops > 5) {
+      toast(t('settings.modelFallbackInvalid'), 'warning');
+      return;
+    }
+    const res = await api('/model-fallback', {
+      method: 'POST',
+      body: JSON.stringify({
+        enabled: $('modelFallbackEnabled').checked,
+        defaultTrigger: $('modelFallbackDefaultTrigger').value,
+        maxHops,
+        rules
+      })
+    });
+    const d = await res.json().catch(() => ({}));
+    if (!res.ok || d.success === false) {
+      toast(t('common.saveFailed') + ': ' + (d.error || t('common.unknownError')), 'error');
+      return;
+    }
+    toast(t('settings.modelFallbackSaved'), 'success');
+    loadModelFallbackConfig();
   }
   async function saveModelRegistryConfig() {
     const ttl = Math.round(Number($('modelNegativeCacheTTLSeconds').value) || 0);
@@ -3218,6 +3263,9 @@
       const disabled = !item.enabled
         ? '<span class="text-xs" style="background:rgba(239,68,68,0.15);color:#ef4444;padding:1px 6px;border-radius:4px;">' + escapeHtml(t('apiKeys.disabled')) + '</span>'
         : '';
+      const fallbackState = item.modelFallbackEnabled === undefined
+        ? t('apiKeys.formModelFallbackInherit')
+        : (item.modelFallbackEnabled ? t('apiKeys.formModelFallbackEnabled') : t('apiKeys.formModelFallbackDisabled'));
       const tokensLine = usageLine(t('apiKeys.tokens'), item.tokensUsed || 0, item.tokenLimit || 0);
       const creditsLine = usageLine(t('apiKeys.credits'), item.creditsUsed || 0, item.creditLimit || 0);
       const requestsLine = '<div class="text-xs muted-text">' + escapeHtml(t('apiKeys.requests')) + ': ' + escapeHtml(formatNumber(item.requestsCount || 0)) + '</div>';
@@ -3228,6 +3276,8 @@
             migrated +
             disabled +
             '<span class="text-xs muted-text font-mono">' + masked + '</span>' +
+            '<span class="text-xs muted-text">' + escapeHtml(t('apiKeys.fallbackShort')) + ': ' + escapeHtml(fallbackState) + '</span>' +
+            '<span class="text-xs muted-text font-mono">' + escapeHtml(t('apiKeys.idShort')) + ': ' + escapeHtml(item.id || '') + '</span>' +
           '</div>' +
           '<div class="flex items-center gap-2">' +
             '<label class="switch" title="' + escapeAttr(item.enabled ? t('accounts.disable') : t('accounts.enable')) + '">' +
@@ -3263,6 +3313,12 @@
       keyEl.readOnly = false;
     }
     $('apiKeyForm_enabled').checked = entry ? !!entry.enabled : true;
+    const fallbackSelect = $('apiKeyForm_modelFallbackEnabled');
+    if (fallbackSelect) {
+      fallbackSelect.value = !entry || entry.modelFallbackEnabled === undefined
+        ? 'inherit'
+        : (entry.modelFallbackEnabled ? 'enabled' : 'disabled');
+    }
     $('apiKeyForm_tokenLimit').value = entry ? String(entry.tokenLimit || 0) : '0';
     $('apiKeyForm_creditLimit').value = entry ? String(entry.creditLimit || 0) : '0';
 	$('apiKeyForm_requestsPerMinute').value = entry ? String(entry.requestsPerMinute || 0) : '0';
@@ -3337,6 +3393,7 @@
     try {
       const name = $('apiKeyForm_name').value.trim();
       const enabled = $('apiKeyForm_enabled').checked;
+      const fallbackMode = $('apiKeyForm_modelFallbackEnabled').value;
       const tokenLimit = parseInt($('apiKeyForm_tokenLimit').value, 10);
       const creditLimit = parseFloat($('apiKeyForm_creditLimit').value);
 	  const requestsPerMinute = parseInt($('apiKeyForm_requestsPerMinute').value, 10);
@@ -3347,6 +3404,7 @@
       const payload = {
         name: name,
         enabled: enabled,
+        modelFallbackEnabled: fallbackMode === 'inherit' ? null : fallbackMode === 'enabled',
         tokenLimit: isNaN(tokenLimit) || tokenLimit < 0 ? 0 : tokenLimit,
 		creditLimit: isNaN(creditLimit) || creditLimit < 0 ? 0 : creditLimit,
 		requestsPerMinute: isNaN(requestsPerMinute) || requestsPerMinute < 0 ? 0 : requestsPerMinute,
@@ -4858,6 +4916,7 @@
     $('saveResponsesStorageBtn').addEventListener('click', saveResponsesStorageConfig);
     $('purgeResponsesStorageBtn').addEventListener('click', purgeResponsesStorage);
     $('saveModelRegistryBtn').addEventListener('click', saveModelRegistryConfig);
+    $('saveModelFallbackBtn').addEventListener('click', saveModelFallbackConfig);
     $('testModelHealthBtn').addEventListener('click', testModelHealth);
     $('refreshModelHealthBtn').addEventListener('click', loadModelHealth);
     $('saveHealthBtn').addEventListener('click', saveHealthConfig);

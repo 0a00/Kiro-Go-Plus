@@ -21,6 +21,7 @@ import (
 	"kiro-go/internal/outboundproxy"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -155,13 +156,16 @@ type PromptFilterRule struct {
 // Limits with value 0 are treated as "no limit". Counters are cumulative and never reset
 // automatically; operators can use the admin endpoint to manually reset them.
 type ApiKeyEntry struct {
-	ID         string `json:"id"`                 // Unique identifier (UUID)
-	Name       string `json:"name,omitempty"`     // Human-readable label
-	Key        string `json:"key"`                // The actual key value clients send
-	Enabled    bool   `json:"enabled"`            // Whether this key may authenticate
-	Migrated   bool   `json:"migrated,omitempty"` // True if migrated from legacy single ApiKey field
-	CreatedAt  int64  `json:"createdAt"`          // Creation timestamp (Unix seconds)
-	LastUsedAt int64  `json:"lastUsedAt,omitempty"`
+	ID      string `json:"id"`             // Unique identifier (UUID)
+	Name    string `json:"name,omitempty"` // Human-readable label
+	Key     string `json:"key"`            // The actual key value clients send
+	Enabled bool   `json:"enabled"`        // Whether this key may authenticate
+	// ModelFallbackEnabled overrides the global model-fallback switch. A nil
+	// value inherits the global setting; false disables fallback for this key.
+	ModelFallbackEnabled *bool `json:"modelFallbackEnabled,omitempty"`
+	Migrated             bool  `json:"migrated,omitempty"` // True if migrated from legacy single ApiKey field
+	CreatedAt            int64 `json:"createdAt"`          // Creation timestamp (Unix seconds)
+	LastUsedAt           int64 `json:"lastUsedAt,omitempty"`
 
 	// Limits (0 = unlimited)
 	TokenLimit        int64   `json:"tokenLimit,omitempty"`
@@ -316,6 +320,42 @@ type ModelRegistryConfig struct {
 	Models                  []ModelEntry `json:"models,omitempty"`
 }
 
+// ModelFallbackRule describes a scoped model degradation route. An empty
+// APIKeyIDs list applies to every API key. Rules are evaluated by priority and
+// then by their order in the configuration.
+type ModelFallbackRule struct {
+	ID          string   `json:"id"`
+	Name        string   `json:"name"`
+	Enabled     bool     `json:"enabled"`
+	MatchType   string   `json:"matchType"` // exact, prefix, contains, regex
+	SourceModel string   `json:"sourceModel"`
+	TargetModel string   `json:"targetModel"`
+	Trigger     string   `json:"trigger,omitempty"` // model_unavailable, upstream_error, always
+	Priority    int      `json:"priority,omitempty"`
+	APIKeyIDs   []string `json:"apiKeyIds,omitempty"`
+}
+
+// ModelFallbackConfig controls optional model degradation routes.
+type ModelFallbackConfig struct {
+	Enabled        bool                `json:"enabled"`
+	DefaultTrigger string              `json:"defaultTrigger"`
+	MaxHops        int                 `json:"maxHops"`
+	Rules          []ModelFallbackRule `json:"rules,omitempty"`
+}
+
+const (
+	ModelFallbackTriggerModelUnavailable = "model_unavailable"
+	ModelFallbackTriggerUpstreamError    = "upstream_error"
+	ModelFallbackTriggerAlways           = "always"
+	ModelFallbackMatchExact              = "exact"
+	ModelFallbackMatchPrefix             = "prefix"
+	ModelFallbackMatchContains           = "contains"
+	ModelFallbackMatchRegex              = "regex"
+	DefaultModelFallbackMaxHops          = 1
+	MaxModelFallbackMaxHops              = 5
+	MaxModelFallbackRules                = 100
+)
+
 // HealthConfig controls readiness thresholds and optional webhook notifications.
 type HealthConfig struct {
 	MinReadyAccounts       int     `json:"minReadyAccounts"`
@@ -452,6 +492,9 @@ type Config struct {
 	// ModelRegistry provides hot-reloadable model aliases and metadata.
 	ModelRegistry ModelRegistryConfig `json:"modelRegistry,omitempty"`
 
+	// ModelFallback provides optional scoped model degradation routes.
+	ModelFallback ModelFallbackConfig `json:"modelFallback,omitempty"`
+
 	// Health controls readiness and production notifications.
 	Health HealthConfig `json:"health,omitempty"`
 
@@ -565,7 +608,7 @@ const (
 )
 
 // Version current version
-const Version = "1.2.64"
+const Version = "1.2.65"
 
 var (
 	cfg           *Config
@@ -625,6 +668,7 @@ func loadLocked() error {
 				LongTool:                  defaultLongToolConfig(),
 				ResponsesStorage:          defaultResponsesStorageConfig(),
 				ModelRegistry:             defaultModelRegistryConfig(),
+				ModelFallback:             defaultModelFallbackConfig(),
 				Health:                    defaultHealthConfig(),
 				Diagnostics:               defaultDiagnosticConfig(),
 				RequestLog:                defaultRequestLogConfig(),
@@ -754,6 +798,9 @@ func loadLocked() error {
 	if !rawConfigHasKey(data, "modelRegistry") {
 		c.ModelRegistry = defaultModelRegistryConfig()
 	}
+	if !rawConfigHasKey(data, "modelFallback") {
+		c.ModelFallback = defaultModelFallbackConfig()
+	}
 	if !rawConfigHasKey(data, "health") {
 		c.Health = defaultHealthConfig()
 	}
@@ -807,6 +854,7 @@ func loadLocked() error {
 	normalizeLongToolLocked()
 	normalizeResponsesStorageLocked()
 	normalizeModelRegistryLocked()
+	normalizeModelFallbackLocked()
 	normalizeHealthLocked()
 	normalizeDiagnosticLocked()
 	normalizeRequestLogLocked()
@@ -1440,6 +1488,92 @@ func normalizeModelRegistryLocked() {
 	for i := range cfg.ModelRegistry.Models {
 		normalizeModelEntry(&cfg.ModelRegistry.Models[i])
 	}
+}
+
+func defaultModelFallbackConfig() ModelFallbackConfig {
+	return ModelFallbackConfig{
+		Enabled:        false,
+		DefaultTrigger: ModelFallbackTriggerModelUnavailable,
+		MaxHops:        DefaultModelFallbackMaxHops,
+		Rules:          []ModelFallbackRule{},
+	}
+}
+
+func normalizeModelFallbackLocked() {
+	if cfg == nil {
+		return
+	}
+	defaults := defaultModelFallbackConfig()
+	value := cfg.ModelFallback
+	switch value.DefaultTrigger {
+	case "unavailable":
+		value.DefaultTrigger = ModelFallbackTriggerModelUnavailable
+	case "error", "on_error":
+		value.DefaultTrigger = ModelFallbackTriggerUpstreamError
+	}
+	if value.DefaultTrigger != ModelFallbackTriggerModelUnavailable &&
+		value.DefaultTrigger != ModelFallbackTriggerUpstreamError &&
+		value.DefaultTrigger != ModelFallbackTriggerAlways {
+		value.DefaultTrigger = defaults.DefaultTrigger
+	}
+	if value.MaxHops < 1 {
+		value.MaxHops = defaults.MaxHops
+	}
+	if value.MaxHops > MaxModelFallbackMaxHops {
+		value.MaxHops = MaxModelFallbackMaxHops
+	}
+	if value.Rules == nil {
+		value.Rules = []ModelFallbackRule{}
+	}
+	if len(value.Rules) > MaxModelFallbackRules {
+		value.Rules = value.Rules[:MaxModelFallbackRules]
+	}
+	for i := range value.Rules {
+		normalizeModelFallbackRule(&value.Rules[i])
+	}
+	cfg.ModelFallback = value
+}
+
+func normalizeModelFallbackRule(rule *ModelFallbackRule) {
+	if rule == nil {
+		return
+	}
+	rule.ID = strings.TrimSpace(rule.ID)
+	if rule.ID == "" {
+		rule.ID = newUUID()
+	}
+	rule.Name = strings.TrimSpace(rule.Name)
+	rule.MatchType = strings.ToLower(strings.TrimSpace(rule.MatchType))
+	if rule.MatchType == "" {
+		rule.MatchType = ModelFallbackMatchExact
+	}
+	rule.SourceModel = strings.TrimSpace(rule.SourceModel)
+	rule.TargetModel = strings.TrimSpace(rule.TargetModel)
+	rule.Trigger = strings.ToLower(strings.TrimSpace(rule.Trigger))
+	switch rule.Trigger {
+	case "unavailable":
+		rule.Trigger = ModelFallbackTriggerModelUnavailable
+	case "error", "on_error":
+		rule.Trigger = ModelFallbackTriggerUpstreamError
+	}
+	if rule.Name == "" {
+		rule.Name = rule.SourceModel + " -> " + rule.TargetModel
+	}
+	seen := make(map[string]struct{}, len(rule.APIKeyIDs))
+	ids := make([]string, 0, len(rule.APIKeyIDs))
+	for _, id := range rule.APIKeyIDs {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		key := strings.ToLower(id)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		ids = append(ids, id)
+	}
+	rule.APIKeyIDs = ids
 }
 
 func normalizeModelEntry(entry *ModelEntry) {
@@ -2153,6 +2287,100 @@ func UpdateModelRegistryConfig(registry ModelRegistryConfig) error {
 	cfg.ModelRegistry = registry
 	normalizeModelRegistryLocked()
 	return Save()
+}
+
+func GetModelFallbackConfig() ModelFallbackConfig {
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	if cfg == nil {
+		return defaultModelFallbackConfig()
+	}
+	out := cfg.ModelFallback
+	if out.Rules == nil {
+		out.Rules = []ModelFallbackRule{}
+	}
+	out.Rules = append([]ModelFallbackRule(nil), out.Rules...)
+	for i := range out.Rules {
+		out.Rules[i].APIKeyIDs = append([]string(nil), out.Rules[i].APIKeyIDs...)
+	}
+	return out
+}
+
+func UpdateModelFallbackConfig(fallback ModelFallbackConfig) error {
+	defaults := defaultModelFallbackConfig()
+	fallback.DefaultTrigger = strings.ToLower(strings.TrimSpace(fallback.DefaultTrigger))
+	switch fallback.DefaultTrigger {
+	case "unavailable":
+		fallback.DefaultTrigger = ModelFallbackTriggerModelUnavailable
+	case "error", "on_error":
+		fallback.DefaultTrigger = ModelFallbackTriggerUpstreamError
+	}
+	if fallback.DefaultTrigger == "" {
+		fallback.DefaultTrigger = defaults.DefaultTrigger
+	}
+	if fallback.MaxHops == 0 {
+		fallback.MaxHops = defaults.MaxHops
+	}
+	for i := range fallback.Rules {
+		normalizeModelFallbackRule(&fallback.Rules[i])
+	}
+	if err := validateModelFallbackConfig(fallback); err != nil {
+		return err
+	}
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	cfg.ModelFallback = fallback
+	normalizeModelFallbackLocked()
+	return Save()
+}
+
+func validateModelFallbackConfig(fallback ModelFallbackConfig) error {
+	if fallback.DefaultTrigger != ModelFallbackTriggerModelUnavailable &&
+		fallback.DefaultTrigger != ModelFallbackTriggerUpstreamError &&
+		fallback.DefaultTrigger != ModelFallbackTriggerAlways {
+		return fmt.Errorf("defaultTrigger must be one of %s, %s, %s", ModelFallbackTriggerModelUnavailable, ModelFallbackTriggerUpstreamError, ModelFallbackTriggerAlways)
+	}
+	if fallback.MaxHops < 1 || fallback.MaxHops > MaxModelFallbackMaxHops {
+		return fmt.Errorf("maxHops must be between 1 and %d", MaxModelFallbackMaxHops)
+	}
+	if len(fallback.Rules) > MaxModelFallbackRules {
+		return fmt.Errorf("at most %d model fallback rules are allowed", MaxModelFallbackRules)
+	}
+	seenIDs := make(map[string]struct{}, len(fallback.Rules))
+	for _, rule := range fallback.Rules {
+		id := strings.TrimSpace(rule.ID)
+		if id == "" {
+			return fmt.Errorf("model fallback rule id is required")
+		}
+		if _, exists := seenIDs[strings.ToLower(id)]; exists {
+			return fmt.Errorf("duplicate model fallback rule id: %s", id)
+		}
+		seenIDs[strings.ToLower(id)] = struct{}{}
+		if strings.TrimSpace(rule.SourceModel) == "" || strings.TrimSpace(rule.TargetModel) == "" {
+			return fmt.Errorf("model fallback rule %s requires sourceModel and targetModel", id)
+		}
+		if len(rule.SourceModel) > 512 || len(rule.TargetModel) > 128 {
+			return fmt.Errorf("model fallback rule %s has an oversized model pattern or target", id)
+		}
+		switch strings.ToLower(strings.TrimSpace(rule.MatchType)) {
+		case ModelFallbackMatchExact, ModelFallbackMatchPrefix, ModelFallbackMatchContains, ModelFallbackMatchRegex:
+		default:
+			return fmt.Errorf("model fallback rule %s has invalid matchType", id)
+		}
+		trigger := strings.ToLower(strings.TrimSpace(rule.Trigger))
+		if trigger != "" && trigger != ModelFallbackTriggerModelUnavailable && trigger != ModelFallbackTriggerUpstreamError && trigger != ModelFallbackTriggerAlways {
+			return fmt.Errorf("model fallback rule %s has invalid trigger", id)
+		}
+		if strings.ContainsAny(rule.TargetModel, " \t\r\n") || strings.EqualFold(strings.TrimSpace(rule.TargetModel), "auto") {
+			return fmt.Errorf("model fallback rule %s has invalid targetModel", id)
+		}
+		if strings.EqualFold(strings.TrimSpace(rule.MatchType), ModelFallbackMatchRegex) {
+			if _, err := regexp.Compile(rule.SourceModel); err != nil {
+				return fmt.Errorf("model fallback rule %s has invalid regex: %w", id, err)
+			}
+		}
+	}
+	return nil
 }
 
 func validateModelEntries(models []ModelEntry) error {

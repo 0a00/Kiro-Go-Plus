@@ -854,6 +854,71 @@ func TestConfiguredModelResolutionUsesExactThenLongestKeyword(t *testing.T) {
 	}
 }
 
+func TestModelFallbackConfigDefaultsAndValidation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := Init(path); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	defaults := GetModelFallbackConfig()
+	if defaults.Enabled || defaults.DefaultTrigger != ModelFallbackTriggerModelUnavailable || defaults.MaxHops != DefaultModelFallbackMaxHops {
+		t.Fatalf("unexpected fallback defaults: %+v", defaults)
+	}
+
+	rule := ModelFallbackRule{
+		Name:        "all Claude",
+		Enabled:     true,
+		MatchType:   ModelFallbackMatchPrefix,
+		SourceModel: "claude-",
+		TargetModel: "claude-sonnet-4.5",
+		APIKeyIDs:   []string{"key-a", "key-a"},
+	}
+	if err := UpdateModelFallbackConfig(ModelFallbackConfig{Enabled: true, Rules: []ModelFallbackRule{rule}}); err != nil {
+		t.Fatalf("update fallback config: %v", err)
+	}
+	got := GetModelFallbackConfig()
+	if !got.Enabled || got.DefaultTrigger != ModelFallbackTriggerModelUnavailable || got.MaxHops != 1 || len(got.Rules) != 1 || got.Rules[0].ID == "" || len(got.Rules[0].APIKeyIDs) != 1 {
+		t.Fatalf("unexpected normalized fallback config: %+v", got)
+	}
+	if err := UpdateModelFallbackConfig(ModelFallbackConfig{
+		Enabled:        true,
+		DefaultTrigger: ModelFallbackTriggerModelUnavailable,
+		MaxHops:        1,
+		Rules: []ModelFallbackRule{{
+			ID: "bad", Enabled: true, MatchType: ModelFallbackMatchRegex,
+			SourceModel: "[", TargetModel: "claude-sonnet-4.5",
+		}},
+	}); err == nil {
+		t.Fatal("invalid fallback regex was accepted")
+	}
+}
+
+func TestApiKeyModelFallbackOverridePersistsAndCopies(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := Init(path); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	disabled := false
+	entry, err := AddApiKey(ApiKeyEntry{ID: "fallback-override", Key: "sk-override", Enabled: true, ModelFallbackEnabled: &disabled})
+	if err != nil {
+		t.Fatalf("add api key: %v", err)
+	}
+	listed := ListApiKeys()
+	if len(listed) != 1 || listed[0].ModelFallbackEnabled == nil || *listed[0].ModelFallbackEnabled {
+		t.Fatalf("unexpected listed override: %+v", listed)
+	}
+	*listed[0].ModelFallbackEnabled = true
+	loaded := GetApiKeyEntry(entry.ID)
+	if loaded == nil || loaded.ModelFallbackEnabled == nil || *loaded.ModelFallbackEnabled {
+		t.Fatal("mutating a returned API key changed live config")
+	}
+	if err := UpdateApiKey(entry.ID, ApiKeyEntry{Enabled: true, ModelFallbackEnabled: nil}); err != nil {
+		t.Fatalf("clear override: %v", err)
+	}
+	if got := GetApiKeyEntry(entry.ID); got == nil || got.ModelFallbackEnabled != nil {
+		t.Fatalf("expected inherited override after clear: %+v", got)
+	}
+}
+
 func TestOfficialModelNamesDefaultMigrationAndPersistence(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	if err := Init(path); err != nil {
