@@ -59,6 +59,26 @@ test('analyzeCredentialFiles enforces source and account limits', async () => {
   assert.deepEqual(tooMany.errors.map(error => error.code), ['too_many_accounts']);
 });
 
+test('analyzeCredentialFiles reports progress for large imports', async () => {
+  const events = [];
+  const records = Array.from({ length: 1200 }, (_, index) => ({ refreshToken: 'refresh-' + index }));
+  const result = await credentialImport.analyzeCredentialFiles([jsonFile(records)], {
+    onProgress: event => events.push(event)
+  });
+  assert.equal(result.accountCount, 1200);
+  assert.ok(events.some(event => event.phase === 'reading'));
+  assert.ok(events.some(event => event.phase === 'parsing'));
+  assert.ok(events.some(event => event.phase === 'file-complete'));
+});
+
+test('splitCredentialBatch keeps large imports bounded and lossless', () => {
+  const records = Array.from({ length: 1001 }, (_, index) => ({ refreshToken: 'refresh-' + index }));
+  const chunks = credentialImport.splitCredentialBatch(records, { maxItems: 100, maxBytes: 64 * 1024 });
+  assert.equal(chunks.length, 11);
+  assert.deepEqual(chunks.flat(), records);
+  assert.ok(chunks.every(chunk => chunk.length <= 100));
+});
+
 test('validateCredentialBatch measures UTF-8 payload bytes', () => {
   assert.equal(credentialImport.utf8ByteLength('A\u4e2d\u{1f600}'), 8);
   assert.equal(credentialImport.validateCredentialBatch([{ refreshToken: 'ok' }]).code, '');

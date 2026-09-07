@@ -1,5 +1,5 @@
 {
-  "version": "1.2.65",
-  "changelog": "Add scoped model fallback routing with per-API-key overrides.\n增加支持全局规则、按 Key 控制和多种触发方式的模型兜底路由。",
+  "version": "1.2.66",
+  "changelog": "Add visible batch progress and cancellation for large credential imports.\n增加大批量凭证导入的分批进度、失败统计和可取消处理。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }

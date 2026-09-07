@@ -39,6 +39,7 @@ Credential import narrowly repairs exports labeled as generic `social` when the 
 Open `/admin` to manage:
 
 - Account import, routability/inventory diagnostics, enable/disable state, weights, priority, per-account concurrency, and proxies
+- Large credential JSON imports support up to 20,000 accounts and 64 MiB per selection; the Web panel automatically submits bounded sequential batches, displays read/parse/import progress, saves completed batches immediately, and can cancel an in-flight import
 - Kiro API Key batch import: paste one `ksk_` key per line; common region/proxy settings are applied, duplicates are reported, and usable entries are persisted even when other lines fail
 - Runtime/legacy endpoint preference and automatic fallback
 - Load balancing, retries, pre-output same-endpoint backoff, timeouts, circuits, and upstream protection

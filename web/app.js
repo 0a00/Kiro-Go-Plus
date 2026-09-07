@@ -48,6 +48,8 @@
   let currentTab = 'overview';
   let credentialImportFileState = emptyCredentialImportFileState();
   let credentialImportFileReadGeneration = 0;
+  let credentialImportController = null;
+  let credentialImportActive = false;
   const settingsGroups = ['access', 'routing', 'generation', 'cache', 'diagnostics', 'integrations', 'security'];
   let settingsGroup = localStorage.getItem('kiro_settings_group') || 'access';
   if (!settingsGroups.includes(settingsGroup)) settingsGroup = 'access';
@@ -3664,6 +3666,10 @@
     enhanceCustomSelects(body);
   }
   function closeModal() {
+    if (credentialImportActive) {
+      cancelCredentialImport();
+      return;
+    }
     resetCredentialImportFileMemory();
     cancelKiroSsoLogin(false);
     closeDialog('addModal');
@@ -3846,6 +3852,12 @@
       '<div id="credFileSummary" class="credential-file-summary" role="status" aria-live="polite"></div>' +
       '<div id="credFileErrors" class="credential-file-errors hidden"></div>' +
       '</div>' +
+      '<div id="credImportProgress" class="credential-import-progress hidden" role="status" aria-live="polite">' +
+      '<div class="credential-import-progress-head"><span id="credImportProgressLabel"></span><strong id="credImportProgressPercent">0%</strong></div>' +
+      '<progress id="credImportProgressBar" max="100" value="0"></progress>' +
+      '<div id="credImportProgressDetail" class="credential-import-progress-detail"></div>' +
+      '<button class="btn btn-danger btn-sm" id="cancelCredentialImportBtn" type="button"><i class="fa-solid fa-stop" aria-hidden="true"></i><span>' + escapeHtml(t('credentials.cancelImport')) + '</span></button>' +
+      '</div>' +
       '<div class="credential-source-divider"><span>' + escapeHtml(t('credentials.orPaste')) + '</span></div>' +
       '<div class="form-group"><label>' + escapeHtml(t('credentials.label')) + '</label>' +
       '<textarea id="credJson" class="font-mono" placeholder=\'[{"refreshToken":"xxx","provider":"BuilderID"}]&#10;[{"authMethod":"api_key","kiroApiKey":"xxx"}]&#10;or&#10;email----password----refreshToken----clientId----clientSecret\'></textarea>' +
@@ -3856,12 +3868,14 @@
       '</div>';
     $('credFiles').addEventListener('change', e => loadCredentialFiles(e.target.files));
     $('clearCredFilesBtn').addEventListener('click', clearCredentialFiles);
+    $('cancelCredentialImportBtn').addEventListener('click', cancelCredentialImport);
     $('importCredBtn').addEventListener('click', importCredentials);
     renderCredentialFileState();
+    renderCredentialImportProgress(null);
   }
 
   function emptyCredentialImportFileState() {
-    return { fileCount: 0, accountCount: 0, sourceBytes: 0, items: [], errors: [], loading: false };
+    return { fileCount: 0, accountCount: 0, sourceBytes: 0, items: [], errors: [], loading: false, progress: null };
   }
 
   function resetCredentialImportFileMemory() {
@@ -3890,7 +3904,14 @@
     if (!summary || !errors || !clear || !submit) return;
     const state = credentialImportFileState;
     if (state.loading) {
-      summary.textContent = t('credentials.filesReading', state.fileCount);
+      const progress = state.progress;
+      if (progress && progress.phase === 'reading') {
+        summary.textContent = t('credentials.filesReadingProgress', progress.fileIndex + 1, progress.fileCount, formatImportBytes(progress.loaded), formatImportBytes(progress.total));
+      } else if (progress && progress.phase === 'parsing') {
+        summary.textContent = t('credentials.recordsParsing', progress.accountCount || 0);
+      } else {
+        summary.textContent = t('credentials.filesReading', state.fileCount);
+      }
     } else if (state.fileCount > 0) {
       summary.textContent = t('credentials.fileSummary', state.fileCount, state.accountCount, state.errors.length);
     } else {
@@ -3910,6 +3931,59 @@
     errors.classList.toggle('hidden', messages.length === 0);
   }
 
+  function formatImportBytes(value) {
+    const bytes = Number(value) || 0;
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KiB';
+    return (bytes / 1048576).toFixed(1) + ' MiB';
+  }
+
+  function renderCredentialImportProgress(progress) {
+    const box = $('credImportProgress');
+    const bar = $('credImportProgressBar');
+    const label = $('credImportProgressLabel');
+    const percent = $('credImportProgressPercent');
+    const detail = $('credImportProgressDetail');
+    if (!box || !bar || !label || !percent || !detail) return;
+    if (!progress) {
+      box.classList.add('hidden');
+      return;
+    }
+    box.classList.remove('hidden');
+    const total = Math.max(1, Number(progress.total) || 1);
+    const completed = Math.max(0, Math.min(total, Number(progress.completed) || 0));
+    const ratio = Math.round((completed / total) * 100);
+    bar.value = ratio;
+    percent.textContent = ratio + '%';
+    label.textContent = progress.phase === 'cancelled'
+      ? t('credentials.importCancelled')
+      : (progress.phase === 'complete' ? t('credentials.importComplete') : t('credentials.importing'));
+    let message = t('credentials.importProgressDetail', completed, total, progress.processed || 0, progress.totalAccounts || 0, progress.imported || 0, progress.failed || 0);
+    if (progress.lastMessage) message += ' · ' + progress.lastMessage;
+    detail.textContent = message;
+  }
+
+  function setCredentialImportBusy(busy) {
+    credentialImportActive = busy;
+    const body = $('modalBody');
+    if (body) {
+      qsa('input, textarea, select, button', body).forEach(element => {
+        if (element.id === 'cancelCredentialImportBtn') {
+          element.disabled = !busy;
+        } else {
+          element.disabled = busy;
+        }
+      });
+    }
+    const cancel = $('cancelCredentialImportBtn');
+    if (cancel) cancel.classList.toggle('hidden', !busy);
+  }
+
+  function cancelCredentialImport() {
+    if (!credentialImportActive) return;
+    if (credentialImportController) credentialImportController.abort();
+  }
+
   async function loadCredentialFiles(files) {
     const generation = ++credentialImportFileReadGeneration;
     const selected = Array.from(files || []);
@@ -3919,14 +3993,21 @@
       sourceBytes: 0,
       items: [],
       errors: [],
-      loading: selected.length > 0
+      loading: selected.length > 0,
+      progress: selected.length > 0 ? { phase: 'reading', fileIndex: 0, fileCount: selected.length, loaded: 0, total: Number(selected[0]?.size) || 0 } : null
     };
     renderCredentialFileState();
     if (selected.length === 0) return;
     try {
-      const result = await window.KiroCredentialImport.analyzeCredentialFiles(selected);
+      const result = await window.KiroCredentialImport.analyzeCredentialFiles(selected, {
+        onProgress: progress => {
+          if (generation !== credentialImportFileReadGeneration) return;
+          credentialImportFileState.progress = progress;
+          renderCredentialFileState();
+        }
+      });
       if (generation !== credentialImportFileReadGeneration) return;
-      credentialImportFileState = { ...result, loading: false };
+      credentialImportFileState = { ...result, loading: false, progress: null };
     } catch (error) {
       if (generation !== credentialImportFileReadGeneration) return;
       credentialImportFileState = {
@@ -3935,7 +4016,8 @@
         sourceBytes: 0,
         items: [],
         errors: [{ code: 'read_failed' }],
-        loading: false
+        loading: false,
+        progress: null
       };
     }
     renderCredentialFileState();
@@ -4095,6 +4177,159 @@
     toastWarning(t('credentials.rotatedTokenRecovery', recoveries.length), { duration: 15000 });
     return true;
   }
+
+  function waitForCredentialImportRetry(delayMs, signal) {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(resolve, delayMs);
+      if (!signal) return;
+      if (signal.aborted) {
+        clearTimeout(timer);
+        reject(new DOMException('The import was cancelled.', 'AbortError'));
+        return;
+      }
+      signal.addEventListener('abort', () => {
+        clearTimeout(timer);
+        reject(new DOMException('The import was cancelled.', 'AbortError'));
+      }, { once: true });
+    });
+  }
+
+  async function submitCredentialImportChunk(chunk, signal) {
+    let lastError = null;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const res = await api('/auth/credentials', {
+          method: 'POST',
+          body: JSON.stringify({ accounts: chunk }),
+          signal
+        });
+        const data = await res.json().catch(() => ({}));
+        if (res.ok && !Array.isArray(data.accounts) && !Array.isArray(data.errors)) {
+          lastError = new Error('invalid import response');
+        } else {
+        // A JSON response with per-account results is actionable even when the
+        // HTTP status is 400/500, so let the caller count partial successes.
+          if (res.ok || Array.isArray(data.accounts) || Array.isArray(data.errors) || res.status < 500) {
+            return { response: res, data };
+          }
+          lastError = new Error(data.error || ('HTTP ' + res.status));
+        }
+      } catch (error) {
+        if (error && error.name === 'AbortError') throw error;
+        lastError = error instanceof Error ? error : new Error(String(error || 'network error'));
+      }
+      if (attempt === 0) await waitForCredentialImportRetry(750, signal);
+    }
+    throw lastError || new Error('credential import request failed');
+  }
+
+  function updateCredentialImportProgress(progress) {
+    renderCredentialImportProgress(progress);
+  }
+
+  function appendCredentialImportRecoveries(target, data, sourceIndexes, validOffset) {
+    if (!Array.isArray(data?.recoveries)) return;
+    data.recoveries.forEach(item => {
+      if (!item || typeof item !== 'object') return;
+      const recovery = { ...item };
+      const localIndex = Number(recovery.index);
+      if (Number.isFinite(localIndex) && localIndex > 0) {
+        const sourceIndex = sourceIndexes && sourceIndexes[validOffset + localIndex - 1];
+        recovery.index = Number.isFinite(Number(sourceIndex)) ? Number(sourceIndex) + 1 : validOffset + localIndex;
+      }
+      target.push(recovery);
+    });
+  }
+
+  function credentialImportErrorText(data, chunkNumber) {
+    const errors = Array.isArray(data?.errors) ? data.errors : [];
+    if (errors.length > 0) return t('credentials.importBatchErrors', chunkNumber, errors.length);
+    return t('credentials.importBatchFailed', chunkNumber);
+  }
+
+  async function importCredentialPayloads(payloads, sourceIndexes, initialFailed, skipped) {
+    if (payloads.length === 0) {
+      return { ok: 0, fail: initialFailed, skipped, cancelled: false, recoveries: [] };
+    }
+
+    const chunker = window.KiroCredentialImport.splitCredentialBatch;
+    const chunks = typeof chunker === 'function'
+      ? chunker(payloads, {
+        maxItems: window.KiroCredentialImport.DEFAULT_IMPORT_CHUNK_SIZE || 100,
+        maxBytes: window.KiroCredentialImport.DEFAULT_IMPORT_CHUNK_BYTES || (2 * 1024 * 1024)
+      })
+      : payloads.reduce((all, item, index) => {
+        const chunkIndex = Math.floor(index / 100);
+        if (!all[chunkIndex]) all[chunkIndex] = [];
+        all[chunkIndex].push(item);
+        return all;
+      }, []);
+    const controller = new AbortController();
+    credentialImportController = controller;
+    setCredentialImportBusy(true);
+    let ok = 0;
+    let fail = initialFailed;
+    let processed = initialFailed;
+    let validProcessed = 0;
+    const recoveries = [];
+    const totalAccounts = payloads.length + initialFailed;
+    const progress = {
+      phase: 'importing', completed: 0, total: chunks.length,
+      processed, totalAccounts, imported: ok, failed: fail
+    };
+    updateCredentialImportProgress(progress);
+
+    try {
+      for (let index = 0; index < chunks.length; index++) {
+        if (controller.signal.aborted) break;
+        const chunk = chunks[index];
+        let data;
+        progress.lastMessage = t('credentials.importBatchProcessing', index + 1);
+        updateCredentialImportProgress(progress);
+        try {
+          const result = await submitCredentialImportChunk(chunk, controller.signal);
+          data = result.data;
+          const imported = Array.isArray(data.accounts) ? data.accounts : [];
+          const errors = Array.isArray(data.errors) ? data.errors : [];
+          ok += imported.length;
+          if (!result.response.ok && imported.length === 0) {
+            // Batch-level validation errors reject the whole chunk even when
+            // the server returns only one summary error string.
+            fail += Math.max(errors.length, chunk.length);
+          } else {
+            fail += errors.length;
+          }
+          appendCredentialImportRecoveries(recoveries, data, sourceIndexes, validProcessed);
+        } catch (error) {
+          if (error && error.name === 'AbortError') break;
+          fail += chunk.length;
+          data = null;
+        }
+        validProcessed += chunk.length;
+        processed = initialFailed + validProcessed;
+        progress.completed = index + 1;
+        progress.processed = processed;
+        progress.imported = ok;
+        progress.failed = fail;
+        progress.lastMessage = data && Array.isArray(data.errors) && data.errors.length > 0
+          ? credentialImportErrorText(data, index + 1)
+          : (data ? '' : credentialImportErrorText(data, index + 1));
+        updateCredentialImportProgress(progress);
+      }
+    } finally {
+      const cancelled = controller.signal.aborted;
+      progress.phase = cancelled ? 'cancelled' : 'complete';
+      progress.completed = cancelled ? progress.completed : chunks.length;
+      progress.processed = processed;
+      progress.imported = ok;
+      progress.failed = fail;
+      updateCredentialImportProgress(progress);
+      credentialImportController = null;
+      setCredentialImportBusy(false);
+    }
+    return { ok, fail, skipped, cancelled: controller.signal.aborted, recoveries };
+  }
+
   async function importLocalKiro() {
     const provider = $('localProvider').value;
     const tokenJson = $('localTokenJson').value.trim();
@@ -4127,6 +4362,7 @@
     } else if (!(await handleCredentialRecoveryResponse(d))) toastError(t('common.failed') + ': ' + (d.error || ''));
   }
   async function importCredentials() {
+    if (credentialImportActive) return;
     const raw = $('credJson').value.trim();
     if (credentialImportFileState.loading) {
       toastWarning(t('credentials.filesStillReading'));
@@ -4171,9 +4407,11 @@
         }
       }
     }
-    let ok = 0, fail = 0;
+    let fail = 0;
     const payloads = [];
-    for (const item of items) {
+    const sourceIndexes = [];
+    for (let itemIndex = 0; itemIndex < items.length; itemIndex++) {
+      const item = items[itemIndex];
       const declaredApiKey = window.KiroCredentialImport.isDeclaredCredentialAPIKey(item);
       const hasKiroApiKey = !!(item.kiroApiKey || (declaredApiKey && item.accessToken));
       if (!item.refreshToken && !hasKiroApiKey) { fail++; continue; }
@@ -4210,41 +4448,39 @@
         subscription: item.subscription || null,
         usage: item.usage || null
       });
+      sourceIndexes.push(itemIndex);
     }
-    const batchValidation = window.KiroCredentialImport.validateCredentialBatch(payloads);
-    if (batchValidation.code === 'too_many_accounts') {
-      toastWarning(t('credentials.fileErrorTooManyAccounts'));
+    if (payloads.length === 0) {
+      toastWarning(t('credentials.noValidAccounts'));
       return;
     }
-    if (batchValidation.code === 'payload_too_large') {
-      toastWarning(t('credentials.fileErrorPayloadTooLarge'));
-      return;
-    }
-    if (payloads.length > 0) {
-      try {
-        const res = await api('/auth/credentials', {
-          method: 'POST',
-          body: JSON.stringify({ accounts: payloads })
+
+    try {
+      const result = await importCredentialPayloads(payloads, sourceIndexes, fail, skipped);
+      if (result.recoveries.length > 0) {
+        await handleCredentialRecoveryResponse({
+          recoveries: result.recoveries,
+          hint: 'Refresh tokens rotated before account persistence completed.'
         });
-        const d = await res.json().catch(() => ({}));
-        const imported = Array.isArray(d.accounts) ? d.accounts : [];
-        const errors = Array.isArray(d.errors) ? d.errors : [];
-        ok = imported.length;
-        fail += errors.length;
-        if (!res.ok && imported.length === 0 && errors.length === 0) fail += payloads.length;
-        if (await handleCredentialRecoveryResponse(d)) {
-          loadAccounts(); loadStats();
-          return;
-        }
-      } catch {
-        fail += payloads.length;
       }
+      closeModal();
+      loadAccounts();
+      loadStats();
+      let message = t('sso.importSuccess', result.ok);
+      if (result.fail > 0) message += t('sso.importPartial', result.fail);
+      if (result.skipped > 0) message += t('credentials.lineParseSkipped', result.skipped);
+      if (result.cancelled) {
+        toastWarning(t('credentials.importCancelledSummary', result.ok, result.fail), { duration: 10000 });
+      } else if (result.fail > 0) {
+        toastWarning(message, { duration: 10000 });
+      } else {
+        toastPrimary(message, { duration: 5200 });
+      }
+    } catch (error) {
+      credentialImportController = null;
+      setCredentialImportBusy(false);
+      toastError(t('common.failed') + ': ' + ((error && error.message) || t('common.unknownError')));
     }
-    closeModal(); loadAccounts(); loadStats();
-    let msg = t('sso.importSuccess', ok);
-    if (fail > 0) msg += t('sso.importPartial', fail);
-    if (skipped > 0) msg += t('credentials.lineParseSkipped', skipped);
-    toastPrimary(msg, { duration: 5200 });
   }
   function normalizeCredentialScopes(value) {
     const values = Array.isArray(value) ? value : (typeof value === 'string' ? [value] : []);

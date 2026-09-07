@@ -7,8 +7,10 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
   'use strict';
 
-  const DEFAULT_MAX_ACCOUNTS = 5000;
-  const DEFAULT_MAX_BYTES = 8 * 1024 * 1024;
+  const DEFAULT_MAX_ACCOUNTS = 20000;
+  const DEFAULT_MAX_BYTES = 64 * 1024 * 1024;
+  const DEFAULT_IMPORT_CHUNK_SIZE = 100;
+  const DEFAULT_IMPORT_CHUNK_BYTES = 2 * 1024 * 1024;
   const externalAuthAliases = new Set(['external_idp', 'azuread', 'azure_ad', 'azure', 'entra', 'entra_id', 'microsoft', 'm365', 'office365', 'external']);
   const idcAuthAliases = new Set(['idc', 'builderid', 'builder_id', 'enterprise', 'identity_center', 'aws_sso']);
   const socialAuthAliases = new Set(['social', 'google', 'github']);
@@ -154,13 +156,24 @@
     return bytes;
   }
 
-  function readFileText(file) {
-    if (file && typeof file.text === 'function') return file.text();
-    if (typeof FileReader === 'undefined') return Promise.reject(codedError('read_failed'));
+  function readFileText(file, onProgress) {
+    if (typeof FileReader === 'undefined' || (typeof Blob !== 'undefined' && !(file instanceof Blob))) {
+      if (file && typeof file.text === 'function') return file.text();
+      return Promise.reject(codedError('read_failed'));
+    }
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
       reader.onload = () => resolve(String(reader.result || ''));
       reader.onerror = () => reject(codedError('read_failed'));
+      reader.onprogress = event => {
+        if (typeof onProgress !== 'function') return;
+        const loaded = Number(event && event.loaded);
+        const total = Number(event && event.total);
+        onProgress({
+          loaded: Number.isFinite(loaded) ? loaded : 0,
+          total: Number.isFinite(total) && total > 0 ? total : Number(file && file.size) || 0
+        });
+      };
       reader.readAsText(file);
     });
   }
@@ -170,6 +183,7 @@
     const settings = options || {};
     const maxAccounts = Number(settings.maxAccounts) || DEFAULT_MAX_ACCOUNTS;
     const maxBytes = Number(settings.maxBytes) || DEFAULT_MAX_BYTES;
+    const onProgress = typeof settings.onProgress === 'function' ? settings.onProgress : null;
     const result = {
       fileCount: selected.length,
       accountCount: 0,
@@ -191,7 +205,10 @@
     for (let index = 0; index < selected.length; index++) {
       let text;
       try {
-        text = await readFileText(selected[index]);
+        onProgress?.({ phase: 'reading', fileIndex: index, fileCount: selected.length, loaded: 0, total: Number(selected[index]?.size) || 0 });
+        text = await readFileText(selected[index], progress => {
+          onProgress?.({ phase: 'reading', fileIndex: index, fileCount: selected.length, ...progress });
+        });
       } catch (error) {
         result.errors.push({ index, code: 'read_failed' });
         continue;
@@ -214,10 +231,29 @@
       }
 
       try {
-        result.items.push(...extractCredentialRecords(value));
+        const records = extractCredentialRecords(value);
+        for (let recordIndex = 0; recordIndex < records.length; recordIndex++) {
+          result.items.push(records[recordIndex]);
+          if (recordIndex % 500 === 0) {
+            onProgress?.({
+              phase: 'parsing',
+              fileIndex: index,
+              fileCount: selected.length,
+              recordIndex: recordIndex + 1,
+              recordCount: records.length,
+              accountCount: result.items.length
+            });
+            // Yield to the browser so the progress text can repaint for large exports.
+            await new Promise(resolve => {
+              if (typeof requestAnimationFrame === 'function') requestAnimationFrame(resolve);
+              else setTimeout(resolve, 0);
+            });
+          }
+        }
       } catch (error) {
         result.errors.push({ index, code: error && error.code ? error.code : 'invalid_structure' });
       }
+      onProgress?.({ phase: 'file-complete', fileIndex: index + 1, fileCount: selected.length, accountCount: result.items.length });
     }
 
     result.accountCount = result.items.length;
@@ -237,9 +273,38 @@
     return { code: '', bytes };
   }
 
+  function splitCredentialBatch(items, options) {
+    const records = Array.from(items || []);
+    const settings = options || {};
+    const maxItems = Math.max(1, Math.floor(Number(settings.maxItems) || DEFAULT_IMPORT_CHUNK_SIZE));
+    const maxBytes = Math.max(64 * 1024, Math.floor(Number(settings.maxBytes) || DEFAULT_IMPORT_CHUNK_BYTES));
+    const chunks = [];
+    let current = [];
+    let currentBytes = utf8ByteLength('{"accounts":[]}');
+    for (const record of records) {
+      let recordBytes = 2;
+      try {
+        recordBytes += utf8ByteLength(JSON.stringify(record));
+      } catch (error) {
+        recordBytes += 2;
+      }
+      if (current.length > 0 && (current.length >= maxItems || currentBytes + recordBytes > maxBytes)) {
+        chunks.push(current);
+        current = [];
+        currentBytes = utf8ByteLength('{"accounts":[]}');
+      }
+      current.push(record);
+      currentBytes += recordBytes;
+    }
+    if (current.length > 0) chunks.push(current);
+    return chunks;
+  }
+
   return Object.freeze({
     DEFAULT_MAX_ACCOUNTS,
     DEFAULT_MAX_BYTES,
+    DEFAULT_IMPORT_CHUNK_SIZE,
+    DEFAULT_IMPORT_CHUNK_BYTES,
     analyzeCredentialFiles,
     extractCredentialRecords,
     inferCredentialAuthMethod,
@@ -248,6 +313,7 @@
     normalizeImportCredentialItem,
     normalizeCredentialAuthLabel,
     utf8ByteLength,
-    validateCredentialBatch
+    validateCredentialBatch,
+    splitCredentialBatch
   });
 });
