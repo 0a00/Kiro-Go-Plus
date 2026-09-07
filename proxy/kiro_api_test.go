@@ -491,6 +491,48 @@ func TestListAvailableModelsRuntimePreferenceStillTriesLegacyForOrdinaryAccount(
 	}
 }
 
+func TestListAvailableModelsReusesRealListForOrdinaryAccountWithoutProfile(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	resetRealModelListSnapshots()
+	t.Cleanup(resetRealModelListSnapshots)
+	sharedAccountEndpointRoutes.reset()
+	t.Cleanup(sharedAccountEndpointRoutes.reset)
+	var modelsCalls int32
+	kiroRestHttpStore.Store(&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch {
+		case req.URL.Path == "/ListAvailableModels":
+			atomic.AddInt32(&modelsCalls, 1)
+			return &http.Response{StatusCode: http.StatusOK,
+				Body: io.NopCloser(strings.NewReader(`{"models":[{"modelId":"real-ordinary-model"}]}`)), Header: make(http.Header)}, nil
+		case req.URL.Path == "/ListAvailableProfiles":
+			return &http.Response{StatusCode: http.StatusForbidden,
+				Body: io.NopCloser(strings.NewReader(`{"message":"AWS Builder ID is not supported for this operation."}`)), Header: make(http.Header)}, nil
+		default:
+			return &http.Response{StatusCode: http.StatusNotFound,
+				Body: io.NopCloser(strings.NewReader(`{"message":"not supported"}`)), Header: make(http.Header)}, nil
+		}
+	})})
+	t.Cleanup(func() { InitKiroHttpClient("") })
+
+	base := &config.Account{ID: "ordinary-with-profile", AccessToken: "token", Provider: "BuilderId", AuthMethod: "idc", Region: "us-east-1", ProfileArn: "arn:aws:codewhisperer:us-east-1:123:profile/test"}
+	first, err := listAvailableModelsSnapshotContext(context.Background(), base)
+	if err != nil || first.Source != modelListSourceLegacy || len(first.Models) != 1 {
+		t.Fatalf("expected initial real model list, snapshot=%+v err=%v", first, err)
+	}
+	secondAccount := *base
+	secondAccount.ID = "ordinary-without-profile"
+	secondAccount.ProfileArn = ""
+	second, err := listAvailableModelsSnapshotContext(context.Background(), &secondAccount)
+	if err != nil || second.Source != modelListSourceLegacy || len(second.Models) != 1 || second.Models[0].ModelId != "real-ordinary-model" {
+		t.Fatalf("expected shared real model list, snapshot=%+v err=%v", second, err)
+	}
+	if atomic.LoadInt32(&modelsCalls) != 1 {
+		t.Fatalf("expected one upstream model-list request, calls=%d", modelsCalls)
+	}
+}
+
 func TestListAvailableModelsUsesCompatibilitySnapshotForUnsupportedBuilderID(t *testing.T) {
 	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatalf("init config: %v", err)

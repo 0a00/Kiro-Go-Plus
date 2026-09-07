@@ -627,6 +627,58 @@ type modelListSnapshot struct {
 	Warning string
 }
 
+var realModelListSnapshots = struct {
+	sync.RWMutex
+	items map[string]modelListSnapshot
+}{items: make(map[string]modelListSnapshot)}
+
+func resetRealModelListSnapshots() {
+	realModelListSnapshots.Lock()
+	realModelListSnapshots.items = make(map[string]modelListSnapshot)
+	realModelListSnapshots.Unlock()
+}
+
+func realModelListSnapshotKey(account *config.Account) string {
+	if account == nil || isKiroAPIKeyAccount(account) {
+		return ""
+	}
+	provider := strings.ToLower(strings.TrimSpace(account.Provider))
+	method := strings.ToLower(strings.TrimSpace(account.AuthMethod))
+	region := strings.ToLower(strings.TrimSpace(account.Region))
+	return strings.Join([]string{method, provider, region}, "\x00")
+}
+
+func rememberRealModelListSnapshot(account *config.Account, snapshot modelListSnapshot) {
+	key := realModelListSnapshotKey(account)
+	if key == "" || len(snapshot.Models) == 0 || snapshot.Source == modelListSourceCompatibility {
+		return
+	}
+	realModelListSnapshots.Lock()
+	realModelListSnapshots.items[key] = modelListSnapshot{
+		Models: append([]ModelInfo(nil), snapshot.Models...),
+		Source: snapshot.Source,
+	}
+	realModelListSnapshots.Unlock()
+}
+
+func sharedRealModelListSnapshot(account *config.Account) (modelListSnapshot, bool) {
+	key := realModelListSnapshotKey(account)
+	if key == "" {
+		return modelListSnapshot{}, false
+	}
+	realModelListSnapshots.RLock()
+	snapshot, ok := realModelListSnapshots.items[key]
+	if ok {
+		snapshot.Models = append([]ModelInfo(nil), snapshot.Models...)
+	}
+	realModelListSnapshots.RUnlock()
+	if !ok || len(snapshot.Models) == 0 {
+		return modelListSnapshot{}, false
+	}
+	snapshot.Warning = "using a real upstream model list shared from a compatible account"
+	return snapshot, true
+}
+
 var modelListRouteEndpoints = []kiroEndpoint{
 	{Key: "management-models", Name: "Kiro Management Models"},
 	{Key: "legacy-models", Name: "Legacy Kiro Models"},
@@ -642,10 +694,23 @@ func listAvailableModelsSnapshotContext(ctx context.Context, account *config.Acc
 		ctx = context.Background()
 	}
 	if err := ensureRestProfileArnContext(ctx, account); err != nil {
+		if snapshot, ok := sharedRealModelListSnapshot(account); ok {
+			logger.Infof("[ModelsCache] Reusing real upstream model list for %s after profile resolution failed", accountEmailForLog(account))
+			return snapshot, nil
+		}
 		if modelListCompatibilityFallbackAllowed(account, err) {
 			return compatibilityModelListSnapshot(account), nil
 		}
 		return modelListSnapshot{}, fmt.Errorf("resolve profileArn: %w", err)
+	}
+	// Builder ID profile lookup can be a soft failure. If another account of
+	// the same class already supplied a real list, avoid repeating the known
+	// failing discovery calls for every account without a profile ARN.
+	if account != nil && strings.TrimSpace(account.ProfileArn) == "" {
+		if snapshot, ok := sharedRealModelListSnapshot(account); ok {
+			logger.Infof("[ModelsCache] Reusing real upstream model list for %s without a profile ARN", accountEmailForLog(account))
+			return snapshot, nil
+		}
 	}
 	endpoints := append([]kiroEndpoint(nil), modelListRouteEndpoints...)
 	// Model discovery is independent from the generation endpoint preference.
@@ -693,7 +758,9 @@ func listAvailableModelsSnapshotContext(ctx context.Context, account *config.Acc
 			if endpoint.Key == "management-models" {
 				source = modelListSourceManagement
 			}
-			return modelListSnapshot{Models: models, Source: source}, nil
+			snapshot := modelListSnapshot{Models: models, Source: source}
+			rememberRealModelListSnapshot(account, snapshot)
+			return snapshot, nil
 		}
 		sharedAccountEndpointRoutes.recordFailure(accountID, modelListEndpointRouteModel, endpoint, lastErr)
 		if !shouldRetryControlPlaneEndpoint(lastErr) {
@@ -701,6 +768,10 @@ func listAvailableModelsSnapshotContext(ctx context.Context, account *config.Acc
 		}
 	}
 	if modelListCompatibilityFallbackAllowed(account, lastErr) {
+		if snapshot, ok := sharedRealModelListSnapshot(account); ok {
+			logger.Infof("[ModelsCache] Reusing real upstream model list for %s after discovery failed", accountEmailForLog(account))
+			return snapshot, nil
+		}
 		return compatibilityModelListSnapshot(account), nil
 	}
 	if lastErr != nil {
