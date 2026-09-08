@@ -7978,6 +7978,7 @@ func (h *Handler) apiGetThinkingConfig(w http.ResponseWriter, r *http.Request) {
 		"toolStreamMode":             cfg.ToolStreamMode,
 		"bufferToolStreams":          cfg.BufferToolStreams,
 		"enforceAgentToolUse":        cfg.EnforceAgentToolUse,
+		"agentToolSteering":          config.GetAgentToolSteering(),
 	})
 }
 
@@ -7994,6 +7995,7 @@ func (h *Handler) apiUpdateThinkingConfig(w http.ResponseWriter, r *http.Request
 		ToolStreamMode             *string `json:"toolStreamMode"`
 		BufferToolStreams          *bool   `json:"bufferToolStreams"`
 		EnforceAgentToolUse        *bool   `json:"enforceAgentToolUse"`
+		AgentToolSteering          *bool   `json:"agentToolSteering"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(400)
@@ -8080,6 +8082,13 @@ func (h *Handler) apiUpdateThinkingConfig(w http.ResponseWriter, r *http.Request
 		w.WriteHeader(500)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
+	}
+	if req.AgentToolSteering != nil {
+		if err := config.UpdateAgentToolSteering(*req.AgentToolSteering); err != nil {
+			w.WriteHeader(500)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
 	}
 
 	json.NewEncoder(w).Encode(map[string]bool{"success": true})

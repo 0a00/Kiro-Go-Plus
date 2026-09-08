@@ -1,5 +1,5 @@
 {
-  "version": "1.2.67",
-  "changelog": "Restore model discovery and Web Search compatibility for ordinary accounts.\n修复普通账号模型列表刷新与 Web Search 兼容路由。",
+  "version": "1.2.68",
+  "changelog": "Add independent Agent Tool Steering control and sync upstream safety hardening.\n增加独立 Agent Tool Steering 控制，并同步上游安全加固。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }

@@ -261,10 +261,11 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 	modelID := MapModel(req.Model)
 	origin := "AI_EDITOR"
 	toolNames := newToolNameRegistry(sanitizeToolName)
+	toolSteeringEnabled := config.GetAgentToolSteering()
 
 	// 提取系统提示
 	systemPrompt := buildClaudeSystemPrompt(req.System, claudeThinkingPrompt(req, thinking))
-	if req.AgentToolSteering && len(req.Tools) > 0 && !strings.Contains(systemPrompt, agentToolPolicyMarker) {
+	if toolSteeringEnabled && req.AgentToolSteering && len(req.Tools) > 0 && !strings.Contains(systemPrompt, agentToolPolicyMarker) {
 		if systemPrompt != "" {
 			systemPrompt += "\n\n"
 		}

@@ -460,6 +460,7 @@ type Config struct {
 	ToolStreamMode              string `json:"toolStreamMode,omitempty"`              // Claude tool stream mode: safe, adaptive, balanced, or live
 	BufferToolStreams           *bool  `json:"bufferToolStreams,omitempty"`           // Deprecated compatibility field: true maps to buffered/safe, false maps to live
 	EnforceAgentToolUse         *bool  `json:"enforceAgentToolUse,omitempty"`         // Require tools for detected workspace mutation/execution requests
+	AgentToolSteering           bool   `json:"agentToolSteering,omitempty"`           // Inject extra tool-execution guidance into prompts
 
 	// Endpoint configuration: "auto", "kiro", "codewhisperer", or "amazonq"
 	PreferredEndpoint string `json:"preferredEndpoint,omitempty"`
@@ -3628,6 +3629,24 @@ func GetThinkingConfig() ThinkingConfig {
 		BufferToolStreams:          toolStreamMode != ToolStreamModeLive,
 		EnforceAgentToolUse:        enforceAgentToolUse,
 	}
+}
+
+// GetAgentToolSteering reports whether undisclosed tool-execution guidance may
+// be injected into otherwise transparent Claude requests. It defaults off.
+func GetAgentToolSteering() bool {
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	return cfg != nil && cfg.AgentToolSteering
+}
+
+func UpdateAgentToolSteering(enabled bool) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	if cfg == nil {
+		return fmt.Errorf("configuration is not initialized")
+	}
+	cfg.AgentToolSteering = enabled
+	return Save()
 }
 
 // UpdateThinkingConfig 更新 thinking 配置
