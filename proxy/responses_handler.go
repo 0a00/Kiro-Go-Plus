@@ -219,6 +219,7 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 	if routedModel, decision, changed := h.resolveRequestModelRoute(req.Model, actualModel, apiKeyID); changed {
 		actualModel = routedModel
 		fallbackDecision = decision
+		contextWindowTokens = resolveContextWindowTokens(actualModel, openaiReq.ContextWindow, openaiReq.MaxInputTokens)
 		logger.Warnf("[ModelFallback] routing %s to %s before dispatch (rule=%s)", requestedModel, actualModel, decision.Rule.ID)
 	}
 	if !h.requestedModelAvailable(req.Model, actualModel) {

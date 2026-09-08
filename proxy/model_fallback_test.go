@@ -94,6 +94,89 @@ func TestResolveRequestModelRouteHandlesUnknownAndAlwaysModes(t *testing.T) {
 	}
 }
 
+func TestAlwaysFallbackUsesTargetContextWindowAcrossProtocols(t *testing.T) {
+	h, cleanup := setupResponsesTestHandler(t)
+	defer cleanup()
+	if err := config.UpdateThinkingConfigWithToolStreamMode(
+		"-thinking", "reasoning_content", "thinking", 4000, 10000, 64000, 0,
+		config.ToolStreamModeBalanced, true,
+	); err != nil {
+		t.Fatalf("update thinking config: %v", err)
+	}
+	if err := config.UpdateModelFallbackConfig(config.ModelFallbackConfig{
+		Enabled:        true,
+		DefaultTrigger: config.ModelFallbackTriggerAlways,
+		MaxHops:        1,
+		Rules: []config.ModelFallbackRule{{
+			ID: "context-window", Enabled: true, MatchType: config.ModelFallbackMatchExact,
+			SourceModel: "claude-opus-5", TargetModel: "claude-sonnet-4.5", Trigger: config.ModelFallbackTriggerAlways,
+		}},
+	}); err != nil {
+		t.Fatalf("update fallback: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload KiroPayload
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("decode upstream payload: %v", err)
+		} else if model := payload.ConversationState.CurrentMessage.UserInputMessage.ModelID; model != "claude-sonnet-4.5" {
+			t.Errorf("upstream model = %q, want fallback target", model)
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "ok"}))
+		_, _ = w.Write(awsEventStreamFrame(t, "contextUsageEvent", map[string]interface{}{"contextUsagePercentage": 10.0}))
+		_, _ = w.Write(awsEventStreamFrame(t, "metadataEvent", map[string]interface{}{"stopReason": "end_turn"}))
+	}))
+	defer server.Close()
+	defer swapKiroEndpointsForTest(t, server)()
+
+	tests := []struct {
+		name       string
+		path       string
+		body       string
+		usageField string
+		serve      func(http.ResponseWriter, *http.Request)
+	}{
+		{
+			name: "claude", path: "/v1/messages", usageField: "input_tokens",
+			body:  `{"model":"claude-opus-5","max_tokens":256,"messages":[{"role":"user","content":"hello"}]}`,
+			serve: h.handleClaudeMessages,
+		},
+		{
+			name: "chat", path: "/v1/chat/completions", usageField: "prompt_tokens",
+			body:  `{"model":"claude-opus-5","max_tokens":256,"messages":[{"role":"user","content":"hello"}]}`,
+			serve: h.handleOpenAIChat,
+		},
+		{
+			name: "responses", path: "/v1/responses", usageField: "input_tokens",
+			body:  `{"model":"claude-opus-5","max_output_tokens":256,"input":"hello","store":false}`,
+			serve: h.handleOpenAIResponses,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			tc.serve(rec, httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body)))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+			}
+			var response struct {
+				Usage map[string]json.RawMessage `json:"usage"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+				t.Fatalf("decode response: %v body=%s", err, rec.Body.String())
+			}
+			var got int
+			if err := json.Unmarshal(response.Usage[tc.usageField], &got); err != nil {
+				t.Fatalf("decode %s: %v body=%s", tc.usageField, err, rec.Body.String())
+			}
+			if got != 20_000 {
+				t.Fatalf("%s = %d, want 20000 from target model's 200K context window", tc.usageField, got)
+			}
+		})
+	}
+}
+
 func TestCallKiroAPIFallsBackToConfiguredModelOnUnavailable(t *testing.T) {
 	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatalf("init config: %v", err)

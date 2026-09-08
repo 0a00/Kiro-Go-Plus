@@ -1475,7 +1475,9 @@ func isRetryablePreOutputStreamError(err error, gate *meaningfulStreamCallback) 
 		return false
 	}
 	upstreamErr, ok := asUpstreamError(err)
-	return ok && (upstreamErr.Kind == UpstreamErrorTransient || upstreamErr.Kind == UpstreamErrorStreamTruncated) && upstreamErr.RetryAcrossEndpoints
+	return ok && (upstreamErr.Kind == UpstreamErrorTransient ||
+		upstreamErr.Kind == UpstreamErrorStreamTruncated ||
+		upstreamErr.Kind == UpstreamErrorToolAssemblyTimeout) && upstreamErr.RetryAcrossEndpoints
 }
 
 func waitForPreOutputStreamRetry(ctx context.Context, delay time.Duration) error {

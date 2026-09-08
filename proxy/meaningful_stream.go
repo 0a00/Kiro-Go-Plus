@@ -268,7 +268,7 @@ func (g *meaningfulStreamCallback) handleEvent(event pendingStreamEvent) {
 	}
 	if event.kind == pendingComplete && g.deferTextUntilComplete && !g.requireToolUse {
 		visible, incompleteThinking := visibleTextOutsideThinking(g.visibleProbe.String())
-		commit = !incompleteThinking && hasSubstantiveAgentText(visible)
+		commit = !incompleteThinking && hasSubstantiveAgentText(visible) && !isToolExecutionPreamble(visible)
 	}
 	if !commit {
 		g.mu.Unlock()
@@ -283,6 +283,30 @@ func (g *meaningfulStreamCallback) handleEvent(event pendingStreamEvent) {
 	for _, item := range pending {
 		g.dispatch(item)
 	}
+}
+
+// isToolExecutionPreamble detects a short promise to perform a workspace action
+// that arrived without the promised tool call. It is only consulted for
+// buffered high-risk tool turns, so normal chat text remains unaffected.
+func isToolExecutionPreamble(text string) bool {
+	text = strings.TrimSpace(strings.ToLower(text))
+	if text == "" || len([]rune(text)) > 320 {
+		return false
+	}
+	for _, refusal := range []string{"cannot", "can't", "unable", "won't", "无法", "不能", "不会", "不需要"} {
+		if strings.Contains(text, refusal) {
+			return false
+		}
+	}
+	for _, marker := range []string{
+		"let me ", "i will ", "i'll ", "next, i ", "now i ",
+		"现在让我", "我将", "我来", "接下来我", "下面我", "继续修改", "继续扩展", "开始修改",
+	} {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func (g *meaningfulStreamCallback) hasPendingVisibleOutputLocked() bool {

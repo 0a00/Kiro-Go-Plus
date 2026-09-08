@@ -228,13 +228,13 @@ func TestDeferredMeaningfulStreamCommitsTextOnlyResponseAtCompletion(t *testing.
 		},
 	}, nil, true, false, true, false)
 
-	wrapper.OnText("I will create the requested file now.", false)
+	wrapper.OnText("The requested file has been created successfully.", false)
 	if gate.hasActionableOutput() || len(received) != 0 {
 		t.Fatalf("inferred tool preamble committed before completion: %#v", received)
 	}
 	wrapper.OnComplete(10, 20)
 
-	want := []string{"I will create the requested file now.", "complete"}
+	want := []string{"The requested file has been created successfully.", "complete"}
 	if !reflect.DeepEqual(received, want) || !gate.hasActionableOutput() {
 		t.Fatalf("completed text response was not committed: got %#v want %#v", received, want)
 	}
@@ -411,5 +411,29 @@ func TestHasSubstantiveAgentText(t *testing.T) {
 		if !hasSubstantiveAgentText(text) {
 			t.Fatalf("expected %q to be substantive", text)
 		}
+	}
+}
+
+func TestDeferredHighRiskStreamRejectsExecutionPreamble(t *testing.T) {
+	var received strings.Builder
+	wrapper, gate := wrapMeaningfulStreamCallback(&KiroStreamCallback{
+		OnText: func(text string, _ bool) { received.WriteString(text) },
+	}, nil, true, false, true, false)
+	wrapper.OnText("继续扩展代码，我将添加更多功能和内容：", false)
+	wrapper.OnComplete(10, 10)
+	if gate.hasActionableOutput() || received.Len() != 0 {
+		t.Fatalf("execution preamble was committed: %q", received.String())
+	}
+}
+
+func TestDeferredHighRiskStreamAllowsCompletedTextAnswer(t *testing.T) {
+	var received strings.Builder
+	wrapper, gate := wrapMeaningfulStreamCallback(&KiroStreamCallback{
+		OnText: func(text string, _ bool) { received.WriteString(text) },
+	}, nil, true, false, true, false)
+	wrapper.OnText("修改已经完成，测试全部通过。", false)
+	wrapper.OnComplete(10, 10)
+	if !gate.hasActionableOutput() || received.String() != "修改已经完成，测试全部通过。" {
+		t.Fatalf("completed answer was rejected: %q", received.String())
 	}
 }

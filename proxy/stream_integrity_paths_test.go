@@ -189,7 +189,7 @@ func TestClaudeStreamDoesNotReplayAfterActionableOutput(t *testing.T) {
 	}
 }
 
-func TestClaudeToolStreamEmitsTextBeforeUpstreamCompletion(t *testing.T) {
+func TestClaudeHighRiskToolStreamBuffersTextUntilUpstreamCompletion(t *testing.T) {
 	releaseUpstream := make(chan struct{})
 	var releaseOnce sync.Once
 	release := func() { releaseOnce.Do(func() { close(releaseUpstream) }) }
@@ -227,15 +227,21 @@ func TestClaudeToolStreamEmitsTextBeforeUpstreamCompletion(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
+	protocolStarted := make(chan string, 1)
 	firstText := make(chan struct{})
 	bodyDone := make(chan string, 1)
 	go func() {
 		reader := bufio.NewReader(resp.Body)
 		var body strings.Builder
+		started := false
 		textSeen := false
 		for {
 			line, readErr := reader.ReadString('\n')
 			body.WriteString(line)
+			if !started && strings.Contains(body.String(), "event: message_start") {
+				started = true
+				protocolStarted <- body.String()
+			}
 			if !textSeen && strings.Contains(body.String(), "stream now") {
 				textSeen = true
 				close(firstText)
@@ -247,12 +253,19 @@ func TestClaudeToolStreamEmitsTextBeforeUpstreamCompletion(t *testing.T) {
 		}
 	}()
 
+	var initial string
+	select {
+	case initial = <-protocolStarted:
+	case <-time.After(750 * time.Millisecond):
+		t.Fatal("Claude stream did not emit message_start while buffering high-risk output")
+	}
+	if strings.Contains(initial, "stream now") || strings.Contains(initial, "content_block_delta") || strings.Contains(initial, "message_stop") {
+		t.Fatalf("high-risk output leaked before upstream completion: %s", initial)
+	}
 	select {
 	case <-firstText:
-		// The upstream is deliberately held open. Seeing this event here proves
-		// the proxy did not wait for EOF before forwarding visible text.
-	case <-time.After(750 * time.Millisecond):
-		t.Fatal("visible text was held until upstream completion")
+		t.Fatal("high-risk text was emitted before upstream completion")
+	case <-time.After(100 * time.Millisecond):
 	}
 
 	release()

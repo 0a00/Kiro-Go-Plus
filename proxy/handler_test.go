@@ -45,12 +45,12 @@ func TestConfigureClaudeToolStreamingModes(t *testing.T) {
 		requireExplicitTool bool
 		toolName            string
 	}{
-		{name: "safe inferred", mode: config.ToolStreamModeSafe, policy: toolUsePolicyInferred, requireActionable: true, streamThinking: true},
-		{name: "adaptive high risk", mode: config.ToolStreamModeAdaptive, policy: toolUsePolicyInferred, requireActionable: true, streamThinking: true, toolName: "Write"},
+		{name: "safe inferred", mode: config.ToolStreamModeSafe, policy: toolUsePolicyInferred, requireActionable: true, deferText: true, streamThinking: true},
+		{name: "adaptive high risk", mode: config.ToolStreamModeAdaptive, policy: toolUsePolicyInferred, requireActionable: true, deferText: true, streamThinking: true, toolName: "Write"},
 		{name: "adaptive low risk", mode: config.ToolStreamModeAdaptive, policy: toolUsePolicyInferred, streamToolDeltas: true, toolName: "WebSearch"},
-		{name: "balanced inferred", mode: config.ToolStreamModeBalanced, policy: toolUsePolicyInferred},
+		{name: "balanced inferred", mode: config.ToolStreamModeBalanced, policy: toolUsePolicyInferred, requireActionable: true, deferText: true, streamThinking: true},
 		{name: "live inferred", mode: config.ToolStreamModeLive, policy: toolUsePolicyInferred, streamToolDeltas: true},
-		{name: "balanced explicit", mode: config.ToolStreamModeBalanced, policy: toolUsePolicyExplicit, requireActionable: true, streamThinking: true, requireExplicitTool: true},
+		{name: "balanced explicit", mode: config.ToolStreamModeBalanced, policy: toolUsePolicyExplicit, requireActionable: true, deferText: true, streamThinking: true, requireExplicitTool: true},
 		{name: "live explicit", mode: config.ToolStreamModeLive, policy: toolUsePolicyExplicit, requireActionable: true, streamThinking: true, streamToolDeltas: true, requireExplicitTool: true},
 	}
 
@@ -1016,7 +1016,7 @@ func TestClaudeLiveModeCommitsInferredTextBeforeUpstreamCompletes(t *testing.T) 
 	}
 }
 
-func TestClaudeBalancedModeStreamsTextButBuffersToolArguments(t *testing.T) {
+func TestClaudeBalancedModeBuffersHighRiskOutputUntilCompletion(t *testing.T) {
 	t.Setenv("ALLOW_UNAUTHENTICATED_API", "true")
 	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatalf("config.Init: %v", err)
@@ -1095,24 +1095,37 @@ func TestClaudeBalancedModeStreamsTextButBuffersToolArguments(t *testing.T) {
 
 	reader := bufio.NewReader(resp.Body)
 	var first strings.Builder
-	for !strings.Contains(first.String(), "balanced-visible-text") {
+	for !strings.Contains(first.String(), `"type":"message_start"`) {
 		line, readErr := reader.ReadString('\n')
 		if readErr != nil {
 			t.Fatalf("read balanced text: %v body=%s", readErr, first.String())
 		}
 		first.WriteString(line)
 	}
-	if strings.Contains(first.String(), "first-balanced-fragment") || strings.Contains(first.String(), "input_json_delta") || strings.Contains(first.String(), "message_stop") {
-		t.Fatalf("balanced mode leaked incomplete tool arguments: %s", first.String())
+	if strings.Contains(first.String(), "balanced-visible-text") || strings.Contains(first.String(), "first-balanced-fragment") {
+		t.Fatalf("balanced mode leaked high-risk output before completion: %s", first.String())
 	}
 
-	time.Sleep(40 * time.Millisecond)
-	release()
-	rest, err := io.ReadAll(reader)
-	if err != nil {
-		t.Fatalf("read remaining balanced stream: %v", err)
+	type readResult struct {
+		body []byte
+		err  error
 	}
-	full := first.String() + string(rest)
+	readDone := make(chan readResult, 1)
+	go func() {
+		body, readErr := io.ReadAll(reader)
+		readDone <- readResult{body: body, err: readErr}
+	}()
+	select {
+	case early := <-readDone:
+		t.Fatalf("balanced high-risk stream completed before tool release: %v body=%s", early.err, early.body)
+	case <-time.After(40 * time.Millisecond):
+	}
+	release()
+	rest := <-readDone
+	if rest.err != nil {
+		t.Fatalf("read remaining balanced stream: %v", rest.err)
+	}
+	full := first.String() + string(rest.body)
 	if !strings.Contains(full, "first-balanced-fragment") || !strings.Contains(full, "second-balanced-fragment") || !strings.Contains(full, "message_stop") {
 		t.Fatalf("balanced stream is incomplete: %s", full)
 	}
@@ -1120,8 +1133,8 @@ func TestClaudeBalancedModeStreamsTextButBuffersToolArguments(t *testing.T) {
 		t.Fatalf("balanced mode should emit one complete tool argument delta: %s", full)
 	}
 	entries := h.requestLog.list(1)
-	if len(entries) != 1 || entries[0].FirstContentMs == nil || *entries[0].FirstContentMs >= entries[0].DurationMs {
-		t.Fatalf("balanced text latency was not captured before completion: %+v", entries)
+	if len(entries) != 1 || entries[0].FirstContentMs == nil || *entries[0].FirstContentMs < 35 {
+		t.Fatalf("balanced high-risk output was not held until completion: %+v", entries)
 	}
 }
 
@@ -1562,7 +1575,7 @@ func TestClaudeStreamEmitsHeartbeatWhileWaitingForAccount(t *testing.T) {
 	_ = resp.Body.Close()
 }
 
-func TestClaudeInferredToolStreamDoesNotReplayAfterVisiblePreambleFailure(t *testing.T) {
+func TestClaudeInferredToolStreamRecoversAfterBufferedPreambleFailure(t *testing.T) {
 	t.Setenv("ALLOW_UNAUTHENTICATED_API", "true")
 	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatalf("config.Init: %v", err)
@@ -1631,23 +1644,23 @@ func TestClaudeInferredToolStreamDoesNotReplayAfterVisiblePreambleFailure(t *tes
 		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 	body := rec.Body.String()
-	if upstreamCalls != 1 {
-		t.Fatalf("upstream calls = %d, want 1 after visible output", upstreamCalls)
+	if upstreamCalls != 2 {
+		t.Fatalf("upstream calls = %d, want one recovery attempt", upstreamCalls)
 	}
 	if strings.Count(body, "event: message_start") != 1 {
 		t.Fatalf("expected one immediate message_start, body=%s", body)
 	}
-	if !strings.Contains(body, "I will create the requested file now") {
-		t.Fatalf("visible preamble was not streamed before failure: %s", body)
+	if strings.Contains(body, "I will create the requested file now") {
+		t.Fatalf("failed execution preamble leaked into the recovered stream: %s", body)
 	}
-	if !strings.Contains(body, "reasoning from the failed attempt") {
-		t.Fatalf("thinking output was not streamed downstream: %s", body)
+	if !strings.Contains(body, `"type":"tool_use"`) || !strings.Contains(body, "toolu_write") {
+		t.Fatalf("recovered tool call was not streamed: %s", body)
 	}
-	if strings.Contains(body, `"type":"tool_use"`) || strings.Contains(body, "event: message_stop") {
-		t.Fatalf("failed stream was reported as a recovered success: %s", body)
+	if !strings.Contains(body, "event: message_stop") {
+		t.Fatalf("recovered stream did not complete: %s", body)
 	}
-	if !strings.Contains(body, `"type":"error"`) {
-		t.Fatalf("expected an SSE error after the visible stream was truncated: %s", body)
+	if strings.Contains(body, `"type":"error"`) {
+		t.Fatalf("recovered stream unexpectedly returned an SSE error: %s", body)
 	}
 }
 

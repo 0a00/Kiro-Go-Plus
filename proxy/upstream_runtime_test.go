@@ -1519,3 +1519,17 @@ func TestKiroPayloadTracksTokenRefreshAttemptsPerAccount(t *testing.T) {
 		t.Fatal("expected account b to retain its own refresh attempt")
 	}
 }
+
+func TestRetryablePreOutputToolTruncationRequiresPayloadRebuild(t *testing.T) {
+	gate := &meaningfulStreamCallback{}
+	err := newToolOutputTruncatedError("Kiro IDE", &EventStreamError{
+		Kind: EventStreamIncompleteToolUse, ToolName: "Write", ArgumentBytes: 32,
+	})
+	if isRetryablePreOutputStreamError(err, gate) {
+		t.Fatal("tool truncation must use the payload-rebuilding recovery path")
+	}
+	gate.emitted.Store(true)
+	if isRetryablePreOutputStreamError(err, gate) {
+		t.Fatal("incomplete tool use after client output must not be replayed")
+	}
+}

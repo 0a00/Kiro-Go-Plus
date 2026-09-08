@@ -2121,8 +2121,9 @@ func configureClaudeToolStreaming(payload *KiroPayload, req *ClaudeRequest, thin
 	safeMode := thinkingCfg.ToolStreamMode == config.ToolStreamModeSafe
 	liveMode := thinkingCfg.ToolStreamMode == config.ToolStreamModeLive
 	adaptiveMode := thinkingCfg.ToolStreamMode == config.ToolStreamModeAdaptive
+	balancedMode := thinkingCfg.ToolStreamMode == config.ToolStreamModeBalanced
 	highRiskTools := hasHighRiskToolNames(claudeToolNames(req.Tools))
-	useSafeBehavior := safeMode || (adaptiveMode && highRiskTools)
+	useSafeBehavior := safeMode || ((adaptiveMode || balancedMode) && highRiskTools)
 	useLiveBehavior := liveMode || (adaptiveMode && !highRiskTools)
 	strictToolUse := requiresStrictClaudeToolUse(req)
 	guardToolStream := len(req.Tools) > 0 && (useSafeBehavior || strictToolUse)
@@ -2130,10 +2131,9 @@ func configureClaudeToolStreaming(payload *KiroPayload, req *ClaudeRequest, thin
 
 	payload.requireActionableOutput = (len(req.Tools) > 0 || thinking) && (!req.Stream || guardActionableStream)
 	payload.toolUsePolicy = req.ToolUsePolicy
-	// Client-visible text must be committed as soon as it is validated. Deferring
-	// the whole inferred-tool response until EOF makes a live Claude stream look
-	// stalled; incomplete tool arguments remain protected by the upstream gate.
-	payload.deferTextUntilComplete = false
+	// High-risk workspace tools keep their preamble and arguments buffered until
+	// completion. Other tool turns still commit validated text promptly.
+	payload.deferTextUntilComplete = useSafeBehavior && guardActionableStream && highRiskTools
 	payload.streamThinkingPrecommit = guardActionableStream && thinking && !thinkingOpts.OmitDisplay
 	payload.streamToolUseDeltas = req.Stream && len(req.Tools) > 0 && useLiveBehavior
 	// Inferred workspace intent adds strong tool guidance, but only an explicit
@@ -2195,6 +2195,7 @@ func (h *Handler) handleClaudeMessages(w http.ResponseWriter, r *http.Request) {
 	if routedModel, decision, changed := h.resolveRequestModelRoute(req.Model, actualModel, apiKeyID); changed {
 		actualModel = routedModel
 		fallbackDecision = decision
+		contextWindowTokens = resolveContextWindowTokens(actualModel, req.ContextWindow, req.MaxInputTokens)
 		logger.Warnf("[ModelFallback] routing %s to %s before dispatch (rule=%s)", requestedModel, actualModel, decision.Rule.ID)
 	}
 	if !h.requestedModelAvailable(req.Model, actualModel) {
@@ -3465,6 +3466,7 @@ func (h *Handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 	if routedModel, decision, changed := h.resolveRequestModelRoute(req.Model, actualModel, apiKeyID); changed {
 		actualModel = routedModel
 		fallbackDecision = decision
+		contextWindowTokens = resolveContextWindowTokens(actualModel, req.ContextWindow, req.MaxInputTokens)
 		logger.Warnf("[ModelFallback] routing %s to %s before dispatch (rule=%s)", requestedModel, actualModel, decision.Rule.ID)
 	}
 	if !h.requestedModelAvailable(req.Model, actualModel) {
