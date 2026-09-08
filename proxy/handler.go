@@ -2264,7 +2264,7 @@ func (h *Handler) handleClaudeMessages(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, thinkingOpts claudeThinkingResponseOptions, estimatedInputTokens int, cacheProfile *promptCacheProfile, apiKeyID, routeKey string) {
 	startedAt := time.Now()
 	firstContent := payload.beginRequestTiming(startedAt)
-	responseModel := exposedModelID(model)
+	responseModel := exposedRequestModel(payload, model)
 	prepareSSEHeaders(w)
 
 	flusher, ok := w.(http.Flusher)
@@ -3525,7 +3525,7 @@ func (h *Handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int, cacheProfile *promptCacheProfile, apiKeyID string) {
 	startedAt := time.Now()
 	firstContent := payload.beginRequestTiming(startedAt)
-	responseModel := exposedModelID(model)
+	responseModel := exposedRequestModel(payload, model)
 	prepareSSEHeaders(w)
 
 	flusher, ok := w.(http.Flusher)

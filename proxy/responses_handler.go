@@ -289,7 +289,7 @@ func (h *Handler) handleResponsesNonStream(
 ) {
 	startedAt := time.Now()
 	firstContent := payload.beginRequestTiming(startedAt)
-	responseModel := exposedModelID(model)
+	responseModel := exposedRequestModel(payload, model)
 	attempts := h.newAccountAttemptController(payload.requestContext)
 	excluded := attempts.excluded
 	var lastErr error
@@ -613,7 +613,7 @@ func (h *Handler) handleResponsesStream(
 ) {
 	startedAt := time.Now()
 	firstContent := payload.beginRequestTiming(startedAt)
-	responseModel := exposedModelID(model)
+	responseModel := exposedRequestModel(payload, model)
 	prepareSSEHeaders(w)
 
 	flusher, ok := w.(http.Flusher)

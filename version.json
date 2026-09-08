@@ -1,5 +1,5 @@
 {
-  "version": "1.2.70",
-  "changelog": "Separate tool steering and use balanced high-risk tool streaming.\n分离工具提示注入，并对高风险工具使用平衡流模式。",
+  "version": "1.2.71",
+  "changelog": "Keep fallback routing internal in user-visible logs and responses.\n隐藏用户日志和响应中的兜底路由细节。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }

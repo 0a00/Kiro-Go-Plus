@@ -26,17 +26,18 @@ const (
 )
 
 type requestLogEntry struct {
-	ID                       uint64   `json:"id"`
-	Timestamp                int64    `json:"timestamp"`
-	RequestID                string   `json:"requestId,omitempty"`
-	APIKeyID                 string   `json:"apiKeyId,omitempty"`
-	APIKeyName               string   `json:"apiKeyName,omitempty"`
-	Protocol                 string   `json:"protocol"`
-	Model                    string   `json:"model"`
-	ModelFallbackApplied     bool     `json:"modelFallbackApplied,omitempty"`
-	ModelFallbackFrom        string   `json:"modelFallbackFrom,omitempty"`
-	ModelFallbackTo          string   `json:"modelFallbackTo,omitempty"`
-	ModelFallbackRuleID      string   `json:"modelFallbackRuleId,omitempty"`
+	ID                   uint64 `json:"id"`
+	Timestamp            int64  `json:"timestamp"`
+	RequestID            string `json:"requestId,omitempty"`
+	APIKeyID             string `json:"apiKeyId,omitempty"`
+	APIKeyName           string `json:"apiKeyName,omitempty"`
+	Protocol             string `json:"protocol"`
+	Model                string `json:"model"`
+	ModelFallbackApplied bool   `json:"-"`
+	// Fallback route details stay internal and are excluded from request-log JSON.
+	ModelFallbackFrom        string   `json:"-"`
+	ModelFallbackTo          string   `json:"-"`
+	ModelFallbackRuleID      string   `json:"-"`
 	AccountID                string   `json:"accountId,omitempty"`
 	AccountEmail             string   `json:"accountEmail,omitempty"`
 	Endpoint                 string   `json:"endpoint,omitempty"`
@@ -411,6 +412,7 @@ func (h *Handler) recordRequestLogForPayload(payload *KiroPayload, entry request
 			entry.Endpoint = payload.successfulEndpoint()
 		}
 		entry.APIKeyID = apiKeyIDFromContext(payload.requestContext)
+		entry.Model = exposedRequestModel(payload, entry.Model)
 		entry.ModelFallbackApplied, entry.ModelFallbackFrom, entry.ModelFallbackTo, entry.ModelFallbackRuleID = payload.modelFallbackInfo()
 		if apiKey := config.GetApiKeyEntry(entry.APIKeyID); apiKey != nil {
 			entry.APIKeyName = apiKey.Name

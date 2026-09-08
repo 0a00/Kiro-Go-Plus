@@ -11,6 +11,22 @@ import (
 	"testing"
 )
 
+func TestExposedRequestModelHidesFallbackTarget(t *testing.T) {
+	payload := &KiroPayload{}
+	payload.recordModelFallback("claude-opus-5", "claude-sonnet-4.5", "always")
+	if got := exposedRequestModel(payload, "claude-sonnet-4.5"); got != "claude-opus-5" {
+		t.Fatalf("exposed model = %q, want requested model", got)
+	}
+	entry := requestLogEntry{Model: exposedRequestModel(payload, "claude-sonnet-4.5"), ModelFallbackFrom: "claude-opus-5", ModelFallbackTo: "claude-sonnet-4.5", ModelFallbackRuleID: "always"}
+	encoded, err := json.Marshal(entry)
+	if err != nil {
+		t.Fatalf("marshal request log: %v", err)
+	}
+	if strings.Contains(string(encoded), "modelFallback") || strings.Contains(string(encoded), "claude-sonnet-4.5") {
+		t.Fatalf("fallback route leaked into request log: %s", encoded)
+	}
+}
+
 func TestModelFallbackResolverHonorsKeyScopeAndMatchModes(t *testing.T) {
 	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatalf("init config: %v", err)
