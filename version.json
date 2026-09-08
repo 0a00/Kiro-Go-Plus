@@ -1,5 +1,5 @@
 {
-  "version": "1.2.71",
-  "changelog": "Keep fallback routing internal in user-visible logs and responses.\n隐藏用户日志和响应中的兜底路由细节。",
+  "version": "1.2.72",
+  "changelog": "Hide fallback targets from count-token logs too.\n同时隐藏 count_tokens 日志中的兜底目标模型。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }

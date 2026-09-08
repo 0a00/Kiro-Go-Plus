@@ -2105,7 +2105,7 @@ func (h *Handler) handleCountTokens(w http.ResponseWriter, r *http.Request) {
 	h.recordRequestLogForContext(r.Context(), requestLogEntry{
 		Timestamp:    time.Now().Unix(),
 		Protocol:     "claude.count_tokens",
-		Model:        req.Model,
+		Model:        exposedModelID(requestedModel),
 		Status:       "success",
 		StatusCode:   http.StatusOK,
 		DurationMs:   requestDurationMs(startedAt),
