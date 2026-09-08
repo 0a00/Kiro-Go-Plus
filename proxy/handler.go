@@ -3379,13 +3379,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 				DurationMs:     requestDurationMs(startedAt),
 				Error:          busyErr.Error(),
 			})
-			h.recordDiagnosticFailure(diagnosticLogEntry{
-				Protocol:       "claude.messages",
-				Model:          model,
-				StatusCode:     429,
-				Error:          busyErr.Error(),
-				RequestSummary: summarizeKiroPayload(payload),
-			})
+			h.recordDiagnosticFailureForPayload("claude.messages", model, nil, 429, busyErr, payload)
 			w.Header().Set("Retry-After", retryAfterSeconds(upstreamBusyRetryAfter(busyErr)))
 			h.sendClaudeError(w, 429, "rate_limit_error", busyErr.Error())
 			return
@@ -3407,13 +3401,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 		DurationMs:     requestDurationMs(startedAt),
 		Error:          lastErr.Error(),
 	})
-	h.recordDiagnosticFailure(diagnosticLogEntry{
-		Protocol:       "claude.messages",
-		Model:          model,
-		StatusCode:     mapped.Status,
-		Error:          lastErr.Error(),
-		RequestSummary: summarizeKiroPayload(payload),
-	})
+	h.recordDiagnosticFailureForPayload("claude.messages", model, nil, mapped.Status, lastErr, payload)
 	applyDownstreamErrorHeaders(w, mapped)
 	h.sendClaudeError(w, mapped.Status, mapped.ClaudeType, lastErr.Error())
 }
