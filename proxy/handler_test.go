@@ -42,6 +42,7 @@ func TestConfigureClaudeToolStreamingModes(t *testing.T) {
 		deferText           bool
 		streamThinking      bool
 		streamToolDeltas    bool
+		claudeCode          bool
 		requireExplicitTool bool
 		toolName            string
 	}{
@@ -49,6 +50,7 @@ func TestConfigureClaudeToolStreamingModes(t *testing.T) {
 		{name: "adaptive high risk", mode: config.ToolStreamModeAdaptive, policy: toolUsePolicyInferred, requireActionable: true, deferText: true, streamThinking: true, toolName: "Write"},
 		{name: "adaptive low risk", mode: config.ToolStreamModeAdaptive, policy: toolUsePolicyInferred, streamToolDeltas: true, toolName: "WebSearch"},
 		{name: "balanced inferred", mode: config.ToolStreamModeBalanced, policy: toolUsePolicyInferred, requireActionable: true, deferText: true, streamThinking: true},
+		{name: "balanced Claude Code", mode: config.ToolStreamModeBalanced, policy: toolUsePolicyInferred, streamToolDeltas: true, requireActionable: true, deferText: true, streamThinking: true, claudeCode: true},
 		{name: "live inferred", mode: config.ToolStreamModeLive, policy: toolUsePolicyInferred, streamToolDeltas: true},
 		{name: "balanced explicit", mode: config.ToolStreamModeBalanced, policy: toolUsePolicyExplicit, requireActionable: true, deferText: true, streamThinking: true, requireExplicitTool: true},
 		{name: "live explicit", mode: config.ToolStreamModeLive, policy: toolUsePolicyExplicit, requireActionable: true, streamThinking: true, streamToolDeltas: true, requireExplicitTool: true},
@@ -64,6 +66,9 @@ func TestConfigureClaudeToolStreamingModes(t *testing.T) {
 				Stream:        true,
 				Tools:         []ClaudeTool{{Name: toolName}},
 				ToolUsePolicy: tc.policy,
+			}
+			if tc.claudeCode {
+				req.ClientUserAgent = "claude-code/2.1.263"
 			}
 			payload := &KiroPayload{}
 			configureClaudeToolStreaming(payload, req, true, claudeThinkingResponseOptions{}, config.ThinkingConfig{ToolStreamMode: tc.mode})

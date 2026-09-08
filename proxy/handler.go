@@ -2137,7 +2137,11 @@ func configureClaudeToolStreaming(payload *KiroPayload, req *ClaudeRequest, thin
 	// completion. Other tool turns still commit validated text promptly.
 	payload.deferTextUntilComplete = useSafeBehavior && guardActionableStream && highRiskTools
 	payload.streamThinkingPrecommit = guardActionableStream && thinking && !thinkingOpts.OmitDisplay
-	payload.streamToolUseDeltas = req.Stream && len(req.Tools) > 0 && useLiveBehavior
+	claudeCodeClient := strings.Contains(strings.ToLower(req.ClientUserAgent), "claude-code")
+	// Claude Code needs visible progress while long tool JSON is assembled.
+	// Keep the safer buffered behavior for other clients in balanced mode.
+	payload.streamToolUseDeltas = req.Stream && len(req.Tools) > 0 &&
+		(useLiveBehavior || (balancedMode && claudeCodeClient))
 	// Inferred workspace intent adds strong tool guidance, but only an explicit
 	// client tool_choice may reject an otherwise valid text response.
 	payload.requireToolUse = strictToolUse
@@ -2163,6 +2167,7 @@ func (h *Handler) handleClaudeMessages(w http.ResponseWriter, r *http.Request) {
 		h.sendClaudeError(w, 400, "invalid_request_error", "Invalid JSON: "+err.Error())
 		return
 	}
+	req.ClientUserAgent = r.UserAgent()
 	r = h.attachRequestDetailTrace(r, "claude.messages", body)
 	r = r.WithContext(withRequestedModel(r.Context(), req.Model))
 	w, detailStatus := wrapRequestDetailResponseWriter(w, r.Context())

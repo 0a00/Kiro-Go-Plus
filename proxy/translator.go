@@ -178,6 +178,7 @@ type ClaudeRequest struct {
 	AgentToolSteering bool   `json:"-"`
 	NativeEffort      string `json:"-"`
 	NativeEffortPath  string `json:"-"`
+	ClientUserAgent   string `json:"-"`
 }
 
 type ClaudeThinkingConfig struct {
