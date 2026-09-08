@@ -14,15 +14,16 @@ import (
 )
 
 type loadProbe struct {
-	protocol       string
-	path           string
-	stream         bool
-	payload        map[string]interface{}
-	expectedMarker string
-	workload       string
-	validation     string
-	expectedTool   string
-	minOutputChars int
+	protocol         string
+	path             string
+	stream           bool
+	payload          map[string]interface{}
+	expectedMarker   string
+	workload         string
+	validation       string
+	expectedTool     string
+	minOutputChars   int
+	allowOutputLimit bool
 }
 
 const (
@@ -69,7 +70,7 @@ func (r *runner) buildConfiguredLoadProbe(index, maxTokens int) loadProbe {
 		return loadProbe{
 			protocol: "anthropic", path: "/v1/messages", stream: true,
 			payload:        claudePayload(r.model, true, prompt, maxTokens),
-			expectedMarker: marker, workload: "long-stream", validation: loadValidationContains, minOutputChars: minimum,
+			expectedMarker: marker, workload: "long-stream", validation: loadValidationContains, minOutputChars: minimum, allowOutputLimit: true,
 		}
 	case 8:
 		return loadToolProbe(r.model, marker, maxTokens, "load_echo", "function-tool")
@@ -166,6 +167,7 @@ func (r *runner) runThinkingProtocols(parent context.Context) {
 		result := streamScenarioResult(test.name, test.protocol, r.thinking, response)
 		if result.Status == statusPass && response.stream.thinkingDeltas == 0 {
 			result.Detail += "; no protocol-visible reasoning delta observed"
+			result.Status = statusWarn
 		}
 		r.add(result)
 	}

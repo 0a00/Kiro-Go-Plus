@@ -41,6 +41,11 @@ cancellation recovery, and optional WebSearch. Select expensive cases with
 checks warn instead of failing when the selected upstream accounting mode or
 model intentionally hides those fields.
 
+Missing visible reasoning is always a warning, even when the answer succeeds.
+The Claude thinking probe reserves 1,024 thinking tokens within a 4,096-token
+output limit. Tool continuation probes also exercise omitted tool definitions;
+the gateway must preserve results as text when structured Kiro tools cannot be used.
+
 Each stream result separates response-header time, first valid SSE event, first
 semantic output (TTFT), first text, first thinking, first tool output, maximum
 protocol-event gap, maximum wire-activity gap, SSE heartbeat count, and total
@@ -133,6 +138,12 @@ through protocol modes, thinking, long output, function tools, MCP-shaped
 tools, image input, prompt cache, and Skill-style system context. Add
 `--web-search` to include a bounded native WebSearch case; this consumes
 external search quota.
+
+The realistic long-output probe intentionally approaches the output limit. A
+normal token-limit stop passes only with a terminal event and valid marker and
+minimum content length. Truncation, filtering, and unexpected limits in other
+workloads remain failures. Use a test key without concurrency limits for capacity
+measurements; key admission limits otherwise confound upstream load results.
 
 Arrival and concurrency controls are explicit:
 

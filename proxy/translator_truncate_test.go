@@ -120,6 +120,7 @@ func TestPayloadTruncationShrinksActiveToolResultWithoutOrphaning(t *testing.T) 
 	huge := strings.Repeat("中", 50_000)
 	payload := ClaudeToKiro(&ClaudeRequest{
 		Model: "claude-sonnet-4.6",
+		Tools: []ClaudeTool{{Name: "Read", InputSchema: map[string]interface{}{"type": "object"}}},
 		Messages: []ClaudeMessage{
 			{Role: "user", Content: "read it"},
 			{Role: "assistant", Content: []interface{}{map[string]interface{}{

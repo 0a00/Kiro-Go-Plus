@@ -344,7 +344,11 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 	// the last history assistant must carry matching structured toolUses. If not
 	// (orphaned tool results, e.g. after context compaction), flatten them into
 	// the current message text so the upstream does not reject the request.
+	kiroTools, toolInputPolicies := convertClaudeToolsWithRegistry(req.Tools, toolNames, req.AgentToolSteering)
 	orderedToolResults, keepCurrentToolResults := orderToolResultsForLastAssistant(history, currentToolResults)
+	// Kiro requires tool definitions even for an already completed tool turn.
+	// Without them, preserve results as text and remove structured history too.
+	keepCurrentToolResults = keepCurrentToolResults && len(kiroTools) > 0
 
 	// Flatten structured tool calls/results that live in history; upstream only
 	// accepts a single active tool turn (last assistant toolUses ⟺ current toolResults).
@@ -374,9 +378,6 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 		}
 	}
 	finalContent = appendClaudeRequiredToolAction(finalContent, req)
-
-	// 转换工具
-	kiroTools, toolInputPolicies := convertClaudeToolsWithRegistry(req.Tools, toolNames, req.AgentToolSteering)
 
 	// 构建 payload
 	payload := &KiroPayload{}
@@ -1739,7 +1740,9 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 
 	// Decide whether current tool results form a valid active tool turn; if not,
 	// flatten them into the current message text (see ClaudeToKiro for rationale).
+	kiroTools, toolInputPolicies := convertOpenAIToolsWithRegistry(req.Tools, toolNames)
 	orderedToolResults, keepCurrentToolResults := orderToolResultsForLastAssistant(history, currentToolResults)
+	keepCurrentToolResults = keepCurrentToolResults && len(kiroTools) > 0
 
 	if keepCurrentToolResults {
 		currentToolResults = orderedToolResults
@@ -1766,9 +1769,6 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 			finalContent = strings.TrimSpace(finalContent + "\n\n" + continuation)
 		}
 	}
-
-	// 转换工具
-	kiroTools, toolInputPolicies := convertOpenAIToolsWithRegistry(req.Tools, toolNames)
 
 	// 构建 payload
 	payload := &KiroPayload{}
@@ -2432,6 +2432,13 @@ func repairKiroPayloadToolResults(payload *KiroPayload) {
 	current := &payload.ConversationState.CurrentMessage.UserInputMessage
 	currentResults := []KiroToolResult(nil)
 	repaired := false
+	if context := current.UserInputMessageContext; context == nil || len(context.Tools) == 0 {
+		// A matched pair alone is insufficient: Kiro also requires toolConfig.
+		if historyHasStructuredToolData(payload.ConversationState.History) {
+			payload.ConversationState.History = sanitizeKiroHistory(payload.ConversationState.History, nil)
+			repaired = true
+		}
+	}
 	if context := current.UserInputMessageContext; context != nil && len(context.ToolResults) > 0 {
 		if ordered, ok := orderToolResultsForLastAssistant(payload.ConversationState.History, context.ToolResults); ok {
 			repaired = !sameToolResultOrder(context.ToolResults, ordered)

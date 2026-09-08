@@ -241,9 +241,12 @@ func (r *runner) runThinkingStream(parent context.Context) {
 	ctx, cancel := r.scenarioContext(parent)
 	defer cancel()
 	prompt := "Calculate 137 * 43 carefully, then give the final number in one sentence."
-	response := r.post(ctx, "/v1/messages", claudePayload(r.thinking, true, prompt, 768), true, true)
+	payload := claudePayload(r.thinking, true, prompt, 4096)
+	payload["thinking"] = map[string]interface{}{"type": "enabled", "budget_tokens": 1024}
+	response := r.post(ctx, "/v1/messages", payload, true, true)
 	result := streamScenarioResult("thinking-stream", "anthropic", r.thinking, response)
 	if result.Status == statusPass && response.stream.thinkingDeltas == 0 {
+		result.Status = statusWarn
 		result.Detail += "; no thinking_delta observed (model or server setting may suppress reasoning)"
 	}
 	r.add(result)
@@ -1210,7 +1213,8 @@ func classifyLoadSample(response apiResponse, probe loadProbe) loadSample {
 		sample.category = "http_other"
 	case probe.stream && response.stream.errorEvent != "":
 		sample.category = "sse_error"
-	case probe.stream && response.stream.incomplete:
+	case probe.stream && response.stream.incomplete && !(probe.allowOutputLimit &&
+		(response.stream.stopReason == "max_tokens" || response.stream.stopReason == "length" || response.stream.stopReason == "max_output_tokens")):
 		sample.category = "output_limit"
 	case probe.stream && (!response.stream.terminal || !response.stream.semanticOutput):
 		sample.category = "stream_protocol"

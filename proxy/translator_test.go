@@ -709,6 +709,7 @@ func TestClaudeToolResultImageAttachedToCurrentMessage(t *testing.T) {
 	const imgData = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
 	req := &ClaudeRequest{
 		Model: "claude-opus-4.8",
+		Tools: []ClaudeTool{{Name: "read", InputSchema: map[string]interface{}{"type": "object"}}},
 		Messages: []ClaudeMessage{
 			{Role: "user", Content: "read this image"},
 			{

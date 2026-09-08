@@ -1,5 +1,5 @@
 {
-  "version": "1.2.68",
-  "changelog": "Add independent Agent Tool Steering control and sync upstream safety hardening.\n增加独立 Agent Tool Steering 控制，并同步上游安全加固。",
+  "version": "1.2.69",
+  "changelog": "Preserve tool continuations without definitions and tighten production test verdicts.\n修复缺少工具定义时的结果续接，并完善思考输出及压力测试判定。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }

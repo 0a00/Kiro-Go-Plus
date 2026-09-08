@@ -13,6 +13,35 @@ import (
 	"time"
 )
 
+func TestThinkingWithoutReasoningReportsWarning(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		switch req.URL.Path {
+		case "/v1/messages":
+			var payload map[string]interface{}
+			if err := json.NewDecoder(req.Body).Decode(&payload); err != nil {
+				t.Error(err)
+			}
+			if payload["thinking"] == nil || payload["max_tokens"] != float64(4096) {
+				t.Error("thinking probe must explicitly reserve a sufficient budget")
+			}
+			writeSSEFixture(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"answer\"}}\n\n", "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+		case "/v1/chat/completions":
+			writeSSEFixture(w, "data: {\"choices\":[{\"delta\":{\"content\":\"answer\"},\"finish_reason\":null}]}\n\n", "data: [DONE]\n\n")
+		default:
+			writeSSEFixture(w, "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"answer\"}\n\n", "event: response.completed\ndata: {\"type\":\"response.completed\"}\n\n")
+		}
+	}))
+	defer server.Close()
+	r := testRunner(server)
+	r.runThinkingStream(context.Background())
+	r.runThinkingProtocols(context.Background())
+	for _, result := range r.results {
+		if result.Status != statusWarn {
+			t.Fatalf("missing reasoning was not reported as warning: %+v", result)
+		}
+	}
+}
+
 func testRunner(server *httptest.Server) *runner {
 	return &runner{
 		opts:      options{baseURL: server.URL, timeout: 2 * time.Second},

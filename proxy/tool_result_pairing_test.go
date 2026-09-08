@@ -121,9 +121,61 @@ func TestClaudeToKiroFlattensMismatchedToolResults(t *testing.T) {
 	}
 }
 
+func TestClaudeToKiroFlattensValidToolResultWhenToolsAreOmitted(t *testing.T) {
+	request := &ClaudeRequest{
+		Model: "claude-sonnet-4.6",
+		Messages: []ClaudeMessage{
+			{Role: "assistant", Content: []interface{}{map[string]interface{}{"type": "tool_use", "id": "tool_a", "name": "test_tool", "input": map[string]interface{}{}}}},
+			{Role: "user", Content: []interface{}{map[string]interface{}{"type": "tool_result", "tool_use_id": "tool_a", "content": "result without schema"}}},
+		},
+	}
+	payload := ClaudeToKiro(request, false)
+	current := payload.ConversationState.CurrentMessage.UserInputMessage
+	if current.UserInputMessageContext != nil && len(current.UserInputMessageContext.ToolResults) > 0 {
+		t.Fatalf("tool result without definitions remained structured: %#v", current.UserInputMessageContext.ToolResults)
+	}
+	if !strings.Contains(current.Content, "result without schema") {
+		t.Fatalf("tool result was not preserved in text: %q", current.Content)
+	}
+	if historyHasStructuredToolData(payload.ConversationState.History) {
+		t.Fatal("history still requires toolConfig")
+	}
+}
+
+func TestPreflightFlattensToolPairWithoutDefinitions(t *testing.T) {
+	payload := &KiroPayload{}
+	payload.ConversationState.History = []KiroHistoryMessage{{AssistantResponseMessage: &KiroAssistantResponseMessage{
+		ToolUses: []KiroToolUse{{ToolUseID: "call", Name: "read"}},
+	}}}
+	payload.ConversationState.CurrentMessage.UserInputMessage = KiroUserInputMessage{
+		Content:                 "Continue with the result.",
+		UserInputMessageContext: &UserInputMessageContext{ToolResults: []KiroToolResult{pairingResult("call", "important output")}},
+	}
+	repairKiroPayloadToolResults(payload)
+	current := payload.ConversationState.CurrentMessage.UserInputMessage
+	if historyHasStructuredToolData(payload.ConversationState.History) || (current.UserInputMessageContext != nil && len(current.UserInputMessageContext.ToolResults) > 0) {
+		t.Fatal("preflight retained tool blocks without definitions")
+	}
+	if !strings.Contains(current.Content, "important output") || !strings.Contains(current.Content, "Continue with the result.") {
+		t.Fatalf("lost result or instruction: %q", current.Content)
+	}
+}
+
+func pairingTools(names ...string) []OpenAITool {
+	var tools []OpenAITool
+	for _, name := range names {
+		tool := OpenAITool{Type: "function"}
+		tool.Function.Name = name
+		tool.Function.Parameters = map[string]interface{}{"type": "object"}
+		tools = append(tools, tool)
+	}
+	return tools
+}
+
 func TestOpenAIToKiroOrdersParallelToolResults(t *testing.T) {
 	request := &OpenAIRequest{
 		Model: "claude-sonnet-4.6",
+		Tools: pairingTools("first", "second"),
 		Messages: []OpenAIMessage{
 			{Role: "user", Content: "run both"},
 			{Role: "assistant", ToolCalls: []ToolCall{
@@ -158,7 +210,8 @@ func TestResponsesInputToolPairingReachesOpenAITranslator(t *testing.T) {
 		t.Fatalf("parse responses input: %v", err)
 	}
 
-	payload := OpenAIToKiro(&OpenAIRequest{Model: "claude-sonnet-4.6", Messages: parsed.Messages}, false)
+	payload := OpenAIToKiro(&OpenAIRequest{Model: "claude-sonnet-4.6", Messages: parsed.Messages,
+		Tools: pairingTools("first", "second")}, false)
 	current := payload.ConversationState.CurrentMessage.UserInputMessage
 	if current.UserInputMessageContext == nil || len(current.UserInputMessageContext.ToolResults) != 2 {
 		t.Fatalf("responses tool results were not preserved: %#v", current.UserInputMessageContext)
