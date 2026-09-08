@@ -106,7 +106,6 @@
   "requests.toolRecovery": "tool truncation/recovery {0}/{1}",
   "requests.toolResultRepairs": "tool-result repairs {0}",
   "requests.toolSchemaRepairs": "tool-schema normalizations {0}",
-  "requests.modelFallback": "fallback to {0}",
   "requests.totalDuration": "Total",
   "requests.error": "Error",
 	"requests.detail": "Detail",

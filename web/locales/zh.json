@@ -106,7 +106,6 @@
   "requests.toolRecovery": "工具截断/恢复 {0}/{1}",
   "requests.toolResultRepairs": "工具结果修复 {0} 次",
   "requests.toolSchemaRepairs": "工具 Schema 兼容处理 {0} 次",
-  "requests.modelFallback": "兜底到 {0}",
   "requests.totalDuration": "总计",
   "requests.error": "错误",
 	"requests.detail": "详情",

@@ -110,7 +110,7 @@ func (h *Handler) recordDiagnosticFailure(entry diagnosticLogEntry) {
 func (h *Handler) recordDiagnosticFailureForPayload(protocol, model string, account *config.Account, statusCode int, err error, payload *KiroPayload) {
 	entry := diagnosticLogEntry{
 		Protocol:       protocol,
-		Model:          model,
+		Model:          exposedRequestModel(payload, model),
 		StatusCode:     statusCode,
 		Error:          diagnosticErrorMessage(err),
 		RequestSummary: summarizeKiroPayload(payload),

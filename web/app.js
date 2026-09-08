@@ -845,9 +845,6 @@
       if (item.toolSchemaRepairs) {
         outcomeParts.push(t('requests.toolSchemaRepairs', item.toolSchemaRepairs));
       }
-      if (item.modelFallbackApplied && item.modelFallbackTo) {
-        outcomeParts.push(t('requests.modelFallback', item.modelFallbackTo));
-      }
       const outcome = outcomeParts.join(' · ') || '-';
       const toolPayloadTitle = item.toolArgumentBytes
         ? ' · ' + t('requests.toolPayload', item.toolArgumentBytes, item.toolFragmentCount || 0)
