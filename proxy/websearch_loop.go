@@ -550,12 +550,13 @@ func (h *Handler) handleClaudeWebSearchLoop(
 ) {
 	startedAt := time.Now()
 	firstContent := newRequestFirstContentTimer(startedAt)
+	responseModel := exposedRequestModelForContext(ctx, req.Model)
 	var stream *webSearchSSESession
 	if req.Stream {
 		var err error
-		stream, err = newWebSearchSSESession(ctx, h, w, req.Model, estimatedInputTokens, firstContent)
+		stream, err = newWebSearchSSESession(ctx, h, w, responseModel, estimatedInputTokens, firstContent)
 		if err != nil {
-			h.sendClaudeError(w, http.StatusInternalServerError, "api_error", err.Error())
+			h.sendClaudeError(w, http.StatusInternalServerError, "api_error", publicErrorMessage(ctx, err))
 			return
 		}
 		defer stream.close()
@@ -589,19 +590,19 @@ func (h *Handler) handleClaudeWebSearchLoop(
 		if trace := requestDetailTraceFromContext(ctx); trace != nil {
 			trace.recordError(err)
 		}
-		h.recordDiagnosticFailure(diagnosticLogEntry{
-			RequestID: requestIDFromContext(ctx), Protocol: "claude.web_search.loop", Model: req.Model,
-			StatusCode: mapped.Status, Error: err.Error(), RequestSummary: summarizeClaudeRequest(req),
+		h.recordDiagnosticFailureForContext(ctx, diagnosticLogEntry{
+			RequestID: requestIDFromContext(ctx), Protocol: "claude.web_search.loop", Model: responseModel,
+			StatusCode: mapped.Status, Error: publicErrorMessage(ctx, err), RequestSummary: summarizeClaudeRequest(req),
 		})
 		entry := requestLogEntry{
-			Timestamp: time.Now().Unix(), Protocol: "claude.web_search.loop", Model: req.Model,
-			Status: "failed", StatusCode: mapped.Status, Error: err.Error(),
+			Timestamp: time.Now().Unix(), Protocol: "claude.web_search.loop", Model: responseModel,
+			Status: "failed", StatusCode: mapped.Status, Error: publicErrorMessage(ctx, err),
 		}
 		if stream != nil {
-			stream.sendError(mapped.ClaudeType, err.Error())
+			stream.sendError(mapped.ClaudeType, publicErrorMessage(ctx, err))
 		} else {
 			applyDownstreamErrorHeaders(w, mapped)
-			h.sendClaudeError(w, mapped.Status, mapped.ClaudeType, err.Error())
+			h.sendClaudeError(w, mapped.Status, mapped.ClaudeType, publicErrorMessage(ctx, err))
 		}
 		entry.DurationMs = requestDurationMs(startedAt)
 		firstContent.Apply(&entry)
@@ -614,7 +615,7 @@ func (h *Handler) handleClaudeWebSearchLoop(
 	}
 	h.recordSuccessForApiKey(ctx, apiKeyID, result.inputTokens, result.outputTokens, result.credits)
 	entry := requestLogEntry{
-		Timestamp: time.Now().Unix(), Protocol: "claude.web_search.loop", Model: req.Model,
+		Timestamp: time.Now().Unix(), Protocol: "claude.web_search.loop", Model: responseModel,
 		Status: "success", StatusCode: http.StatusOK,
 		InputTokens: result.inputTokens, OutputTokens: result.outputTokens, ThinkingTokens: result.thinkingTokens,
 		CacheReadInputTokens:     result.cacheUsage.CacheReadInputTokens,
@@ -632,7 +633,7 @@ func (h *Handler) handleClaudeWebSearchLoop(
 		stream.finish(result.content, result.stopReason, result.inputTokens, result.outputTokens, result.thinkingTokens, result.cacheUsage, result.webSearchRequests)
 	} else {
 		markWebSearchFirstContent(firstContent, result.content)
-		response := buildWebSearchLoopResponse(req.Model, result)
+		response := buildWebSearchLoopResponse(responseModel, result)
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		_ = json.NewEncoder(w).Encode(response)
 	}

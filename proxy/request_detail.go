@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
@@ -337,10 +338,16 @@ func (s *requestDetailStore) loadFrom(path string) error {
 	}
 
 	entries := make([]storedRequestDetail, 0, len(state.Entries))
+	rewrite := false
 	totalBytes := 0
 	for _, raw := range state.Entries {
 		if len(raw) == 0 || len(raw) > s.maxDetailBytes {
 			continue
+		}
+		cleanRaw := sanitizeStoredRequestDetailRaw(raw)
+		if len(cleanRaw) > 0 && !bytes.Equal(cleanRaw, raw) {
+			raw = cleanRaw
+			rewrite = true
 		}
 		var envelope struct {
 			RequestID string `json:"requestId"`
@@ -365,6 +372,9 @@ func (s *requestDetailStore) loadFrom(path string) error {
 	s.entries = append([]storedRequestDetail(nil), entries...)
 	s.totalBytes = totalBytes
 	s.mu.Unlock()
+	if rewrite {
+		s.scheduleSave()
+	}
 	return nil
 }
 
@@ -400,6 +410,7 @@ func (s *requestDetailStore) add(detail requestDetail) bool {
 	if s == nil || strings.TrimSpace(detail.RequestID) == "" {
 		return false
 	}
+	detail = publicRequestDetail(context.Background(), detail)
 	detail = boundRequestDetail(detail, s.currentMaxDetailBytes())
 	raw, err := json.Marshal(detail)
 	if err != nil || len(raw) == 0 || len(raw) > s.currentMaxDetailBytes() {
@@ -461,7 +472,8 @@ func (s *requestDetailStore) get(requestID string) (json.RawMessage, bool) {
 	defer s.mu.RUnlock()
 	for i := len(s.entries) - 1; i >= 0; i-- {
 		if s.entries[i].requestID == requestID {
-			return append(json.RawMessage(nil), s.entries[i].data...), true
+			raw := append(json.RawMessage(nil), s.entries[i].data...)
+			return sanitizeStoredRequestDetailRaw(raw), true
 		}
 	}
 	return nil, false
@@ -531,7 +543,7 @@ func (s *requestDetailStore) saveTo(path string) error {
 	s.mu.RLock()
 	entries := make([]json.RawMessage, len(s.entries))
 	for i := range s.entries {
-		entries[i] = append(json.RawMessage(nil), s.entries[i].data...)
+		entries[i] = sanitizeStoredRequestDetailRaw(s.entries[i].data)
 	}
 	s.mu.RUnlock()
 
@@ -1135,11 +1147,28 @@ func (h *Handler) recordRequestDetailForContext(ctx context.Context, entry reque
 	if !ok {
 		return h.ensureRequestDetailStore().has(entry.RequestID)
 	}
+	detail = publicRequestDetail(ctx, detail)
 	stored := h.ensureRequestDetailStore().add(detail)
 	if stored {
 		h.archiveRequestDetail(detail)
 	}
 	return stored
+}
+
+func sanitizeStoredRequestDetailRaw(raw []byte) json.RawMessage {
+	if len(raw) == 0 {
+		return raw
+	}
+	var detail requestDetail
+	if err := json.Unmarshal(raw, &detail); err != nil {
+		return append(json.RawMessage(nil), raw...)
+	}
+	clean := publicRequestDetail(context.Background(), detail)
+	encoded, err := json.Marshal(clean)
+	if err != nil {
+		return append(json.RawMessage(nil), raw...)
+	}
+	return encoded
 }
 
 func boundRequestDetail(detail requestDetail, maxBytes int) requestDetail {

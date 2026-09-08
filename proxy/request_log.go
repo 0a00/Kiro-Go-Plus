@@ -101,6 +101,29 @@ type requestLogEntry struct {
 	DetailAvailable          bool     `json:"detailAvailable,omitempty"`
 }
 
+// UnmarshalJSON accepts the fallback metadata written by versions before it
+// was made internal-only. The metadata is used only to restore the public
+// requested model and is never emitted again by MarshalJSON.
+func (entry *requestLogEntry) UnmarshalJSON(data []byte) error {
+	type requestLogEntryAlias requestLogEntry
+	aux := struct {
+		*requestLogEntryAlias
+		ModelFallbackApplied bool   `json:"modelFallbackApplied"`
+		ModelFallbackFrom    string `json:"modelFallbackFrom"`
+		ModelFallbackTo      string `json:"modelFallbackTo"`
+		ModelFallbackRuleID  string `json:"modelFallbackRuleId"`
+	}{requestLogEntryAlias: (*requestLogEntryAlias)(entry)}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	entry.ModelFallbackApplied = aux.ModelFallbackApplied
+	entry.ModelFallbackFrom = strings.TrimSpace(aux.ModelFallbackFrom)
+	entry.ModelFallbackTo = strings.TrimSpace(aux.ModelFallbackTo)
+	entry.ModelFallbackRuleID = strings.TrimSpace(aux.ModelFallbackRuleID)
+	*entry = publicRequestLogEntry(context.Background(), *entry)
+	return nil
+}
+
 type requestLog struct {
 	mu        sync.RWMutex
 	nextID    atomic.Uint64
@@ -185,6 +208,7 @@ func (l *requestLog) loadFrom(path string) error {
 	entries = append([]requestLogEntry(nil), entries...)
 	var maxID uint64
 	for i := range entries {
+		entries[i] = publicRequestLogEntry(context.Background(), entries[i])
 		if entries[i].ID == 0 {
 			maxID++
 			entries[i].ID = maxID
@@ -206,6 +230,7 @@ func (l *requestLog) add(entry requestLogEntry) {
 	if l == nil {
 		return
 	}
+	entry = publicRequestLogEntry(context.Background(), entry)
 	entry.ID = l.nextID.Add(1)
 	if entry.Timestamp == 0 {
 		entry.Timestamp = time.Now().Unix()
@@ -266,6 +291,7 @@ func (l *requestLog) saveTo(path string) error {
 	l.mu.RLock()
 	entries := append([]requestLogEntry(nil), l.entries...)
 	for i := range entries {
+		entries[i] = publicRequestLogEntry(context.Background(), entries[i])
 		if entries[i].RequestToolNames != nil {
 			entries[i].RequestToolNames = append([]string(nil), entries[i].RequestToolNames...)
 		}
@@ -331,7 +357,7 @@ func (l *requestLog) list(limit int) []requestLogEntry {
 	}
 	out := make([]requestLogEntry, 0, limit)
 	for i := len(l.entries) - 1; i >= 0 && len(out) < limit; i-- {
-		out = append(out, l.entries[i])
+		out = append(out, publicRequestLogEntry(context.Background(), l.entries[i]))
 	}
 	return out
 }
@@ -348,7 +374,7 @@ func (l *requestLog) listForAPIKey(apiKeyID string, limit int) []requestLogEntry
 		if l.entries[i].APIKeyID != apiKeyID {
 			continue
 		}
-		entry := l.entries[i]
+		entry := publicRequestLogEntry(context.Background(), l.entries[i])
 		if entry.RequestToolNames != nil {
 			entry.RequestToolNames = append([]string(nil), entry.RequestToolNames...)
 		}
@@ -412,8 +438,11 @@ func (h *Handler) recordRequestLogForPayload(payload *KiroPayload, entry request
 			entry.Endpoint = payload.successfulEndpoint()
 		}
 		entry.APIKeyID = apiKeyIDFromContext(payload.requestContext)
-		entry.Model = exposedRequestModel(payload, entry.Model)
 		entry.ModelFallbackApplied, entry.ModelFallbackFrom, entry.ModelFallbackTo, entry.ModelFallbackRuleID = payload.modelFallbackInfo()
+		entry = publicRequestLogEntry(payload.requestContext, entry)
+		if entry.Model == "" {
+			entry.Model = exposedRequestModel(payload, entry.Model)
+		}
 		if apiKey := config.GetApiKeyEntry(entry.APIKeyID); apiKey != nil {
 			entry.APIKeyName = apiKey.Name
 		}
@@ -456,6 +485,7 @@ func (h *Handler) recordRequestLogForPayload(payload *KiroPayload, entry request
 func (h *Handler) recordRequestLogForContext(ctx context.Context, entry requestLogEntry) {
 	entry.RequestID = requestIDFromContext(ctx)
 	entry.APIKeyID = apiKeyIDFromContext(ctx)
+	entry = publicRequestLogEntry(ctx, entry)
 	if apiKey := config.GetApiKeyEntry(entry.APIKeyID); apiKey != nil {
 		entry.APIKeyName = apiKey.Name
 	}

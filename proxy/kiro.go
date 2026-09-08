@@ -599,6 +599,7 @@ func (p *KiroPayload) recordModelFallback(from, to, ruleID string) {
 	if p == nil {
 		return
 	}
+	markModelRoute(p.requestContext, to)
 	p.runtimeMu.Lock()
 	p.modelFallbackApplied = true
 	p.modelFallbackFrom = strings.TrimSpace(from)

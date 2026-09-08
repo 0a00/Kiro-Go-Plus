@@ -44,6 +44,9 @@ type modelFallbackDecision struct {
 // stable when an internal fallback route is used.
 func exposedRequestModel(payload *KiroPayload, model string) string {
 	if payload != nil {
+		if publicModel := exposedRequestModelForContext(payload.requestContext, model); publicModel != exposedModelID(model) {
+			return publicModel
+		}
 		if applied, from, _, _ := payload.modelFallbackInfo(); applied && strings.TrimSpace(from) != "" {
 			return exposedModelID(from)
 		}

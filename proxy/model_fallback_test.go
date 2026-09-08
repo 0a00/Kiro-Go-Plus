@@ -161,6 +161,7 @@ func TestAlwaysFallbackUsesTargetContextWindowAcrossProtocols(t *testing.T) {
 				t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 			}
 			var response struct {
+				Model string                     `json:"model"`
 				Usage map[string]json.RawMessage `json:"usage"`
 			}
 			if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
@@ -172,6 +173,48 @@ func TestAlwaysFallbackUsesTargetContextWindowAcrossProtocols(t *testing.T) {
 			}
 			if got != 20_000 {
 				t.Fatalf("%s = %d, want 20000 from target model's 200K context window", tc.usageField, got)
+			}
+			if response.Model != "claude-opus-5" {
+				t.Fatalf("public model = %q, want requested model", response.Model)
+			}
+		})
+	}
+
+	streamTests := []struct {
+		name  string
+		path  string
+		body  string
+		serve func(http.ResponseWriter, *http.Request)
+	}{
+		{
+			name: "claude stream", path: "/v1/messages",
+			body:  `{"model":"claude-opus-5","stream":true,"max_tokens":256,"messages":[{"role":"user","content":"hello"}]}`,
+			serve: h.handleClaudeMessages,
+		},
+		{
+			name: "chat stream", path: "/v1/chat/completions",
+			body:  `{"model":"claude-opus-5","stream":true,"max_tokens":256,"messages":[{"role":"user","content":"hello"}]}`,
+			serve: h.handleOpenAIChat,
+		},
+		{
+			name: "responses stream", path: "/v1/responses",
+			body:  `{"model":"claude-opus-5","stream":true,"max_output_tokens":256,"input":"hello","store":false}`,
+			serve: h.handleOpenAIResponses,
+		},
+	}
+	for _, tc := range streamTests {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			tc.serve(rec, httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body)))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+			}
+			body := rec.Body.String()
+			if !strings.Contains(body, `claude-opus-5`) {
+				t.Fatalf("requested model missing from stream: %s", body)
+			}
+			if strings.Contains(body, `claude-sonnet-4.5`) {
+				t.Fatalf("fallback model leaked into stream: %s", body)
 			}
 		})
 	}

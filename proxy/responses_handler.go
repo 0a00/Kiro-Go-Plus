@@ -104,7 +104,11 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 		h.sendOpenAIError(w, 400, "invalid_request_error", "Invalid JSON")
 		return
 	}
+	if strings.TrimSpace(req.Model) == "" {
+		req.Model = defaultResponsesModel
+	}
 	r = h.attachRequestDetailTrace(r, "openai.responses", body)
+	r = r.WithContext(withRequestedModel(r.Context(), req.Model))
 	w, detailStatus := wrapRequestDetailResponseWriter(w, r.Context())
 	defer func() {
 		protocol := "openai.responses"
@@ -113,10 +117,6 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 		}
 		h.finalizeUnrecordedRequestDetail(r.Context(), detailStatus, startedAt, protocol, req.Model)
 	}()
-
-	if strings.TrimSpace(req.Model) == "" {
-		req.Model = defaultResponsesModel
-	}
 
 	storedInputCopy := append(json.RawMessage(nil), req.Input...)
 
@@ -219,6 +219,7 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 	if routedModel, decision, changed := h.resolveRequestModelRoute(req.Model, actualModel, apiKeyID); changed {
 		actualModel = routedModel
 		fallbackDecision = decision
+		markModelRoute(r.Context(), actualModel)
 		contextWindowTokens = resolveContextWindowTokens(actualModel, openaiReq.ContextWindow, openaiReq.MaxInputTokens)
 		logger.Warnf("[ModelFallback] routing %s to %s before dispatch (rule=%s)", requestedModel, actualModel, decision.Rule.ID)
 	}
@@ -228,6 +229,7 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 	}
 	if fallbackModel, changed := maybeLongToolFallback(actualModel, openaiReq.MaxTokens, openAIToolNames(openaiReq.Tools)); changed {
 		actualModel = fallbackModel
+		markModelRoute(r.Context(), actualModel)
 		contextWindowTokens = resolveContextWindowTokens(actualModel, openaiReq.ContextWindow, openaiReq.MaxInputTokens)
 	}
 	openaiReq.Model = actualModel
@@ -386,6 +388,7 @@ func (h *Handler) handleResponsesNonStream(
 			continue
 		}
 
+		responseModel = exposedRequestModel(payload, model)
 		finalContent, _ := extractThinkingFromContent(content)
 		if !thinking {
 			reasoningContent = ""
@@ -460,6 +463,7 @@ func (h *Handler) handleResponsesNonStream(
 	}
 	if lastErr == nil {
 		if busyErr != nil {
+			publicErr := publicErrorMessage(payloadContext(payload), busyErr)
 			h.recordFailure()
 			h.recordRequestLogForPayload(payload, requestLogEntry{
 				Timestamp:      time.Now().Unix(),
@@ -469,11 +473,11 @@ func (h *Handler) handleResponsesNonStream(
 				StatusCode:     429,
 				FirstContentMs: firstContent.Value(),
 				DurationMs:     requestDurationMs(startedAt),
-				Error:          busyErr.Error(),
+				Error:          publicErr,
 			})
 			h.recordDiagnosticFailureForPayload("openai.responses", model, nil, 429, busyErr, payload)
 			w.Header().Set("Retry-After", retryAfterSeconds(upstreamBusyRetryAfter(busyErr)))
-			h.sendOpenAIError(w, 429, "rate_limit_error", busyErr.Error())
+			h.sendOpenAIError(w, 429, "rate_limit_error", publicErr)
 			return
 		}
 		h.recordNoAvailableAccounts(payload, "openai.responses", model, startedAt, firstContent.Value())
@@ -481,6 +485,7 @@ func (h *Handler) handleResponsesNonStream(
 		return
 	}
 	mapped := mapDownstreamError(lastErr)
+	publicErr := publicErrorMessage(payloadContext(payload), lastErr)
 	h.recordFailure()
 	h.recordRequestLogForPayload(payload, requestLogEntry{
 		Timestamp:      time.Now().Unix(),
@@ -490,11 +495,11 @@ func (h *Handler) handleResponsesNonStream(
 		StatusCode:     mapped.Status,
 		FirstContentMs: firstContent.Value(),
 		DurationMs:     requestDurationMs(startedAt),
-		Error:          lastErr.Error(),
+		Error:          publicErr,
 	})
 	h.recordDiagnosticFailureForPayload("openai.responses", model, nil, mapped.Status, lastErr, payload)
 	applyDownstreamErrorHeaders(w, mapped)
-	h.sendOpenAIError(w, mapped.Status, mapped.OpenAIType, lastErr.Error())
+	h.sendOpenAIError(w, mapped.Status, mapped.OpenAIType, publicErr)
 }
 
 func buildResponsesObject(
@@ -659,6 +664,7 @@ func (h *Handler) handleResponsesStream(
 		writeDoneLocked()
 	}
 	sendFailure := func(errorType, message string) {
+		message = publicErrorText(payloadContext(payload), message)
 		sendTerminal("response.failed", map[string]interface{}{
 			"type": "response.failed",
 			"response": map[string]interface{}{
@@ -1016,7 +1022,8 @@ func (h *Handler) handleResponsesStream(
 				continue
 			}
 			mapped := mapDownstreamError(err)
-			sendFailure(mapped.OpenAIType, err.Error())
+			publicErr := publicErrorMessage(payloadContext(payload), err)
+			sendFailure(mapped.OpenAIType, publicErr)
 			h.recordFailure()
 			h.recordRequestLogForPayload(payload, requestLogEntry{
 				Timestamp:      time.Now().Unix(),
@@ -1028,12 +1035,13 @@ func (h *Handler) handleResponsesStream(
 				StatusCode:     mapped.Status,
 				FirstContentMs: firstContent.Value(),
 				DurationMs:     requestDurationMs(startedAt),
-				Error:          err.Error(),
+				Error:          publicErr,
 			})
 			h.recordDiagnosticFailureForPayload("openai.responses.stream", model, account, mapped.Status, err, payload)
 			return
 		}
 
+		responseModel = exposedRequestModel(payload, model)
 		finalContent, _ := extractThinkingFromContent(fullText.String())
 		reasoning := reasoningText.String()
 		if !thinking {
@@ -1144,6 +1152,7 @@ func (h *Handler) handleResponsesStream(
 	}
 	if lastErr == nil {
 		if busyErr != nil {
+			publicErr := publicErrorMessage(payloadContext(payload), busyErr)
 			h.recordFailure()
 			entry := requestLogEntry{
 				Timestamp:      time.Now().Unix(),
@@ -1153,11 +1162,11 @@ func (h *Handler) handleResponsesStream(
 				StatusCode:     429,
 				FirstContentMs: firstContent.Value(),
 				DurationMs:     requestDurationMs(startedAt),
-				Error:          busyErr.Error(),
+				Error:          publicErr,
 			}
 			h.recordDiagnosticFailureForPayload("openai.responses.stream", model, nil, 429, busyErr, payload)
 			w.Header().Set("Retry-After", retryAfterSeconds(upstreamBusyRetryAfter(busyErr)))
-			sendFailure("rate_limit_error", busyErr.Error())
+			sendFailure("rate_limit_error", publicErr)
 			entry.DurationMs = requestDurationMs(startedAt)
 			h.recordRequestLogForPayload(payload, entry)
 			return
@@ -1167,6 +1176,7 @@ func (h *Handler) handleResponsesStream(
 		return
 	}
 	mapped := mapDownstreamError(lastErr)
+	publicErr := publicErrorMessage(payloadContext(payload), lastErr)
 	h.recordFailure()
 	entry := requestLogEntry{
 		Timestamp:      time.Now().Unix(),
@@ -1176,10 +1186,10 @@ func (h *Handler) handleResponsesStream(
 		StatusCode:     mapped.Status,
 		FirstContentMs: firstContent.Value(),
 		DurationMs:     requestDurationMs(startedAt),
-		Error:          lastErr.Error(),
+		Error:          publicErr,
 	}
 	h.recordDiagnosticFailureForPayload("openai.responses.stream", model, nil, mapped.Status, lastErr, payload)
-	sendFailure(mapped.OpenAIType, lastErr.Error())
+	sendFailure(mapped.OpenAIType, publicErr)
 	entry.DurationMs = requestDurationMs(startedAt)
 	h.recordRequestLogForPayload(payload, entry)
 }

@@ -2059,6 +2059,7 @@ func (h *Handler) handleCountTokens(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	r = h.attachRequestDetailTrace(r, "claude.count_tokens", body)
+	r = r.WithContext(withRequestedModel(r.Context(), req.Model))
 	w, detailStatus := wrapRequestDetailResponseWriter(w, r.Context())
 	defer h.finalizeUnrecordedRequestDetail(r.Context(), detailStatus, startedAt, "claude.count_tokens", req.Model)
 	thinkingCfg := config.GetThinkingConfig()
@@ -2079,6 +2080,7 @@ func (h *Handler) handleCountTokens(w http.ResponseWriter, r *http.Request) {
 	apiKeyID := apiKeyIDFromContext(r.Context())
 	if routedModel, decision, changed := h.resolveRequestModelRoute(req.Model, actualModel, apiKeyID); changed {
 		actualModel = routedModel
+		markModelRoute(r.Context(), actualModel)
 		logger.Warnf("[ModelFallback] routing %s to %s for count_tokens (rule=%s)", requestedModel, actualModel, decision.Rule.ID)
 	}
 	req.Model = actualModel
@@ -2105,7 +2107,7 @@ func (h *Handler) handleCountTokens(w http.ResponseWriter, r *http.Request) {
 	h.recordRequestLogForContext(r.Context(), requestLogEntry{
 		Timestamp:    time.Now().Unix(),
 		Protocol:     "claude.count_tokens",
-		Model:        exposedModelID(requestedModel),
+		Model:        exposedRequestModelForContext(r.Context(), requestedModel),
 		Status:       "success",
 		StatusCode:   http.StatusOK,
 		DurationMs:   requestDurationMs(startedAt),
@@ -2162,6 +2164,7 @@ func (h *Handler) handleClaudeMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	r = h.attachRequestDetailTrace(r, "claude.messages", body)
+	r = r.WithContext(withRequestedModel(r.Context(), req.Model))
 	w, detailStatus := wrapRequestDetailResponseWriter(w, r.Context())
 	defer func() {
 		protocol := "claude.messages"
@@ -2195,6 +2198,7 @@ func (h *Handler) handleClaudeMessages(w http.ResponseWriter, r *http.Request) {
 	if routedModel, decision, changed := h.resolveRequestModelRoute(req.Model, actualModel, apiKeyID); changed {
 		actualModel = routedModel
 		fallbackDecision = decision
+		markModelRoute(r.Context(), actualModel)
 		contextWindowTokens = resolveContextWindowTokens(actualModel, req.ContextWindow, req.MaxInputTokens)
 		logger.Warnf("[ModelFallback] routing %s to %s before dispatch (rule=%s)", requestedModel, actualModel, decision.Rule.ID)
 	}
@@ -2204,6 +2208,7 @@ func (h *Handler) handleClaudeMessages(w http.ResponseWriter, r *http.Request) {
 	}
 	if fallbackModel, changed := maybeLongToolFallback(actualModel, req.MaxTokens, claudeToolNames(req.Tools)); changed {
 		actualModel = fallbackModel
+		markModelRoute(r.Context(), actualModel)
 		contextWindowTokens = resolveContextWindowTokens(actualModel, req.ContextWindow, req.MaxInputTokens)
 	}
 	req.Model = actualModel
@@ -2333,6 +2338,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 		messageStarted = true
 	}
 	sendStreamError := func(status int, errorType, message string) {
+		message = publicErrorText(payloadContext(payload), message)
 		sseMu.Lock()
 		if messageStarted {
 			streamFinished = true
@@ -2884,12 +2890,13 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 				Error:               err.Error(),
 			}
 			h.recordDiagnosticFailureForPayload("claude.messages.stream", model, account, mapped.Status, err, payload)
-			sendStreamError(mapped.Status, mapped.ClaudeType, err.Error())
+			sendStreamError(mapped.Status, mapped.ClaudeType, publicErrorMessage(payloadContext(payload), err))
 			entry.DurationMs = requestDurationMs(startedAt)
 			h.recordRequestLogForPayload(payload, entry)
 			return
 		}
 
+		responseModel = exposedRequestModel(payload, model)
 		processClaudeText("", false, true)
 		if eventThinkingOpen {
 			sendText("", 3)
@@ -2985,7 +2992,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 			}
 			h.recordDiagnosticFailureForPayload("claude.messages.stream", model, nil, 429, busyErr, payload)
 			w.Header().Set("Retry-After", retryAfterSeconds(upstreamBusyRetryAfter(busyErr)))
-			sendStreamError(429, "rate_limit_error", busyErr.Error())
+			sendStreamError(429, "rate_limit_error", publicErrorMessage(payloadContext(payload), busyErr))
 			entry.DurationMs = requestDurationMs(startedAt)
 			h.recordRequestLogForPayload(payload, entry)
 			return
@@ -3010,7 +3017,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 	}
 	h.recordDiagnosticFailureForPayload("claude.messages.stream", model, nil, mapped.Status, lastErr, payload)
 	applyDownstreamErrorHeaders(w, mapped)
-	sendStreamError(mapped.Status, mapped.ClaudeType, lastErr.Error())
+	sendStreamError(mapped.Status, mapped.ClaudeType, publicErrorMessage(payloadContext(payload), lastErr))
 	entry.DurationMs = requestDurationMs(startedAt)
 	h.recordRequestLogForPayload(payload, entry)
 }
@@ -3173,6 +3180,7 @@ func (h *Handler) recordFailure() {
 func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, thinkingOpts claudeThinkingResponseOptions, estimatedInputTokens int, cacheProfile *promptCacheProfile, apiKeyID, routeKey string) {
 	startedAt := time.Now()
 	firstContent := payload.beginRequestTiming(startedAt)
+	responseModel := exposedRequestModel(payload, model)
 	attempts := h.newAccountAttemptController(payload.requestContext)
 	excluded := attempts.excluded
 	var lastErr error
@@ -3278,6 +3286,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 		}
 
 		thinkingFormat := thinkingOpts.Format
+		responseModel = exposedRequestModel(payload, model)
 		finalContent, extractedReasoning := extractThinkingFromContent(content)
 		rawThinkingContent := thinkingContent
 		if thinking && rawThinkingContent == "" && extractedReasoning != "" {
@@ -3344,7 +3353,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 			}
 		}
 
-		resp := KiroToClaudeResponse(finalContent, responseThinkingContent, includeEmptyThinkingBlock, toolUses, inputTokens, outputTokens, model, upstreamStopReason)
+		resp := KiroToClaudeResponse(finalContent, responseThinkingContent, includeEmptyThinkingBlock, toolUses, inputTokens, outputTokens, responseModel, upstreamStopReason)
 		resp.Usage.InputTokens = billedClaudeInputTokens(inputTokens, cacheUsage)
 		resp.Usage.ThinkingTokens = thinkingTokens
 		resp.Usage.CacheCreationInputTokens = cacheUsage.CacheCreationInputTokens
@@ -3382,7 +3391,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 			})
 			h.recordDiagnosticFailureForPayload("claude.messages", model, nil, 429, busyErr, payload)
 			w.Header().Set("Retry-After", retryAfterSeconds(upstreamBusyRetryAfter(busyErr)))
-			h.sendClaudeError(w, 429, "rate_limit_error", busyErr.Error())
+			h.sendClaudeError(w, 429, "rate_limit_error", publicErrorMessage(payloadContext(payload), busyErr))
 			return
 		}
 		h.recordNoAvailableAccounts(payload, "claude.messages", model, startedAt, firstContent.Value())
@@ -3404,7 +3413,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 	})
 	h.recordDiagnosticFailureForPayload("claude.messages", model, nil, mapped.Status, lastErr, payload)
 	applyDownstreamErrorHeaders(w, mapped)
-	h.sendClaudeError(w, mapped.Status, mapped.ClaudeType, lastErr.Error())
+	h.sendClaudeError(w, mapped.Status, mapped.ClaudeType, publicErrorMessage(payloadContext(payload), lastErr))
 }
 
 func (h *Handler) sendClaudeError(w http.ResponseWriter, status int, errType, message string) {
@@ -3439,6 +3448,7 @@ func (h *Handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	r = h.attachRequestDetailTrace(r, "openai.chat", body)
+	r = r.WithContext(withRequestedModel(r.Context(), req.Model))
 	w, detailStatus := wrapRequestDetailResponseWriter(w, r.Context())
 	defer func() {
 		protocol := "openai.chat"
@@ -3466,6 +3476,7 @@ func (h *Handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 	if routedModel, decision, changed := h.resolveRequestModelRoute(req.Model, actualModel, apiKeyID); changed {
 		actualModel = routedModel
 		fallbackDecision = decision
+		markModelRoute(r.Context(), actualModel)
 		contextWindowTokens = resolveContextWindowTokens(actualModel, req.ContextWindow, req.MaxInputTokens)
 		logger.Warnf("[ModelFallback] routing %s to %s before dispatch (rule=%s)", requestedModel, actualModel, decision.Rule.ID)
 	}
@@ -3475,6 +3486,7 @@ func (h *Handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 	}
 	if fallbackModel, changed := maybeLongToolFallback(actualModel, req.MaxTokens, openAIToolNames(req.Tools)); changed {
 		actualModel = fallbackModel
+		markModelRoute(r.Context(), actualModel)
 		contextWindowTokens = resolveContextWindowTokens(actualModel, req.ContextWindow, req.MaxInputTokens)
 	}
 	req.Model = actualModel
@@ -3536,6 +3548,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 	stopHeartbeat := startSSECommentHeartbeat(payload.requestContext, claudeStreamHeartbeatInterval, writeKeepalive)
 	defer stopHeartbeat()
 	sendTerminalOpenAIStreamError := func(errType, message string) {
+		message = publicErrorText(payloadContext(payload), message)
 		data, _ := json.Marshal(map[string]interface{}{
 			"error": map[string]string{"type": errType, "message": message},
 		})
@@ -3617,6 +3630,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 			flusher.Flush()
 		}
 		sendOpenAIStreamError := func(errType, message string) {
+			message = publicErrorText(payloadContext(payload), message)
 			data, _ := json.Marshal(map[string]interface{}{
 				"error": map[string]string{"type": errType, "message": message},
 			})
@@ -3956,12 +3970,13 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 				Error:          err.Error(),
 			}
 			h.recordDiagnosticFailureForPayload("openai.chat.stream", model, account, mapped.Status, err, payload)
-			sendOpenAIStreamError(mapped.OpenAIType, err.Error())
+			sendOpenAIStreamError(mapped.OpenAIType, publicErrorMessage(payloadContext(payload), err))
 			entry.DurationMs = requestDurationMs(startedAt)
 			h.recordRequestLogForPayload(payload, entry)
 			return
 		}
 
+		responseModel = exposedRequestModel(payload, model)
 		processText("", false, true)
 		if eventThinkingOpen {
 			sendChunk("", 3)
@@ -4060,7 +4075,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 			})
 			h.recordDiagnosticFailureForPayload("openai.chat.stream", model, nil, 429, busyErr, payload)
 			w.Header().Set("Retry-After", retryAfterSeconds(upstreamBusyRetryAfter(busyErr)))
-			sendTerminalOpenAIStreamError("rate_limit_error", busyErr.Error())
+			sendTerminalOpenAIStreamError("rate_limit_error", publicErrorMessage(payloadContext(payload), busyErr))
 			return
 		}
 		h.recordNoAvailableAccounts(payload, "openai.chat.stream", model, startedAt, firstContent.Value())
@@ -4082,13 +4097,14 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 	})
 	h.recordDiagnosticFailureForPayload("openai.chat.stream", model, nil, mapped.Status, lastErr, payload)
 	applyDownstreamErrorHeaders(w, mapped)
-	sendTerminalOpenAIStreamError(mapped.OpenAIType, lastErr.Error())
+	sendTerminalOpenAIStreamError(mapped.OpenAIType, publicErrorMessage(payloadContext(payload), lastErr))
 }
 
 // handleOpenAINonStream OpenAI 非流式响应
 func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int, cacheProfile *promptCacheProfile, apiKeyID string) {
 	startedAt := time.Now()
 	firstContent := payload.beginRequestTiming(startedAt)
+	responseModel := exposedRequestModel(payload, model)
 	attempts := h.newAccountAttemptController(payload.requestContext)
 	excluded := attempts.excluded
 	var lastErr error
@@ -4185,6 +4201,7 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 			continue
 		}
 
+		responseModel = exposedRequestModel(payload, model)
 		finalContent, extractedReasoning := extractThinkingFromContent(content)
 		if thinking && reasoningContent == "" && extractedReasoning != "" {
 			reasoningContent = extractedReasoning
@@ -4230,7 +4247,7 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 		})
 
 		thinkingFormat := config.GetThinkingConfig().OpenAIFormat
-		resp := KiroToOpenAIResponseWithReasoning(finalContent, reasoningContent, toolUses, inputTokens, outputTokens, model, thinkingFormat, upstreamStopReason)
+		resp := KiroToOpenAIResponseWithReasoning(finalContent, reasoningContent, toolUses, inputTokens, outputTokens, responseModel, thinkingFormat, upstreamStopReason)
 		resp["usage"] = buildOpenAIUsageMap(inputTokens, outputTokens, thinkingTokens, cacheUsage)
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		json.NewEncoder(w).Encode(resp)
@@ -4259,7 +4276,7 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 			})
 			h.recordDiagnosticFailureForPayload("openai.chat", model, nil, 429, busyErr, payload)
 			w.Header().Set("Retry-After", retryAfterSeconds(upstreamBusyRetryAfter(busyErr)))
-			h.sendOpenAIError(w, 429, "rate_limit_error", busyErr.Error())
+			h.sendOpenAIError(w, 429, "rate_limit_error", publicErrorMessage(payloadContext(payload), busyErr))
 			return
 		}
 		h.recordNoAvailableAccounts(payload, "openai.chat", model, startedAt, firstContent.Value())
@@ -4281,7 +4298,7 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 	})
 	h.recordDiagnosticFailureForPayload("openai.chat", model, nil, mapped.Status, lastErr, payload)
 	applyDownstreamErrorHeaders(w, mapped)
-	h.sendOpenAIError(w, mapped.Status, mapped.OpenAIType, lastErr.Error())
+	h.sendOpenAIError(w, mapped.Status, mapped.OpenAIType, publicErrorMessage(payloadContext(payload), lastErr))
 }
 
 func (h *Handler) sendOpenAIError(w http.ResponseWriter, status int, errType, message string) {

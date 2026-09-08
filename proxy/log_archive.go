@@ -1,7 +1,11 @@
 package proxy
 
 import (
+	"bufio"
+	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"kiro-go/config"
@@ -667,11 +671,29 @@ func (a *logArchive) CopyTo(w io.Writer) error {
 		if err != nil {
 			return fmt.Errorf("open archived log for download: %w", err)
 		}
-		_, copyErr := io.Copy(w, input)
-		closeErr := input.Close()
-		if copyErr != nil {
-			return fmt.Errorf("read archived log for download: %w", copyErr)
+		reader := bufio.NewReaderSize(input, 64<<10)
+		for {
+			line, readErr := reader.ReadBytes('\n')
+			if len(line) > 0 {
+				cleanLine, sanitizeErr := sanitizeLogArchiveLine(line)
+				if sanitizeErr != nil {
+					_ = input.Close()
+					return fmt.Errorf("sanitize archived log for download: %w", sanitizeErr)
+				}
+				if _, writeErr := w.Write(cleanLine); writeErr != nil {
+					_ = input.Close()
+					return fmt.Errorf("write archived log download: %w", writeErr)
+				}
+			}
+			if readErr != nil {
+				if errors.Is(readErr, io.EOF) {
+					break
+				}
+				_ = input.Close()
+				return fmt.Errorf("read archived log for download: %w", readErr)
+			}
 		}
+		closeErr := input.Close()
 		if closeErr != nil {
 			return fmt.Errorf("close archived log download: %w", closeErr)
 		}
@@ -754,6 +776,7 @@ func (a *logArchive) appendRequest(entry requestLogEntry) {
 	if a == nil {
 		return
 	}
+	entry = publicRequestLogEntry(context.Background(), entry)
 	if entry.RequestToolNames != nil {
 		entry.RequestToolNames = append([]string(nil), entry.RequestToolNames...)
 		for i := range entry.RequestToolNames {
@@ -780,7 +803,66 @@ func (a *logArchive) appendDiagnostic(entry diagnosticLogEntry) {
 	a.appendValue("diagnostic", entry.RequestID, entry, false)
 }
 
+func sanitizeLogArchiveLine(line []byte) ([]byte, error) {
+	newline := bytes.HasSuffix(line, []byte{'\n'})
+	trimmed := bytes.TrimSpace(line)
+	if len(trimmed) == 0 {
+		return append([]byte(nil), line...), nil
+	}
+	var record logArchiveRecord
+	if err := json.Unmarshal(trimmed, &record); err != nil {
+		return nil, err
+	}
+	switch strings.ToLower(strings.TrimSpace(record.Kind)) {
+	case "request":
+		var entry requestLogEntry
+		if err := json.Unmarshal(record.Data, &entry); err != nil {
+			return nil, err
+		}
+		entry = publicRequestLogEntry(context.Background(), entry)
+		clean, err := json.Marshal(entry)
+		if err != nil {
+			return nil, err
+		}
+		record.Data = clean
+	case "detail":
+		var detail requestDetail
+		if err := json.Unmarshal(record.Data, &detail); err != nil {
+			return nil, err
+		}
+		detail = publicRequestDetail(context.Background(), detail)
+		detail = sanitizeLogArchiveDetail(detail)
+		clean, err := json.Marshal(detail)
+		if err != nil {
+			return nil, err
+		}
+		record.Data = clean
+	case "diagnostic":
+		var entry diagnosticLogEntry
+		if err := json.Unmarshal(record.Data, &entry); err != nil {
+			return nil, err
+		}
+		entry.Model = exposedModelID(entry.Model)
+		entry.Error = truncateDiagnosticText(redactDiagnosticText(entry.Error), 2000)
+		entry.RequestSummary = truncateDiagnosticText(redactDiagnosticText(entry.RequestSummary), 4000)
+		clean, err := json.Marshal(entry)
+		if err != nil {
+			return nil, err
+		}
+		record.Data = clean
+	}
+	clean, err := json.Marshal(record)
+	if err != nil {
+		return nil, err
+	}
+	if newline {
+		clean = append(clean, '\n')
+	}
+	return clean, nil
+}
+
 func sanitizeLogArchiveDetail(detail requestDetail) requestDetail {
+	detail = publicRequestDetail(context.Background(), detail)
 	redact := func(value string) string {
 		value = redactDiagnosticText(redactRequestDetailText(value))
 		return logArchiveDataURLPattern.ReplaceAllString(value, "[binary payload redacted]")

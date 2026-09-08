@@ -196,6 +196,7 @@ func normalizeWebSearchQuery(text string) string {
 func (h *Handler) handleClaudeWebSearch(ctx context.Context, w http.ResponseWriter, req *ClaudeRequest, estimatedInputTokens int, apiKeyID string) {
 	startedAt := time.Now()
 	firstContent := newRequestFirstContentTimer(startedAt)
+	responseModel := exposedRequestModelForContext(ctx, req.Model)
 	query := extractWebSearchQuery(req)
 	if query == "" {
 		h.sendClaudeError(w, 400, "invalid_request_error", "Unable to extract web_search query")
@@ -212,26 +213,26 @@ func (h *Handler) handleClaudeWebSearch(ctx context.Context, w http.ResponseWrit
 			trace.recordError(err)
 		}
 		h.recordFailure()
-		h.recordDiagnosticFailure(diagnosticLogEntry{
+		h.recordDiagnosticFailureForContext(ctx, diagnosticLogEntry{
 			RequestID:      requestIDFromContext(ctx),
 			Protocol:       "claude.web_search",
-			Model:          req.Model,
+			Model:          responseModel,
 			StatusCode:     statusCode,
-			Error:          err.Error(),
+			Error:          publicErrorMessage(ctx, err),
 			RequestSummary: query,
 		})
 		applyDownstreamErrorHeaders(w, mapped)
-		h.sendClaudeError(w, statusCode, mapped.ClaudeType, err.Error())
+		h.sendClaudeError(w, statusCode, mapped.ClaudeType, publicErrorMessage(ctx, err))
 		h.recordRequestLogForContext(ctx, requestLogEntry{
 			Timestamp:    time.Now().Unix(),
 			Protocol:     "claude.web_search",
-			Model:        req.Model,
+			Model:        responseModel,
 			Status:       "failed",
 			StatusCode:   statusCode,
 			DurationMs:   requestDurationMs(startedAt),
 			InputTokens:  estimatedInputTokens,
 			OutputTokens: 0,
-			Error:        err.Error(),
+			Error:        publicErrorMessage(ctx, err),
 		})
 		return
 	}
@@ -249,7 +250,7 @@ func (h *Handler) handleClaudeWebSearch(ctx context.Context, w http.ResponseWrit
 	entry := requestLogEntry{
 		Timestamp:         time.Now().Unix(),
 		Protocol:          "claude.web_search",
-		Model:             req.Model,
+		Model:             responseModel,
 		Status:            "success",
 		StatusCode:        200,
 		FirstContentMs:    firstContent.Value(),
@@ -260,7 +261,7 @@ func (h *Handler) handleClaudeWebSearch(ctx context.Context, w http.ResponseWrit
 	}
 
 	if req.Stream {
-		h.sendWebSearchSSEWithTiming(w, req.Model, query, results, estimatedInputTokens, outputTokens, firstContent)
+		h.sendWebSearchSSEWithTiming(w, responseModel, query, results, estimatedInputTokens, outputTokens, firstContent)
 		entry.DurationMs = requestDurationMs(startedAt)
 		firstContent.Apply(&entry)
 		h.recordRequestLogForContext(ctx, entry)
@@ -268,7 +269,7 @@ func (h *Handler) handleClaudeWebSearch(ctx context.Context, w http.ResponseWrit
 	}
 	firstContent.Apply(&entry)
 	h.recordRequestLogForContext(ctx, entry)
-	resp := buildWebSearchClaudeResponse(req.Model, query, output, results, estimatedInputTokens, outputTokens)
+	resp := buildWebSearchClaudeResponse(responseModel, query, output, results, estimatedInputTokens, outputTokens)
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	json.NewEncoder(w).Encode(resp)
 }
