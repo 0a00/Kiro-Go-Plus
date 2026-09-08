@@ -1,5 +1,5 @@
 {
-  "version": "1.2.69",
-  "changelog": "Preserve tool continuations without definitions and tighten production test verdicts.\n修复缺少工具定义时的结果续接，并完善思考输出及压力测试判定。",
+  "version": "1.2.70",
+  "changelog": "Separate tool steering and use balanced high-risk tool streaming.\n分离工具提示注入，并对高风险工具使用平衡流模式。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }

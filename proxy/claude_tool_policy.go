@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"fmt"
+	"kiro-go/config"
 	"regexp"
 	"strings"
 )
@@ -26,7 +27,10 @@ func prepareClaudeToolPolicy(req *ClaudeRequest, enforceWorkspaceActions bool) e
 	req.RequireToolUse = false
 	req.RequiredToolName = ""
 	req.ToolUsePolicy = ""
-	req.AgentToolSteering = enforceWorkspaceActions
+	// Tool enforcement and prompt steering are separate controls. The former
+	// decides whether an inferred workspace request should use a tool; the
+	// latter is an explicit operator opt-in for injecting extra instructions.
+	req.AgentToolSteering = config.GetAgentToolSteering()
 
 	mode, name, err := parseClaudeToolChoice(req.ToolChoice)
 	if err != nil {
@@ -43,7 +47,6 @@ func prepareClaudeToolPolicy(req *ClaudeRequest, enforceWorkspaceActions bool) e
 		}
 		req.RequireToolUse = true
 		req.ToolUsePolicy = toolUsePolicyExplicit
-		req.AgentToolSteering = true
 	case "tool":
 		if !claudeToolExists(req.Tools, name) {
 			return fmt.Errorf("tool_choice references unknown tool %q", name)
@@ -51,7 +54,6 @@ func prepareClaudeToolPolicy(req *ClaudeRequest, enforceWorkspaceActions bool) e
 		req.RequireToolUse = true
 		req.RequiredToolName = name
 		req.ToolUsePolicy = toolUsePolicyExplicit
-		req.AgentToolSteering = true
 	}
 
 	if enforceWorkspaceActions && !req.RequireToolUse && shouldRequireWorkspaceTool(req) {

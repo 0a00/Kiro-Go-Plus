@@ -26,8 +26,8 @@ func TestPrepareClaudeToolPolicyRequiresToolForWorkspaceTask(t *testing.T) {
 	if requiresStrictClaudeToolUse(req) {
 		t.Fatal("inferred workspace policy must not reject a valid text response")
 	}
-	if !strings.Contains(extractSystemPrompt(req.System), agentToolPolicyMarker) {
-		t.Fatal("expected agent tool policy in system prompt")
+	if strings.Contains(extractSystemPrompt(req.System), agentToolPolicyMarker) {
+		t.Fatal("default tool enforcement must not inject hidden steering")
 	}
 	payload := ClaudeToKiro(req, true)
 	if !strings.Contains(payload.ConversationState.CurrentMessage.UserInputMessage.Content, agentRequiredToolActionMarker) {
@@ -85,8 +85,8 @@ func TestPrepareClaudeToolPolicyHonorsRequiredChoice(t *testing.T) {
 	if req.ToolUsePolicy != toolUsePolicyExplicit {
 		t.Fatalf("expected explicit tool policy, got %q", req.ToolUsePolicy)
 	}
-	if !req.AgentToolSteering || !strings.Contains(extractSystemPrompt(req.System), agentToolPolicyMarker) {
-		t.Fatal("explicit tool choice must retain its enforcement when automatic steering is disabled")
+	if req.AgentToolSteering || strings.Contains(extractSystemPrompt(req.System), agentToolPolicyMarker) {
+		t.Fatal("explicit tool choice must not enable hidden steering")
 	}
 	if !requiresStrictClaudeToolUse(req) {
 		t.Fatal("explicit tool choice must keep strict tool enforcement")
