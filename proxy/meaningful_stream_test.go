@@ -426,6 +426,36 @@ func TestDeferredHighRiskStreamRejectsExecutionPreamble(t *testing.T) {
 	}
 }
 
+func TestInferredToolStreamRejectsChineseReadThenEditPreamble(t *testing.T) {
+	var received strings.Builder
+	wrapper, gate := wrapMeaningfulStreamCallback(&KiroStreamCallback{
+		OnText: func(text string, _ bool) { received.WriteString(text) },
+	}, nil, true, true, true, false)
+
+	wrapper.OnText("我先读取现有脚本，然后扩展它。", false)
+	wrapper.OnComplete(10, 10)
+
+	if gate.hasActionableOutput() || received.Len() != 0 {
+		t.Fatalf("Chinese tool preamble was committed as a completed response: %q", received.String())
+	}
+}
+
+func TestInferredToolStreamCommitsAfterStructuredToolUse(t *testing.T) {
+	var received []string
+	wrapper, gate := wrapMeaningfulStreamCallback(&KiroStreamCallback{
+		OnText:    func(text string, _ bool) { received = append(received, "text:"+text) },
+		OnToolUse: func(tool KiroToolUse) { received = append(received, "tool:"+tool.Name) },
+	}, nil, true, true, true, false)
+
+	wrapper.OnText("我先读取现有脚本，然后扩展它。", false)
+	wrapper.OnToolUse(KiroToolUse{ToolUseID: "tool-1", Name: "Read", Input: map[string]interface{}{"file_path": "sysinfo.sh"}})
+
+	want := []string{"text:我先读取现有脚本，然后扩展它。", "tool:Read"}
+	if !gate.hasActionableOutput() || !reflect.DeepEqual(received, want) {
+		t.Fatalf("structured tool call did not commit buffered preamble: got %#v want %#v", received, want)
+	}
+}
+
 func TestDeferredHighRiskStreamAllowsCompletedTextAnswer(t *testing.T) {
 	var received strings.Builder
 	wrapper, gate := wrapMeaningfulStreamCallback(&KiroStreamCallback{

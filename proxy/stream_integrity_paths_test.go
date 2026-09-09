@@ -219,7 +219,7 @@ func TestClaudeHighRiskToolStreamBuffersTextUntilUpstreamCompletion(t *testing.T
 		"model":"claude-sonnet-4.5",
 		"stream":true,
 		"max_tokens":256,
-		"messages":[{"role":"user","content":"create a file"}],
+		"messages":[{"role":"user","content":"hello"}],
 		"tools":[{"name":"Write","description":"write a file","input_schema":{"type":"object","properties":{"file_path":{"type":"string"},"content":{"type":"string"}}}}]
 	}`))
 	if err != nil {

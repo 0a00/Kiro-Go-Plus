@@ -63,9 +63,10 @@ func TestConfigureClaudeToolStreamingModes(t *testing.T) {
 				toolName = "Write"
 			}
 			req := &ClaudeRequest{
-				Stream:        true,
-				Tools:         []ClaudeTool{{Name: toolName}},
-				ToolUsePolicy: tc.policy,
+				Stream:         true,
+				Tools:          []ClaudeTool{{Name: toolName}},
+				ToolUsePolicy:  tc.policy,
+				RequireToolUse: tc.policy == toolUsePolicyInferred || tc.requireExplicitTool,
 			}
 			if tc.claudeCode {
 				req.ClientUserAgent = "claude-code/2.1.263"
@@ -73,11 +74,13 @@ func TestConfigureClaudeToolStreamingModes(t *testing.T) {
 			payload := &KiroPayload{}
 			configureClaudeToolStreaming(payload, req, true, claudeThinkingResponseOptions{}, config.ThinkingConfig{ToolStreamMode: tc.mode})
 
+			wantToolUse := tc.requireExplicitTool ||
+				(tc.policy == toolUsePolicyInferred && tc.requireActionable)
 			if payload.requireActionableOutput != tc.requireActionable ||
 				payload.deferTextUntilComplete != tc.deferText ||
 				payload.streamThinkingPrecommit != tc.streamThinking ||
 				payload.streamToolUseDeltas != tc.streamToolDeltas ||
-				payload.requireToolUse != tc.requireExplicitTool {
+				payload.requireToolUse != wantToolUse {
 				t.Fatalf("unexpected stream policy: %+v", payload)
 			}
 		})

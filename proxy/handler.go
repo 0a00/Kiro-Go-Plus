@@ -2142,9 +2142,10 @@ func configureClaudeToolStreaming(payload *KiroPayload, req *ClaudeRequest, thin
 	// Keep the safer buffered behavior for other clients in balanced mode.
 	payload.streamToolUseDeltas = req.Stream && len(req.Tools) > 0 &&
 		(useLiveBehavior || (balancedMode && claudeCodeClient))
-	// Inferred workspace intent adds strong tool guidance, but only an explicit
-	// client tool_choice may reject an otherwise valid text response.
-	payload.requireToolUse = strictToolUse
+	// Inferred workspace intent must also wait for a structured tool call. A
+	// natural-language promise such as "I will read the file" is not an
+	// executable Claude Code turn and must remain retryable.
+	payload.requireToolUse = strictToolUse || (req.RequireToolUse && guardActionableStream)
 }
 
 // handleClaudeMessages Claude API 处理

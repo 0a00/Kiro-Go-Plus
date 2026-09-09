@@ -300,7 +300,10 @@ func isToolExecutionPreamble(text string) bool {
 	}
 	for _, marker := range []string{
 		"let me ", "i will ", "i'll ", "next, i ", "now i ",
-		"现在让我", "我将", "我来", "接下来我", "下面我", "继续修改", "继续扩展", "开始修改",
+		"first i'll ", "first, i'll ", "let me first ", "i'll first ",
+		"现在让我", "让我先", "我先", "我将", "我来", "接下来我", "下面我",
+		"先读取", "先查看", "先检查", "先打开", "读取现有", "查看当前", "打开当前",
+		"继续修改", "继续扩展", "开始修改", "然后修改", "然后扩展", "再修改", "再扩展",
 	} {
 		if strings.Contains(text, marker) {
 			return true
