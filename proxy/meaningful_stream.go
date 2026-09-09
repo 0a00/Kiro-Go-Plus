@@ -54,6 +54,7 @@ type meaningfulStreamCallback struct {
 	deferTextUntilComplete  bool
 	streamThinkingPrecommit bool
 	streamToolFrames        bool
+	allowCompletedText      bool
 	onLiveness              func()
 	activity                atomic.Bool
 	actionable              atomic.Bool
@@ -215,6 +216,15 @@ func (g *meaningfulStreamCallback) setLivenessHook(hook func()) {
 	}
 }
 
+// setAllowCompletedTextFallback permits inferred workspace turns to return a
+// completed text answer when Kiro does not emit a structured tool call. An
+// explicit tool_choice never enables this fallback.
+func (g *meaningfulStreamCallback) setAllowCompletedTextFallback(allow bool) {
+	if g != nil {
+		g.allowCompletedText = allow
+	}
+}
+
 func (g *meaningfulStreamCallback) touchLiveness() {
 	if g != nil && g.onLiveness != nil {
 		g.onLiveness()
@@ -252,7 +262,7 @@ func (g *meaningfulStreamCallback) handleEvent(event pendingStreamEvent) {
 	g.appendPendingLocked(event)
 
 	commit := event.kind == pendingToolUse || event.kind == pendingToolUseStart || event.kind == pendingToolUseDelta
-	if event.kind == pendingText && !event.isThinking && !g.requireToolUse {
+	if event.kind == pendingText && !event.isThinking {
 		if g.visibleProbe.Len() < maxActionableProbeBytes {
 			remaining := maxActionableProbeBytes - g.visibleProbe.Len()
 			if len(event.text) > remaining {
@@ -261,12 +271,13 @@ func (g *meaningfulStreamCallback) handleEvent(event pendingStreamEvent) {
 				g.visibleProbe.WriteString(event.text)
 			}
 		}
-		if !g.deferTextUntilComplete {
+		if !g.requireToolUse && !g.deferTextUntilComplete {
 			visible, incompleteThinking := visibleTextOutsideThinking(g.visibleProbe.String())
 			commit = !incompleteThinking && hasSubstantiveAgentText(visible)
 		}
 	}
-	if event.kind == pendingComplete && g.deferTextUntilComplete && !g.requireToolUse {
+	if event.kind == pendingComplete && g.deferTextUntilComplete &&
+		(!g.requireToolUse || g.allowCompletedText) {
 		visible, incompleteThinking := visibleTextOutsideThinking(g.visibleProbe.String())
 		commit = !incompleteThinking && hasSubstantiveAgentText(visible) && !isToolExecutionPreamble(visible)
 	}

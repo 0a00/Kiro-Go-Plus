@@ -263,6 +263,43 @@ func TestDeferredMeaningfulStreamKeepsPreambleRetryableUntilToolUse(t *testing.T
 	}
 }
 
+func TestDeferredInferredToolStreamAcceptsCompletedTextFallback(t *testing.T) {
+	var received []string
+	wrapper, gate := wrapMeaningfulStreamCallback(&KiroStreamCallback{
+		OnText:     func(text string, _ bool) { received = append(received, "text:"+text) },
+		OnComplete: func(int, int) { received = append(received, "complete") },
+	}, nil, true, true, true, false)
+	gate.setAllowCompletedTextFallback(true)
+
+	wrapper.OnText("The requested change is complete, but this account did not return a tool call.", false)
+	if gate.hasActionableOutput() || len(received) != 0 {
+		t.Fatalf("completed fallback leaked before completion: %#v", received)
+	}
+	wrapper.OnComplete(10, 20)
+
+	want := []string{
+		"text:The requested change is complete, but this account did not return a tool call.",
+		"complete",
+	}
+	if !gate.hasActionableOutput() || !reflect.DeepEqual(received, want) {
+		t.Fatalf("completed text fallback was not committed: got %#v want %#v", received, want)
+	}
+}
+
+func TestExplicitToolStreamDoesNotAcceptCompletedTextFallback(t *testing.T) {
+	var received []string
+	wrapper, gate := wrapMeaningfulStreamCallback(&KiroStreamCallback{
+		OnText:     func(text string, _ bool) { received = append(received, text) },
+		OnComplete: func(int, int) { received = append(received, "complete") },
+	}, nil, true, true, true, false)
+
+	wrapper.OnText("The requested change is complete.", false)
+	wrapper.OnComplete(10, 20)
+	if gate.hasActionableOutput() || len(received) != 0 {
+		t.Fatalf("explicit tool request accepted text without a tool call: %#v", received)
+	}
+}
+
 func TestDeferredMeaningfulStreamStreamsThinkingBeforeActionableOutput(t *testing.T) {
 	var received []string
 	wrapper, gate := wrapMeaningfulStreamCallback(&KiroStreamCallback{

@@ -1191,6 +1191,10 @@ endpointLoop:
 					payload.recordUpstreamActivity()
 				}
 			}, payload != nil && payload.requireActionableOutput, payload != nil && payload.requireToolUse, payload != nil && payload.deferTextUntilComplete, payload != nil && payload.streamThinkingPrecommit)
+			// Inferred workspace turns may legitimately finish with a text answer
+			// when Kiro declines to call a tool. Explicit tool_choice requests remain
+			// strict and still require a structured tool call.
+			meaningfulGate.setAllowCompletedTextFallback(payload != nil && payload.toolUsePolicy == toolUsePolicyInferred)
 			wrappedCallback.streamDiagnostics = attemptDiagnostics
 			toolAssemblyTimeout := time.Duration(retryConfig.ToolAssemblyTimeoutSeconds) * time.Second
 			wrappedCallback, toolMonitor := wrapToolAssemblyMonitor(wrappedCallback, toolAssemblyTimeout, func(toolAssemblySnapshot) {
