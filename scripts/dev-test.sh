@@ -17,7 +17,7 @@ Modes:
   bench       Run parser, translation, cache, routing, and logging benchmarks.
   live        Run the smoke suite against a local service.
   live-full   Run reasoning, Skills, tools/MCP, cache, images, long streams, and cancellation.
-  client-e2e  Run real Claude Code client workflows, including Skills, MCP, multi-turn tools, and long tool chains.
+  client-e2e  Run the Claude Code scenario matrix: repo edits, tools, MCP, permissions, and long sessions.
   production  Run the protected production functional, model, load, and Claude Code suite.
   matrix      Test selected models across Anthropic, Chat Completions, and Responses.
   load        Run bounded mixed-protocol stream/non-stream requests (default: 5 workers, 10 requests).

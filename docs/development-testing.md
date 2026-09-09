@@ -56,18 +56,22 @@ available input/output/reasoning/cache token fields. JSON reports use mode
 `0600`, include the service version and a credential-free test-settings
 fingerprint, and never include the API key, request body, image, or tool arguments.
 
-To validate actual client-side Skill discovery, MCP process execution, resumed
-multi-turn workspace edits, and long tool chains, not just proxy protocol
-transport, run the isolated Claude Code harness:
+To validate actual Claude Code client behavior, including Skill discovery, MCP
+process execution, repository edit/test loops, permissions, structured output,
+tool errors, resumed multi-turn edits, and long tool chains, run the isolated
+Claude Code harness:
 
 ```bash
 bash scripts/dev-test.sh client-e2e
 ```
 
-It builds `cmd/mcpfixture`, creates disposable Skills and workspaces, executes
-the exact resumed flow `写个shell脚本，随便写` followed by `增加5倍代码量`,
-and runs a bounded 20-plus-call file-tool chain. It verifies structured tool
-use/result pairing, actual file changes, client completion, and tool errors;
+It builds `cmd/mcpfixture`, creates disposable Skills, MCP fixtures, git
+repositories, and workspaces, then runs bounded cases for plain and thinking
+streams, file edits, Skills, MCP zero-argument/repeated/large/error calls,
+resumed multi-turn edits, repository read/edit/test/diff loops, tool failure
+recovery, parallel reads, plan-mode read-only behavior, JSON-schema output,
+cancellation/recovery, long streams, and concurrent clients. Each case checks
+structured tool/result pairing and concrete workspace effects where relevant;
 the expensive agent cases use `KIRO_DEV_AGENT_MAX_BUDGET_USD` (default `0.75`).
 Set `KIRO_DEV_ALLOW_REMOTE=1` explicitly for a non-loopback
 `KIRO_DEV_BASE_URL`.
@@ -108,8 +112,10 @@ in stream and non-stream modes; a bounded realistic mixed load; and the actual
 Claude Code harness. Claude Code cases cover plain streaming, thinking,
 isolated file Read/Write/Edit, Skills, parameterized and zero-argument MCP,
 repeated MCP calls, long streams, cancellation/recovery, concurrent clients,
-resumed multi-turn workspace edits, and a 20-plus-call file-tool chain. The
-multi-turn and long-tool cases use `--client-agent-max-budget-usd` (or
+resumed multi-turn workspace edits, repository edit/test loops, tool failure
+recovery, parallel reads, plan mode, structured output, large MCP results,
+MCP error recovery, native WebSearch, image reads, and a 20-plus-call file-tool
+chain. The multi-turn and long-tool cases use `--client-agent-max-budget-usd` (or
 `KIRO_PROD_CLIENT_AGENT_MAX_BUDGET_USD`) so their budget is independent of
 short smoke cases. Reports and logs are written to a private directory and are
 removed from the command's temporary workspace on exit.

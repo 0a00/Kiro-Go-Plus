@@ -27,7 +27,10 @@ Options:
 Scenario IDs:
   text-stream, skill-mcp, mcp-zero-arg, mcp-multi-call, file-tools,
   thinking, long-stream, cancel-recover, concurrent-clients,
-  workspace-multiturn, workspace-long-tools
+  workspace-multiturn, workspace-long-tools, workspace-repo-loop,
+  workspace-error-recovery, workspace-parallel-tools, permission-plan,
+  structured-output, mcp-large-result, mcp-error-recovery, web-search,
+  workspace-image
 
 Set KIRO_DEV_ALLOW_REMOTE=1 before testing a non-loopback base URL. The file
 tool case uses a disposable workspace and only Read/Write/Edit/Glob/Grep.
@@ -184,6 +187,8 @@ command -v claude >/dev/null 2>&1 || die "Claude Code is required"
 command -v timeout >/dev/null 2>&1 || die "timeout is required"
 command -v rg >/dev/null 2>&1 || die "ripgrep (rg) is required"
 command -v jq >/dev/null 2>&1 || die "jq is required"
+command -v base64 >/dev/null 2>&1 || die "base64 is required"
+command -v git >/dev/null 2>&1 || die "git is required"
 [[ -n "${KIRO_DEV_API_KEY:-}" ]] || die "KIRO_DEV_API_KEY is required"
 [[ -n "$MODEL" ]] || die "model must not be empty"
 is_nonzero_duration "$CLIENT_TIMEOUT" || die "invalid --timeout: $CLIENT_TIMEOUT"
@@ -214,7 +219,10 @@ if [[ "$SCENARIOS_RAW" == "all" ]]; then
   SCENARIO_LIST=(
     text-stream skill-mcp mcp-zero-arg mcp-multi-call file-tools
     thinking long-stream cancel-recover concurrent-clients
-    workspace-multiturn workspace-long-tools
+    workspace-multiturn workspace-long-tools workspace-repo-loop
+    workspace-error-recovery workspace-parallel-tools permission-plan
+    structured-output mcp-large-result mcp-error-recovery web-search
+    workspace-image
   )
 else
   IFS=',' read -r -a requested_scenarios <<< "$SCENARIOS_RAW"
@@ -222,7 +230,7 @@ else
     scenario="${scenario//[[:space:]]/}"
     [[ -n "$scenario" ]] || die "--scenarios contains an empty value"
     case "$scenario" in
-      text-stream|skill-mcp|mcp-zero-arg|mcp-multi-call|file-tools|thinking|long-stream|cancel-recover|concurrent-clients|workspace-multiturn|workspace-long-tools) ;;
+      text-stream|skill-mcp|mcp-zero-arg|mcp-multi-call|file-tools|thinking|long-stream|cancel-recover|concurrent-clients|workspace-multiturn|workspace-long-tools|workspace-repo-loop|workspace-error-recovery|workspace-parallel-tools|permission-plan|structured-output|mcp-large-result|mcp-error-recovery|web-search|workspace-image) ;;
       *) die "unknown client scenario: $scenario" ;;
     esac
     if [[ -z "${SCENARIO_SEEN[$scenario]:-}" ]]; then
@@ -745,6 +753,228 @@ case_workspace_long_tools() {
   CASE_DETAIL="${tool_uses} structured tool calls and ${tool_results} results completed across ${file_count} files"
 }
 
+case_workspace_repo_loop() {
+  local workspace="$TMP_DIR/workspace-repo-loop"
+  local output="$TMP_DIR/workspace-repo-loop.jsonl"
+  local tool_uses tool_results subtype status
+  mkdir -p "$workspace/src" "$workspace/tests"
+  printf '%s\n' '# Repo loop fixture' 'TODO: replace this line' >"$workspace/README.md"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf "REPO_OLD\n"' >"$workspace/src/app.sh"
+  printf '%s\n' '#!/usr/bin/env bash' 'bash src/app.sh' >"$workspace/tests/run.sh"
+  chmod 700 "$workspace/src/app.sh" "$workspace/tests/run.sh"
+  git -C "$workspace" init -q
+  git -C "$workspace" config user.email claude-code-e2e@example.invalid
+  git -C "$workspace" config user.name Claude-Code-E2E
+  git -C "$workspace" add .
+  git -C "$workspace" commit -qm 'fixture baseline'
+  set +e
+  run_cli_session "$CLIENT_TIMEOUT" "$MODEL" "$workspace" "$output" \
+    'Work as a developer in this existing git repository. Inspect the README, source, and test script with Read and Glob. Make a concrete small change: replace REPO_OLD with REPO_NEW, document the change in README.md, and add a shell syntax check. Use Edit or Write for file changes, Bash for the check, then inspect git diff and run git diff --check. Do not commit. Finish with the exact marker REPO_WORKFLOW_OK.' \
+    --tools 'Read,Write,Edit,Glob,Grep,Bash' --allowedTools 'Read,Write,Edit,Glob,Grep,Bash' --permission-mode acceptEdits
+  status=$?
+  set -e
+  tool_uses="$(client_tool_use_count "$output")"
+  tool_results="$(client_tool_result_count "$output")"
+  subtype="$(client_result_subtype "$output")"
+  if ((status != 0)) || [[ "$subtype" != "success" ]] || ! rg -q 'REPO_WORKFLOW_OK' "$output"; then
+    CASE_DETAIL="repository edit/test loop did not finish (status ${status}, subtype ${subtype}, calls ${tool_uses})"
+    return 1
+  fi
+  if ((tool_uses < 5 || tool_results < tool_uses)) || ! rg -q 'REPO_NEW' "$workspace/src/app.sh" || ! rg -q 'REPO_NEW' "$workspace/README.md"; then
+    CASE_DETAIL="repository loop integrity failed (calls ${tool_uses}, results ${tool_results})"
+    return 1
+  fi
+  if ! git -C "$workspace" diff --check; then
+    CASE_DETAIL="repository loop left whitespace errors in git diff"
+    return 1
+  fi
+  CASE_DETAIL="repository read/edit/test/diff loop completed with ${tool_uses} tool calls"
+}
+
+case_workspace_error_recovery() {
+  local workspace="$TMP_DIR/workspace-error-recovery"
+  local output="$TMP_DIR/workspace-error-recovery.jsonl"
+  local tool_uses tool_results tool_errors subtype status
+  mkdir -p "$workspace"
+  printf '%s\n' 'Known recovery input.' >"$workspace/known.txt"
+  set +e
+  run_cli_session "$CLIENT_TIMEOUT" "$MODEL" "$workspace" "$output" \
+    'Test tool error recovery. First try to read the deliberately missing file missing-file.txt. That failure is expected; do not stop. Then read known.txt, create recovered.txt containing exactly TOOL_ERROR_RECOVERY_OK, read it back, and finish with the exact marker TOOL_ERROR_RECOVERY_DONE.' \
+    --tools 'Read,Write' --allowedTools 'Read,Write' --permission-mode acceptEdits
+  status=$?
+  set -e
+  tool_uses="$(client_tool_use_count "$output")"
+  tool_results="$(client_tool_result_count "$output")"
+  tool_errors="$(client_tool_error_count "$output")"
+  subtype="$(client_result_subtype "$output")"
+  if ((status != 0)) || [[ "$subtype" != "success" ]] || ! rg -q 'TOOL_ERROR_RECOVERY_DONE' "$output"; then
+    CASE_DETAIL="tool error recovery did not finish (status ${status}, subtype ${subtype}, calls ${tool_uses}, errors ${tool_errors})"
+    return 1
+  fi
+  if ((tool_errors < 1 || tool_results < tool_uses)) || [[ ! -f "$workspace/recovered.txt" ]] || ! rg -q '^TOOL_ERROR_RECOVERY_OK$' "$workspace/recovered.txt"; then
+    CASE_DETAIL="tool error was not observed and recovered (calls ${tool_uses}, results ${tool_results}, errors ${tool_errors})"
+    return 1
+  fi
+  CASE_DETAIL="deliberate tool failure recovered with ${tool_uses} tool calls and ${tool_errors} tool error"
+}
+
+case_workspace_parallel_tools() {
+  local workspace="$TMP_DIR/workspace-parallel-tools"
+  local output="$TMP_DIR/workspace-parallel-tools.jsonl"
+  local tool_uses tool_results subtype status
+  mkdir -p "$workspace"
+  printf '%s\n' 'PARALLEL_A' >"$workspace/a.txt"
+  printf '%s\n' 'PARALLEL_B' >"$workspace/b.txt"
+  printf '%s\n' 'PARALLEL_C' >"$workspace/c.txt"
+  printf '%s\n' 'PARALLEL_D' >"$workspace/d.txt"
+  set +e
+  run_cli_session "$CLIENT_TIMEOUT" "$MODEL" "$workspace" "$output" \
+    'Inspect this workspace as a coding assistant. Use Glob to find the four text files, then issue separate Read calls for a.txt, b.txt, c.txt, and d.txt; independent reads may be parallel. Create summary.txt containing all four values, reread it, and finish with the exact marker PARALLEL_TOOLS_OK.' \
+    --tools 'Read,Write,Glob' --allowedTools 'Read,Write,Glob' --permission-mode acceptEdits
+  status=$?
+  set -e
+  tool_uses="$(client_tool_use_count "$output")"
+  tool_results="$(client_tool_result_count "$output")"
+  subtype="$(client_result_subtype "$output")"
+  if ((status != 0)) || [[ "$subtype" != "success" ]] || ! rg -q 'PARALLEL_TOOLS_OK' "$output"; then
+    CASE_DETAIL="parallel read workflow did not finish (status ${status}, subtype ${subtype}, calls ${tool_uses})"
+    return 1
+  fi
+  if ((tool_uses < 6 || tool_results < tool_uses)) || [[ ! -f "$workspace/summary.txt" ]] || ! rg -q 'PARALLEL_[A-D]' "$workspace/summary.txt"; then
+    CASE_DETAIL="parallel tool results were incomplete (calls ${tool_uses}, results ${tool_results})"
+    return 1
+  fi
+  CASE_DETAIL="four-file parallel read and summary workflow completed with ${tool_uses} tool calls"
+}
+
+case_permission_plan() {
+  local workspace="$TMP_DIR/permission-plan"
+  local output="$TMP_DIR/permission-plan.jsonl"
+  local before after status subtype
+  mkdir -p "$workspace"
+  printf '%s\n' 'PLAN_INPUT_UNCHANGED' >"$workspace/input.txt"
+  before="$(sha256sum "$workspace/input.txt")"
+  set +e
+  run_cli "$CLIENT_TIMEOUT" "$MODEL" "$workspace" "$output" \
+    'Review this workspace in plan mode. Read input.txt and explain a safe change plan, but do not write, edit, delete, execute commands, or modify any file. Finish with the exact marker PERMISSION_PLAN_OK.' \
+    --tools 'Read,Write,Edit,Bash' --allowedTools 'Read,Write,Edit,Bash' --permission-mode plan
+  status=$?
+  set -e
+  after="$(sha256sum "$workspace/input.txt")"
+  subtype="$(client_result_subtype "$output")"
+  if ((status != 0)) || [[ "$subtype" != "success" ]] || ! rg -q 'PERMISSION_PLAN_OK' "$output"; then
+    CASE_DETAIL="plan-mode read-only workflow did not finish (status ${status}, subtype ${subtype})"
+    return 1
+  fi
+  if [[ "$before" != "$after" ]] || find "$workspace" -maxdepth 1 -type f ! -name input.txt -print -quit | rg -q .; then
+    CASE_DETAIL="plan-mode workflow modified its disposable workspace"
+    return 1
+  fi
+  CASE_DETAIL="plan-mode inspection completed without workspace mutation"
+}
+
+case_structured_output() {
+  local output="$TMP_DIR/structured-output.jsonl"
+  local schema='{"type":"object","properties":{"status":{"type":"string","const":"STRUCTURED_OUTPUT_OK"}},"required":["status"],"additionalProperties":false}'
+  run_cli "$CLIENT_TIMEOUT" "$MODEL" "$WORKSPACE" "$output" \
+    'Return the requested structured result immediately. Set status to STRUCTURED_OUTPUT_OK.' \
+    --tools '' --json-schema "$schema"
+  if ! assert_client_result "$output" STRUCTURED_OUTPUT_OK; then
+    CASE_DETAIL="Claude Code structured-output request did not complete"
+    return 1
+  fi
+  if ! jq -e '.. | objects | select(has("structured_output"))' "$output" >/dev/null 2>&1; then
+    CASE_STATUS_HINT=WARN
+    CASE_DETAIL="response completed, but no structured_output event was exposed"
+    return 0
+  fi
+  CASE_DETAIL="JSON-schema constrained response completed"
+}
+
+case_mcp_large_result() {
+  reset_audit
+  write_skill kiro-large-result \
+    'Call mcp__devcheck__devcheck_large exactly once. Read the complete result, then reply exactly MCP_LARGE_RESULT_OK.'
+  local output="$TMP_DIR/mcp-large-result.jsonl"
+  run_cli "$CLIENT_TIMEOUT" "$MODEL" "$WORKSPACE" "$output" '/kiro-large-result' \
+    --mcp-config "$MCP_CONFIG" --strict-mcp-config \
+    --allowedTools 'mcp__devcheck__devcheck_large' --tools ''
+  local bytes
+  bytes="$(wc -c <"$output")"
+  if ! assert_client_result "$output" MCP_LARGE_RESULT_OK || [[ "$(audit_count devcheck_large)" != 1 ]] || ((bytes < 8192)); then
+    CASE_DETAIL="large MCP result roundtrip was incomplete (bytes ${bytes})"
+    return 1
+  fi
+  CASE_DETAIL="bounded large MCP result roundtrip completed (${bytes} captured bytes)"
+}
+
+case_mcp_error_recovery() {
+  reset_audit
+  write_skill kiro-error-recovery \
+    'Call mcp__devcheck__devcheck_fail exactly once and observe its deliberate error. Continue after the error by calling mcp__devcheck__devcheck_echo exactly once with value MCP_ERROR_RECOVERED, then reply exactly MCP_ERROR_RECOVERY_OK.'
+  local output="$TMP_DIR/mcp-error-recovery.jsonl"
+  local tool_errors
+  run_cli "$CLIENT_TIMEOUT" "$MODEL" "$WORKSPACE" "$output" '/kiro-error-recovery' \
+    --mcp-config "$MCP_CONFIG" --strict-mcp-config \
+    --allowedTools 'mcp__devcheck__devcheck_fail,mcp__devcheck__devcheck_echo' --tools ''
+  tool_errors="$(client_tool_error_count "$output")"
+  if ! assert_client_result "$output" MCP_ERROR_RECOVERY_OK || [[ "$(audit_count devcheck_fail)" != 1 ]] || [[ "$(audit_count devcheck_echo)" != 1 ]] || ((tool_errors < 1)); then
+    CASE_DETAIL="MCP error recovery did not execute both fixture calls"
+    return 1
+  fi
+  CASE_DETAIL="MCP tool error was surfaced and the following call recovered"
+}
+
+case_web_search() {
+  local output="$TMP_DIR/web-search.jsonl"
+  local tool_uses tool_results subtype status
+  set +e
+  run_cli_session "$CLIENT_TIMEOUT" "$MODEL" "$WORKSPACE" "$output" \
+    'Use the native WebSearch tool to search for the official Anthropic Claude Code documentation. Read the returned result, summarize one source title, and finish with the exact marker CLAUDE_WEB_SEARCH_OK.' \
+    --restricted --tools 'WebSearch' --allowedTools 'WebSearch' --permission-mode acceptEdits
+  status=$?
+  set -e
+  tool_uses="$(client_tool_use_count "$output")"
+  tool_results="$(client_tool_result_count "$output")"
+  subtype="$(client_result_subtype "$output")"
+  if ((status != 0)) || [[ "$subtype" != "success" ]] || ! rg -q 'CLAUDE_WEB_SEARCH_OK' "$output"; then
+    CASE_DETAIL="Claude Code WebSearch workflow did not finish (status ${status}, subtype ${subtype}, calls ${tool_uses})"
+    return 1
+  fi
+  if ((tool_uses < 1 || tool_results < tool_uses)); then
+    CASE_DETAIL="WebSearch completed without a structured tool/result pair (calls ${tool_uses}, results ${tool_results})"
+    return 1
+  fi
+  CASE_DETAIL="native WebSearch completed with ${tool_uses} tool call"
+}
+
+case_workspace_image() {
+  local workspace="$TMP_DIR/workspace-image"
+  local output="$TMP_DIR/workspace-image.jsonl"
+  local tool_uses tool_results subtype status
+  mkdir -p "$workspace"
+  printf '%s' 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=' \
+    | base64 --decode >"$workspace/pixel.png"
+  set +e
+  run_cli_session "$CLIENT_TIMEOUT" "$MODEL" "$workspace" "$output" \
+    'Use Read to inspect pixel.png as an image. Confirm that an image was received, then finish with the exact marker CLAUDE_IMAGE_READ_OK. Do not modify any file.' \
+    --restricted --tools 'Read' --allowedTools 'Read' --permission-mode plan
+  status=$?
+  set -e
+  tool_uses="$(client_tool_use_count "$output")"
+  tool_results="$(client_tool_result_count "$output")"
+  subtype="$(client_result_subtype "$output")"
+  if ((status != 0)) || [[ "$subtype" != "success" ]] || ! rg -q 'CLAUDE_IMAGE_READ_OK' "$output"; then
+    CASE_DETAIL="Claude Code image-read workflow did not finish (status ${status}, subtype ${subtype}, calls ${tool_uses})"
+    return 1
+  fi
+  if ((tool_uses < 1 || tool_results < tool_uses)); then
+    CASE_DETAIL="image read completed without a structured tool/result pair (calls ${tool_uses}, results ${tool_results})"
+    return 1
+  fi
+  CASE_DETAIL="Claude Code Read image roundtrip completed"
+}
+
 mkdir -p "$TMP_DIR/thinking-workspace" "$TMP_DIR/long-workspace" "$TMP_DIR/cancel-workspace" "$TMP_DIR/recovery-workspace"
 printf 'scenario\tstatus\tdetail\n' >"$SUMMARY_PATH"
 chmod 600 "$SUMMARY_PATH"
@@ -765,6 +995,15 @@ for scenario in "${SCENARIO_LIST[@]}"; do
     concurrent-clients) run_case "$scenario" case_concurrent_clients ;;
     workspace-multiturn) run_case "$scenario" case_workspace_multiturn ;;
     workspace-long-tools) run_case "$scenario" case_workspace_long_tools ;;
+    workspace-repo-loop) run_case "$scenario" case_workspace_repo_loop ;;
+    workspace-error-recovery) run_case "$scenario" case_workspace_error_recovery ;;
+    workspace-parallel-tools) run_case "$scenario" case_workspace_parallel_tools ;;
+    permission-plan) run_case "$scenario" case_permission_plan ;;
+    structured-output) run_case "$scenario" case_structured_output ;;
+    mcp-large-result) run_case "$scenario" case_mcp_large_result ;;
+    mcp-error-recovery) run_case "$scenario" case_mcp_error_recovery ;;
+    web-search) run_case "$scenario" case_web_search ;;
+    workspace-image) run_case "$scenario" case_workspace_image ;;
   esac
 done
 

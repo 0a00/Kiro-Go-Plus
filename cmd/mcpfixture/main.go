@@ -13,6 +13,8 @@ const (
 	fixtureToolName       = "devcheck_echo"
 	fixtureNoArgToolName  = "devcheck_no_args"
 	fixtureRepeatToolName = "devcheck_repeat"
+	fixtureLargeToolName  = "devcheck_large"
+	fixtureFailToolName   = "devcheck_fail"
 )
 
 type rpcRequest struct {
@@ -113,6 +115,12 @@ func fixtureTools() []interface{} {
 			"type": "object", "properties": map[string]interface{}{}, "additionalProperties": false,
 		}},
 		map[string]interface{}{"name": fixtureRepeatToolName, "description": "Return a value and record repeated tool dispatches.", "inputSchema": valueSchema},
+		map[string]interface{}{"name": fixtureLargeToolName, "description": "Return a bounded large deterministic result without accepting arguments.", "inputSchema": map[string]interface{}{
+			"type": "object", "properties": map[string]interface{}{}, "additionalProperties": false,
+		}},
+		map[string]interface{}{"name": fixtureFailToolName, "description": "Return a deliberate tool error so the client can test recovery.", "inputSchema": map[string]interface{}{
+			"type": "object", "properties": map[string]interface{}{}, "additionalProperties": false,
+		}},
 	}
 }
 
@@ -134,6 +142,18 @@ func handleToolCall(name string, rawArguments json.RawMessage) map[string]interf
 		}
 		recordNamedToolCall(name)
 		return fixtureToolResult("MCP_NO_ARGS_OK")
+	case fixtureLargeToolName:
+		if arguments != "" && arguments != "{}" && arguments != "null" {
+			return fixtureToolError("large-result tool received input")
+		}
+		recordNamedToolCall(name)
+		return fixtureToolResult(strings.Repeat("MCP_LARGE_RESULT_", 1024))
+	case fixtureFailToolName:
+		if arguments != "" && arguments != "{}" && arguments != "null" {
+			return fixtureToolError("failing tool received input")
+		}
+		recordNamedToolCall(name)
+		return fixtureToolError("intentional MCP fixture failure; continue with recovery")
 	default:
 		return fixtureToolError("unknown fixture tool")
 	}
