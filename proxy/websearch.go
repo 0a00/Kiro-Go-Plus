@@ -87,12 +87,28 @@ func hasMixedWebSearchTools(req *ClaudeRequest) bool {
 }
 
 func isNativeWebSearchTool(tool ClaudeTool) bool {
-	return strings.TrimSpace(tool.Name) == webSearchToolName &&
-		strings.HasPrefix(strings.TrimSpace(tool.Type), "web_search_")
+	toolType := normalizeWebSearchIdentifier(tool.Type)
+	return isWebSearchToolName(tool.Name) &&
+		(strings.HasPrefix(toolType, "websearch") && toolType != "websearch")
 }
 
 func isWebSearchToolName(name string) bool {
-	return strings.TrimSpace(name) == webSearchToolName
+	return normalizeWebSearchIdentifier(name) == "websearch"
+}
+
+// Claude Code and compatible clients have used both web_search and WebSearch
+// for the native tool name. The type remains the trust boundary: a generic
+// function named WebSearch must stay on the ordinary client-tool path.
+func normalizeWebSearchIdentifier(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	var normalized strings.Builder
+	normalized.Grow(len(value))
+	for _, r := range value {
+		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' {
+			normalized.WriteRune(r)
+		}
+	}
+	return normalized.String()
 }
 
 func extractWebSearchQuery(req *ClaudeRequest) string {

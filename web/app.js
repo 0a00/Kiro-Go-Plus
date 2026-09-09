@@ -2157,6 +2157,7 @@
     $('retryFirstTokenTimeoutSeconds').value = d.firstTokenTimeoutSeconds || 45;
     $('retryStreamIdleTimeoutSeconds').value = d.streamIdleTimeoutSeconds || 120;
     $('retryToolAssemblyTimeoutSeconds').value = d.toolAssemblyTimeoutSeconds ?? 180;
+    $('retryToolArgumentIdleTimeoutSeconds').value = d.toolArgumentIdleTimeoutSeconds ?? 180;
     $('retryEmptyResponseRetries').value = d.emptyResponseRetries ?? 2;
     $('retryEndpointFailureThreshold').value = d.endpointFailureThreshold || 3;
     $('retryEndpointCircuitCooldownSeconds').value = d.endpointCircuitCooldownSeconds || 30;
@@ -2174,13 +2175,14 @@
       firstTokenTimeoutSeconds: Math.round(Number($('retryFirstTokenTimeoutSeconds').value) || 0),
       streamIdleTimeoutSeconds: Math.round(Number($('retryStreamIdleTimeoutSeconds').value) || 0),
       toolAssemblyTimeoutSeconds: Math.round(Number($('retryToolAssemblyTimeoutSeconds').value) || 0),
+      toolArgumentIdleTimeoutSeconds: Math.round(Number($('retryToolArgumentIdleTimeoutSeconds').value) || 0),
       emptyResponseRetries: Math.round(Number($('retryEmptyResponseRetries').value) || 0),
       endpointFailureThreshold: Math.round(Number($('retryEndpointFailureThreshold').value) || 0),
       endpointCircuitCooldownSeconds: Math.round(Number($('retryEndpointCircuitCooldownSeconds').value) || 0),
       proxyFailureThreshold: Math.round(Number($('retryProxyFailureThreshold').value) || 0),
       proxyCircuitCooldownSeconds: Math.round(Number($('retryProxyCircuitCooldownSeconds').value) || 0)
     };
-    if (body.maxAccountAttempts < 0 || body.maxAccountAttempts > 100 || body.accountSelectionTimeoutSeconds < 10 || body.accountSelectionTimeoutSeconds > 3600 || body.maxUpstreamAttempts < 1 || body.maxUpstreamAttempts > 200 || body.maxRetryDurationSeconds < 0 || body.maxRetryDurationSeconds > 86400 || body.preOutputStreamRetries < 0 || body.preOutputStreamRetries > 3 || body.preOutputRetryBackoffMs < 100 || body.preOutputRetryBackoffMs > 5000 || body.firstTokenTimeoutSeconds < 5 || body.firstTokenTimeoutSeconds > 600 || body.streamIdleTimeoutSeconds < 15 || body.streamIdleTimeoutSeconds > 3600 || (body.toolAssemblyTimeoutSeconds !== 0 && (body.toolAssemblyTimeoutSeconds < 30 || body.toolAssemblyTimeoutSeconds > 3600)) || body.emptyResponseRetries < 0 || body.emptyResponseRetries > 20 || body.endpointFailureThreshold < 1 || body.endpointFailureThreshold > 20 || body.endpointCircuitCooldownSeconds < 5 || body.endpointCircuitCooldownSeconds > 900 || body.proxyFailureThreshold < 1 || body.proxyFailureThreshold > 20 || body.proxyCircuitCooldownSeconds < 5 || body.proxyCircuitCooldownSeconds > 900) {
+    if (body.maxAccountAttempts < 0 || body.maxAccountAttempts > 100 || body.accountSelectionTimeoutSeconds < 10 || body.accountSelectionTimeoutSeconds > 3600 || body.maxUpstreamAttempts < 1 || body.maxUpstreamAttempts > 200 || body.maxRetryDurationSeconds < 0 || body.maxRetryDurationSeconds > 86400 || body.preOutputStreamRetries < 0 || body.preOutputStreamRetries > 3 || body.preOutputRetryBackoffMs < 100 || body.preOutputRetryBackoffMs > 5000 || body.firstTokenTimeoutSeconds < 5 || body.firstTokenTimeoutSeconds > 600 || body.streamIdleTimeoutSeconds < 15 || body.streamIdleTimeoutSeconds > 3600 || (body.toolAssemblyTimeoutSeconds !== 0 && (body.toolAssemblyTimeoutSeconds < 30 || body.toolAssemblyTimeoutSeconds > 3600)) || (body.toolArgumentIdleTimeoutSeconds !== 0 && (body.toolArgumentIdleTimeoutSeconds < 30 || body.toolArgumentIdleTimeoutSeconds > 3600)) || body.emptyResponseRetries < 0 || body.emptyResponseRetries > 20 || body.endpointFailureThreshold < 1 || body.endpointFailureThreshold > 20 || body.endpointCircuitCooldownSeconds < 5 || body.endpointCircuitCooldownSeconds > 900 || body.proxyFailureThreshold < 1 || body.proxyFailureThreshold > 20 || body.proxyCircuitCooldownSeconds < 5 || body.proxyCircuitCooldownSeconds > 900) {
       toast(t('settings.retryInvalid'), 'warning');
       return;
     }

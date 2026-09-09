@@ -294,6 +294,7 @@ func TestRetryConfigAPIAcceptsUnlimitedAccountPolling(t *testing.T) {
 	retry.PreOutputStreamRetries = &preOutputRetries
 	retry.PreOutputRetryBackoffMs = 900
 	retry.ToolAssemblyTimeoutSeconds = 240
+	retry.ToolArgumentIdleTimeoutSeconds = 90
 	body, err := json.Marshal(retry)
 	if err != nil {
 		t.Fatalf("marshal retry config: %v", err)
@@ -309,7 +310,7 @@ func TestRetryConfigAPIAcceptsUnlimitedAccountPolling(t *testing.T) {
 	}
 	got := config.GetRetryConfig()
 	if got.AccountSelectionTimeoutSeconds != 300 || got.MaxRetryDurationSeconds != 1200 || got.PreOutputStreamRetries == nil ||
-		*got.PreOutputStreamRetries != 2 || got.PreOutputRetryBackoffMs != 900 || got.ToolAssemblyTimeoutSeconds != 240 {
+		*got.PreOutputStreamRetries != 2 || got.PreOutputRetryBackoffMs != 900 || got.ToolAssemblyTimeoutSeconds != 240 || got.ToolArgumentIdleTimeoutSeconds != 90 {
 		t.Fatalf("retry timeout settings were not persisted: %+v", got)
 	}
 }

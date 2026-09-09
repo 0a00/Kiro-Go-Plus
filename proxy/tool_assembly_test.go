@@ -109,7 +109,7 @@ func TestToolAssemblyMonitorRenewsGrowingToolAfterConfiguredInterval(t *testing.
 	}
 }
 
-func TestToolAssemblyMonitorRenewsOnRepeatedStartAndActivity(t *testing.T) {
+func TestToolAssemblyMonitorActivityDoesNotRenewArgumentIdleTimer(t *testing.T) {
 	timedOut := make(chan toolAssemblySnapshot, 1)
 	const timeout = 120 * time.Millisecond
 	callback, monitor := wrapToolAssemblyMonitor(&KiroStreamCallback{}, timeout, func(snapshot toolAssemblySnapshot) {
@@ -124,16 +124,67 @@ func TestToolAssemblyMonitorRenewsOnRepeatedStartAndActivity(t *testing.T) {
 	callback.OnToolUseActivity()
 	select {
 	case snapshot := <-timedOut:
-		t.Fatalf("repeated start/activity did not renew the tool: %+v", snapshot)
-	default:
+		if snapshot.ToolUseID != "toolu_repeat" || snapshot.Elapsed < timeout {
+			t.Fatalf("unexpected timed-out tool: %+v", snapshot)
+		}
+	case <-time.After(300 * time.Millisecond):
+		t.Fatal("metadata activity incorrectly renewed the argument idle timer")
+	}
+}
+
+func TestToolAssemblyMonitorArgumentFragmentsRenewIdleTimer(t *testing.T) {
+	timedOut := make(chan toolAssemblySnapshot, 1)
+	const timeout = 80 * time.Millisecond
+	callback, monitor := wrapToolAssemblyMonitor(&KiroStreamCallback{}, timeout, func(snapshot toolAssemblySnapshot) {
+		timedOut <- snapshot
+	})
+	defer monitor.Stop()
+
+	callback.OnToolUseStart("toolu_progress", "Write")
+	for i := 0; i < 3; i++ {
+		time.Sleep(30 * time.Millisecond)
+		callback.OnToolUseDelta("toolu_progress", "x")
 	}
 
 	select {
 	case snapshot := <-timedOut:
-		if snapshot.ToolUseID != "toolu_repeat" {
-			t.Fatalf("unexpected timed-out tool: %+v", snapshot)
+		t.Fatalf("argument fragments did not renew the timer: %+v", snapshot)
+	case <-time.After(40 * time.Millisecond):
+	}
+	select {
+	case snapshot := <-timedOut:
+		if snapshot.ToolUseID != "toolu_progress" || snapshot.ArgumentBytes != 3 {
+			t.Fatalf("unexpected timeout snapshot: %+v", snapshot)
 		}
-	case <-time.After(220 * time.Millisecond):
-		t.Fatal("tool did not time out after activity stopped")
+	case <-time.After(160 * time.Millisecond):
+		t.Fatal("tool did not time out after argument progress stopped")
+	}
+}
+
+func TestToolAssemblyMonitorTracksBufferedArguments(t *testing.T) {
+	timedOut := make(chan toolAssemblySnapshot, 1)
+	const timeout = 80 * time.Millisecond
+	callback, monitor := wrapToolAssemblyMonitor(&KiroStreamCallback{}, timeout, func(snapshot toolAssemblySnapshot) {
+		timedOut <- snapshot
+	})
+	defer monitor.Stop()
+
+	callback.OnToolUseStart("toolu_buffered", "Write")
+	for i := 0; i < 3; i++ {
+		time.Sleep(30 * time.Millisecond)
+		callback.onToolArgumentActivity("toolu_buffered", "{}")
+	}
+	select {
+	case snapshot := <-timedOut:
+		t.Fatalf("buffered argument activity did not renew the timer: %+v", snapshot)
+	case <-time.After(40 * time.Millisecond):
+	}
+	select {
+	case snapshot := <-timedOut:
+		if snapshot.ToolUseID != "toolu_buffered" || snapshot.ArgumentBytes != 6 {
+			t.Fatalf("unexpected timeout snapshot: %+v", snapshot)
+		}
+	case <-time.After(160 * time.Millisecond):
+		t.Fatal("buffered tool did not time out after argument progress stopped")
 	}
 }

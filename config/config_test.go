@@ -657,7 +657,7 @@ func TestOperationalConfigDefaults(t *testing.T) {
 	retry := GetRetryConfig()
 	if retry.MaxAccountAttempts != 8 || retry.AccountSelectionTimeoutSeconds != 120 || retry.MaxUpstreamAttempts != 12 || retry.MaxRetryDurationSeconds != 900 ||
 		retry.PreOutputStreamRetries == nil || *retry.PreOutputStreamRetries != 1 || retry.PreOutputRetryBackoffMs != 700 ||
-		retry.FirstTokenTimeoutSeconds != 45 || retry.ToolAssemblyTimeoutSeconds != 180 || retry.EmptyResponseRetries != 2 {
+		retry.FirstTokenTimeoutSeconds != 45 || retry.ToolAssemblyTimeoutSeconds != 180 || retry.ToolArgumentIdleTimeoutSeconds != 180 || retry.EmptyResponseRetries != 2 {
 		t.Fatalf("unexpected retry defaults: %+v", retry)
 	}
 	refresh := GetAutoRefreshConfig()

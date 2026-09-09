@@ -167,6 +167,22 @@ func TestParseEventStreamMarksTextWithoutCompletionSignalTruncated(t *testing.T)
 	}
 }
 
+func TestParseEventStreamRejectsTelemetryOnlyResponse(t *testing.T) {
+	stream := bytes.NewReader(awsEventStreamFrame(t, "usageEvent", map[string]interface{}{
+		"usageEvent": map[string]interface{}{"inputTokens": 12, "outputTokens": 0},
+	}))
+	var completed bool
+	var reason string
+	err := parseEventStream(stream, &KiroStreamCallback{
+		OnComplete:  func(_, _ int) { completed = true },
+		OnTruncated: func(value string) { reason = value },
+	})
+	assertEventStreamErrorKind(t, err, EventStreamIncompleteResponse)
+	if completed || reason == "" {
+		t.Fatalf("telemetry-only response was accepted: completed=%v reason=%q", completed, reason)
+	}
+}
+
 func TestParseEventStreamReadsStopReasonKeyVariants(t *testing.T) {
 	for _, key := range []string{"stopReason", "stop_reason"} {
 		t.Run(key, func(t *testing.T) {

@@ -750,12 +750,13 @@ type KiroStreamCallback struct {
 	OnStopReason      func(reason string)
 	// Internal observability hooks. They are invoked for semantic upstream
 	// events and tool fragments before any response buffering/translation.
-	onMeaningfulEvent  func()
-	onToolFragment     func()
-	outputLimitReached func() bool
-	detailTrace        *requestDetailTrace
-	detailToolNameMap  map[string]string
-	streamDiagnostics  *eventStreamDiagnostics
+	onMeaningfulEvent      func()
+	onToolFragment         func()
+	outputLimitReached     func() bool
+	detailTrace            *requestDetailTrace
+	detailToolNameMap      map[string]string
+	streamDiagnostics      *eventStreamDiagnostics
+	onToolArgumentActivity func(toolUseID, input string)
 }
 
 // KiroTokenUsage preserves upstream cache accounting when the event stream
@@ -1197,7 +1198,14 @@ endpointLoop:
 			meaningfulGate.setAllowCompletedTextFallback(payload != nil && payload.toolUsePolicy == toolUsePolicyInferred)
 			wrappedCallback.streamDiagnostics = attemptDiagnostics
 			toolAssemblyTimeout := time.Duration(retryConfig.ToolAssemblyTimeoutSeconds) * time.Second
-			wrappedCallback, toolMonitor := wrapToolAssemblyMonitor(wrappedCallback, toolAssemblyTimeout, func(toolAssemblySnapshot) {
+			toolArgumentIdleTimeout := time.Duration(retryConfig.ToolArgumentIdleTimeoutSeconds) * time.Second
+			if toolArgumentIdleTimeout <= 0 {
+				toolArgumentIdleTimeout = toolAssemblyTimeout
+			}
+			if toolAssemblyTimeout > 0 && (toolArgumentIdleTimeout <= 0 || toolAssemblyTimeout < toolArgumentIdleTimeout) {
+				toolArgumentIdleTimeout = toolAssemblyTimeout
+			}
+			wrappedCallback, toolMonitor := wrapToolAssemblyMonitor(wrappedCallback, toolArgumentIdleTimeout, func(toolAssemblySnapshot) {
 				cancelRequest()
 			})
 			var actionableOutputTimedOut atomic.Bool
@@ -1346,7 +1354,7 @@ endpointLoop:
 			}
 			if err != nil {
 				if toolSnapshot, timedOut := toolMonitor.TimedOut(); timedOut {
-					err = newToolAssemblyTimeoutError(ep.Name, toolSnapshot.Name, toolSnapshot.ArgumentBytes, toolAssemblyTimeout)
+					err = newToolAssemblyTimeoutError(ep.Name, toolSnapshot.Name, toolSnapshot.ArgumentBytes, toolArgumentIdleTimeout)
 				}
 				if requestContext.Err() != nil {
 					sharedUpstreamHealth.releaseEndpoint(endpointCircuitKey)
@@ -1371,7 +1379,15 @@ endpointLoop:
 							truncatedErr.RetryAcrossAccounts = allowRetry
 							err = truncatedErr
 						case EventStreamIncompleteResponse:
-							err = newStreamTruncatedError(ep.Name, streamErr)
+							if !meaningfulGate.hasActionableOutput() && !meaningfulGate.hasActivity() {
+								// A parser-level incomplete response with no text or tool
+								// output is the same retryable empty-response condition as
+								// a telemetry-only HTTP 200. Preserve endpoint/account
+								// failover instead of misclassifying it as a partial stream.
+								err = newEmptyResponseErrorWithDiagnostics(ep.Name, true, attemptDiagnostics)
+							} else {
+								err = newStreamTruncatedError(ep.Name, streamErr)
+							}
 						}
 					}
 				}
@@ -1482,7 +1498,8 @@ func isRetryablePreOutputStreamError(err error, gate *meaningfulStreamCallback) 
 	upstreamErr, ok := asUpstreamError(err)
 	return ok && (upstreamErr.Kind == UpstreamErrorTransient ||
 		upstreamErr.Kind == UpstreamErrorStreamTruncated ||
-		upstreamErr.Kind == UpstreamErrorToolAssemblyTimeout) && upstreamErr.RetryAcrossEndpoints
+		upstreamErr.Kind == UpstreamErrorToolAssemblyTimeout ||
+		upstreamErr.Kind == UpstreamErrorEmptyResponse) && upstreamErr.RetryAcrossEndpoints
 }
 
 func waitForPreOutputStreamRetry(ctx context.Context, delay time.Duration) error {
@@ -1747,6 +1764,17 @@ func parseEventStreamWithOptions(body io.Reader, callback *KiroStreamCallback, o
 		if state = pendingToolUses.first(); state != nil {
 			return incompleteToolUseStreamError(state, cause)
 		}
+	}
+
+	// A telemetry/metadata-only stream is not a successful assistant response.
+	// Keep this check before the legacy telemetry-tail compatibility path: that
+	// path is valid only when actual response content preceded the telemetry.
+	if !sawOutput && !sawToolUse && !recoveredToolUse && !sawExplicitCompletion {
+		const reason = "stream ended without actionable output"
+		if callback.OnTruncated != nil {
+			callback.OnTruncated(reason)
+		}
+		return &EventStreamError{Kind: EventStreamIncompleteResponse, Message: reason}
 	}
 
 	legacyTelemetryCompletion := lastFrameWasTelemetry && !sawExplicitCompletion
@@ -2856,6 +2884,9 @@ func handleToolUseEvent(event map[string]interface{}, pending *pendingToolUseSet
 		if input != "" && !current.StreamStarted && callback != nil && callback.OnToolUseActivity != nil {
 			callback.OnToolUseActivity()
 		}
+		if input != "" && !current.StreamStarted && callback != nil && callback.onToolArgumentActivity != nil {
+			callback.onToolArgumentActivity(current.ToolUseID, input)
+		}
 	} else if inputObj, ok := event["input"].(map[string]interface{}); ok && len(inputObj) > 0 {
 		data, _ := json.Marshal(inputObj)
 		current.InputBuffer.Reset()
@@ -2869,6 +2900,9 @@ func handleToolUseEvent(event map[string]interface{}, pending *pendingToolUseSet
 		if !current.StreamStarted && callback != nil && callback.OnToolUseActivity != nil {
 			callback.OnToolUseActivity()
 		}
+		if !current.StreamStarted && callback != nil && callback.onToolArgumentActivity != nil {
+			callback.onToolArgumentActivity(current.ToolUseID, string(data))
+		}
 	} else if inputArray, ok := event["input"].([]interface{}); ok && len(inputArray) > 0 {
 		data, _ := json.Marshal(inputArray)
 		current.InputBuffer.Reset()
@@ -2879,6 +2913,9 @@ func handleToolUseEvent(event map[string]interface{}, pending *pendingToolUseSet
 		}
 		if callback != nil && callback.OnToolUseActivity != nil && !current.StreamStarted {
 			callback.OnToolUseActivity()
+		}
+		if !current.StreamStarted && callback != nil && callback.onToolArgumentActivity != nil {
+			callback.onToolArgumentActivity(current.ToolUseID, string(data))
 		}
 	}
 

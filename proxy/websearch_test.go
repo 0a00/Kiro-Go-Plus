@@ -31,6 +31,18 @@ func TestHasPureWebSearchToolOnlyMatchesSingleTool(t *testing.T) {
 	if hasMixedWebSearchTools(&ClaudeRequest{Tools: []ClaudeTool{{Name: "web_search"}, {Name: "other"}}}) {
 		t.Fatal("custom same-name tool must remain on the normal client-tool path")
 	}
+	aliases := []ClaudeTool{
+		{Type: "web_search_20250305", Name: "WebSearch"},
+		{Type: "WEB-SEARCH-20250305", Name: "web-search"},
+	}
+	for _, alias := range aliases {
+		if !isNativeWebSearchTool(alias) {
+			t.Fatalf("native WebSearch alias was not recognized: %+v", alias)
+		}
+	}
+	if isNativeWebSearchTool(ClaudeTool{Type: "function", Name: "WebSearch"}) {
+		t.Fatal("generic WebSearch function must not be intercepted")
+	}
 }
 
 func TestExtractWebSearchQueryStripsClaudePrefix(t *testing.T) {

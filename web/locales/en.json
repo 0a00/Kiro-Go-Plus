@@ -292,6 +292,7 @@
   "settings.retryFirstTokenTimeout": "First meaningful output timeout (seconds)",
   "settings.retryStreamIdleTimeout": "Streaming event idle timeout (seconds)",
   "settings.retryToolAssemblyTimeout": "Tool-fragment idle timeout (seconds, 0 = unlimited)",
+  "settings.retryToolArgumentIdleTimeout": "Tool-argument no-progress timeout (seconds, 0 = use the previous setting)",
   "settings.retryEmptyResponses": "Empty response retries",
 	"settings.endpointFailureThreshold": "Endpoint failures before circuit opens",
 	"settings.endpointCircuitCooldown": "Endpoint circuit cooldown (seconds)",

@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 )
 
@@ -70,5 +71,43 @@ func TestParseEventStreamRekeysGeneratedToolWithoutReordering(t *testing.T) {
 	}
 	if len(tools) != 2 || tools[0].ToolUseID != "toolu_first" || tools[1].ToolUseID != "toolu_second" {
 		t.Fatalf("rekey changed arrival order: %#v", tools)
+	}
+}
+
+func TestHandleToolUseEventUsesFinalIDForStreamedCallbacks(t *testing.T) {
+	var events []string
+	callback := &KiroStreamCallback{
+		OnToolUseStart: func(id, name string) { events = append(events, "start:"+id+":"+name) },
+		OnToolUseDelta: func(id, input string) { events = append(events, "delta:"+id+":"+input) },
+		OnToolUseStop:  func(id string) { events = append(events, "stop:"+id) },
+		OnToolUse:      func(tool KiroToolUse) { events = append(events, "tool:"+tool.ToolUseID) },
+	}
+	pending := &pendingToolUseSet{}
+
+	if err := handleToolUseEvent(map[string]interface{}{
+		"name":  "Write",
+		"input": `{"path":`,
+	}, pending, callback); err != nil {
+		t.Fatalf("unexpected initial tool-use error: %v", err)
+	}
+	if err := handleToolUseEvent(map[string]interface{}{
+		"toolUseId": "toolu_final",
+		"name":      "Write",
+		"input":     `"README.md"}`,
+		"stop":      true,
+	}, pending, callback); err != nil {
+		t.Fatalf("unexpected completed tool-use error: %v", err)
+	}
+
+	for _, event := range events {
+		if strings.Contains(event, "toolu_") && !strings.Contains(event, "toolu_final") {
+			t.Fatalf("generated ID leaked into streamed callback: %q; events=%#v", event, events)
+		}
+	}
+	if len(events) != 5 || events[0] != "start:toolu_final:Write" ||
+		events[1] != `delta:toolu_final:{"path":` ||
+		events[2] != `delta:toolu_final:"README.md"}` ||
+		events[3] != "stop:toolu_final" || events[4] != "tool:toolu_final" {
+		t.Fatalf("unexpected streamed callback sequence: %#v", events)
 	}
 }

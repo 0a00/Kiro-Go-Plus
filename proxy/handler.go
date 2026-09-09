@@ -6823,6 +6823,7 @@ func (h *Handler) apiUpdateRetryConfig(w http.ResponseWriter, r *http.Request) {
 		PreOutputStreamRetries         *int `json:"preOutputStreamRetries"`
 		PreOutputRetryBackoffMs        *int `json:"preOutputRetryBackoffMs"`
 		ToolAssemblyTimeoutSeconds     *int `json:"toolAssemblyTimeoutSeconds"`
+		ToolArgumentIdleTimeoutSeconds *int `json:"toolArgumentIdleTimeoutSeconds"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&update); err != nil {
 		w.WriteHeader(400)
@@ -6863,6 +6864,11 @@ func (h *Handler) apiUpdateRetryConfig(w http.ResponseWriter, r *http.Request) {
 	} else {
 		req.ToolAssemblyTimeoutSeconds = *update.ToolAssemblyTimeoutSeconds
 	}
+	if update.ToolArgumentIdleTimeoutSeconds == nil {
+		req.ToolArgumentIdleTimeoutSeconds = current.ToolArgumentIdleTimeoutSeconds
+	} else {
+		req.ToolArgumentIdleTimeoutSeconds = *update.ToolArgumentIdleTimeoutSeconds
+	}
 	if req.StreamIdleTimeoutSeconds <= 0 {
 		req.StreamIdleTimeoutSeconds = current.StreamIdleTimeoutSeconds
 	}
@@ -6875,6 +6881,7 @@ func (h *Handler) apiUpdateRetryConfig(w http.ResponseWriter, r *http.Request) {
 		req.FirstTokenTimeoutSeconds < 5 || req.FirstTokenTimeoutSeconds > 600 ||
 		req.StreamIdleTimeoutSeconds < 15 || req.StreamIdleTimeoutSeconds > 3600 ||
 		(req.ToolAssemblyTimeoutSeconds != 0 && (req.ToolAssemblyTimeoutSeconds < 30 || req.ToolAssemblyTimeoutSeconds > 3600)) ||
+		(req.ToolArgumentIdleTimeoutSeconds != 0 && (req.ToolArgumentIdleTimeoutSeconds < 30 || req.ToolArgumentIdleTimeoutSeconds > 3600)) ||
 		req.EmptyResponseRetries < 0 || req.EmptyResponseRetries > 20 ||
 		req.EndpointFailureThreshold < 1 || req.EndpointFailureThreshold > 20 ||
 		req.EndpointCircuitCooldownSeconds < 5 || req.EndpointCircuitCooldownSeconds > 900 ||

@@ -271,7 +271,11 @@ type RetryConfig struct {
 	StreamIdleTimeoutSeconds       int  `json:"streamIdleTimeoutSeconds"`
 	// ToolAssemblyTimeoutSeconds is the allowed idle interval while a tool call
 	// is being assembled. It is not a total tool-call duration limit.
-	ToolAssemblyTimeoutSeconds     int `json:"toolAssemblyTimeoutSeconds"`
+	ToolAssemblyTimeoutSeconds int `json:"toolAssemblyTimeoutSeconds"`
+	// ToolArgumentIdleTimeoutSeconds is the maximum time without new tool
+	// argument bytes after a tool call starts. Zero falls back to the assembly
+	// timeout for backward compatibility.
+	ToolArgumentIdleTimeoutSeconds int `json:"toolArgumentIdleTimeoutSeconds"`
 	EmptyResponseRetries           int `json:"emptyResponseRetries"`
 	EndpointFailureThreshold       int `json:"endpointFailureThreshold"`
 	EndpointCircuitCooldownSeconds int `json:"endpointCircuitCooldownSeconds"`
@@ -789,6 +793,9 @@ func loadLocked() error {
 		if !rawConfigHasNestedKey(data, "retry", "toolAssemblyTimeoutSeconds") {
 			c.Retry.ToolAssemblyTimeoutSeconds = defaults.ToolAssemblyTimeoutSeconds
 		}
+		if !rawConfigHasNestedKey(data, "retry", "toolArgumentIdleTimeoutSeconds") {
+			c.Retry.ToolArgumentIdleTimeoutSeconds = defaults.ToolArgumentIdleTimeoutSeconds
+		}
 	}
 	if !rawConfigHasKey(data, "longTool") {
 		c.LongTool = defaultLongToolConfig()
@@ -1276,6 +1283,7 @@ func defaultRetryConfig() RetryConfig {
 		FirstTokenTimeoutSeconds:       45,
 		StreamIdleTimeoutSeconds:       120,
 		ToolAssemblyTimeoutSeconds:     180,
+		ToolArgumentIdleTimeoutSeconds: 180,
 		EmptyResponseRetries:           2,
 		EndpointFailureThreshold:       3,
 		EndpointCircuitCooldownSeconds: 30,
@@ -1344,6 +1352,12 @@ func normalizeRetryLocked() {
 	}
 	if cfg.Retry.ToolAssemblyTimeoutSeconds > 3600 {
 		cfg.Retry.ToolAssemblyTimeoutSeconds = 3600
+	}
+	if cfg.Retry.ToolArgumentIdleTimeoutSeconds < 0 {
+		cfg.Retry.ToolArgumentIdleTimeoutSeconds = defaults.ToolArgumentIdleTimeoutSeconds
+	}
+	if cfg.Retry.ToolArgumentIdleTimeoutSeconds > 3600 {
+		cfg.Retry.ToolArgumentIdleTimeoutSeconds = 3600
 	}
 	if cfg.Retry.EmptyResponseRetries < 0 {
 		cfg.Retry.EmptyResponseRetries = 0
@@ -2156,6 +2170,9 @@ func GetRetryConfig() RetryConfig {
 	}
 	if out.ToolAssemblyTimeoutSeconds < 0 {
 		out.ToolAssemblyTimeoutSeconds = defaults.ToolAssemblyTimeoutSeconds
+	}
+	if out.ToolArgumentIdleTimeoutSeconds < 0 {
+		out.ToolArgumentIdleTimeoutSeconds = defaults.ToolArgumentIdleTimeoutSeconds
 	}
 	if out.EmptyResponseRetries < 0 {
 		out.EmptyResponseRetries = 0

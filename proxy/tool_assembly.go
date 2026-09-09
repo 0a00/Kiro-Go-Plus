@@ -47,11 +47,18 @@ func wrapToolAssemblyMonitor(target *KiroStreamCallback, timeout time.Duration, 
 	originalDelta := target.OnToolUseDelta
 	originalStop := target.OnToolUseStop
 	originalActivity := target.OnToolUseActivity
+	originalArgumentActivity := target.onToolArgumentActivity
 
 	wrapped.OnToolUseActivity = func() {
 		monitor.activity()
 		if originalActivity != nil {
 			originalActivity()
+		}
+	}
+	wrapped.onToolArgumentActivity = func(toolUseID, input string) {
+		monitor.add(toolUseID, input)
+		if originalArgumentActivity != nil {
+			originalArgumentActivity(toolUseID, input)
 		}
 	}
 
@@ -92,7 +99,6 @@ func (m *toolAssemblyMonitor) start(toolUseID, name string) {
 		if name != "" {
 			existing.name = name
 		}
-		m.touchLocked(existing)
 		return
 	}
 	if toolUseID != "" {
@@ -104,7 +110,6 @@ func (m *toolAssemblyMonitor) start(toolUseID, name string) {
 			placeholder.toolUseID = toolUseID
 			placeholder.name = name
 			m.active[toolUseID] = placeholder
-			m.touchLocked(placeholder)
 			m.armLocked(placeholder)
 			return
 		}
@@ -166,7 +171,6 @@ func (m *toolAssemblyMonitor) stateForInputLocked(toolUseID string) *toolAssembl
 			}
 			placeholder.toolUseID = toolUseID
 			m.active[toolUseID] = placeholder
-			m.touchLocked(placeholder)
 			m.armLocked(placeholder)
 			return placeholder
 		}
@@ -212,11 +216,10 @@ func (m *toolAssemblyMonitor) activity() {
 	}
 	if len(m.active) == 0 {
 		m.addActiveLocked("", "", time.Now())
-		return
 	}
-	for _, state := range m.active {
-		m.touchLocked(state)
-	}
+	// Activity frames, tool metadata, and generated tool IDs do not contain
+	// argument bytes. They must not keep an incomplete tool call alive forever.
+	// add() is the only path that renews the argument-progress timer.
 }
 
 func (m *toolAssemblyMonitor) stop(toolUseID string) {

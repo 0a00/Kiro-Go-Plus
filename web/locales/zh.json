@@ -292,6 +292,7 @@
   "settings.retryFirstTokenTimeout": "首个有效输出超时（秒）",
   "settings.retryStreamIdleTimeout": "流式事件空闲超时（秒）",
   "settings.retryToolAssemblyTimeout": "工具调用分片空闲超时（秒，0 = 不限制）",
+  "settings.retryToolArgumentIdleTimeout": "工具参数无进度超时（秒，0 = 使用上项）",
   "settings.retryEmptyResponses": "空响应重试次数",
 	"settings.endpointFailureThreshold": "端点连续失败熔断阈值",
 	"settings.endpointCircuitCooldown": "端点熔断冷却（秒）",
