@@ -17,7 +17,7 @@ Modes:
   bench       Run parser, translation, cache, routing, and logging benchmarks.
   live        Run the smoke suite against a local service.
   live-full   Run reasoning, Skills, tools/MCP, cache, images, long streams, and cancellation.
-  client-e2e  Use Claude Code to discover a disposable Skill and execute a local MCP fixture.
+  client-e2e  Run real Claude Code client workflows, including Skills, MCP, multi-turn tools, and long tool chains.
   production  Run the protected production functional, model, load, and Claude Code suite.
   matrix      Test selected models across Anthropic, Chat Completions, and Responses.
   load        Run bounded mixed-protocol stream/non-stream requests (default: 5 workers, 10 requests).
@@ -29,7 +29,8 @@ Live modes require KIRO_DEV_API_KEY in the environment. Optional variables:
   KIRO_DEV_BASE_URL, KIRO_DEV_MODEL, KIRO_DEV_THINKING_MODEL, KIRO_DEV_MODELS,
   KIRO_DEV_FUZZ_TIME. client-e2e also accepts KIRO_DEV_ALLOW_REMOTE,
   KIRO_DEV_CLIENT_TIMEOUT, KIRO_DEV_CLIENT_CANCEL_AFTER,
-  KIRO_DEV_CLIENT_CONCURRENCY, and KIRO_DEV_MAX_BUDGET_USD.
+  KIRO_DEV_CLIENT_CONCURRENCY, KIRO_DEV_MAX_BUDGET_USD, and
+  KIRO_DEV_AGENT_MAX_BUDGET_USD.
 
 Production mode requires KIRO_PROD_API_KEY and --confirm-production. Use
 KIRO_PROD_BASE_URL, KIRO_PROD_ALLOW_REMOTE, KIRO_PROD_MODEL,

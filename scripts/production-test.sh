@@ -35,6 +35,8 @@ Options:
   --client-scenarios CSV      Claude Code cases (default: all).
   --client-concurrency N      Concurrent Claude Code clients (default: 2).
   --client-max-budget-usd N   Claude Code budget per client (default: 0.10).
+  --client-agent-max-budget-usd N
+                              Budget for multi-turn/long-tool agent cases (default: 0.75).
   --client-cancel-after DURATION  Cancellation probe deadline (default: 8s).
   --report-dir DIR            Private report directory (default: /tmp/kiro-production-test-*).
   --keep-artifacts             Keep raw Claude Code diagnostic streams (sensitive).
@@ -48,7 +50,8 @@ Environment:
   KIRO_PROD_REPORT_DIR, KIRO_PROD_PHASE_TIMEOUT, KIRO_PROD_REQUEST_TIMEOUT,
   KIRO_PROD_LOAD_CONCURRENCY, KIRO_PROD_LOAD_REQUESTS, KIRO_PROD_LOAD_MAX_TOKENS,
   KIRO_PROD_CLIENT_SCENARIOS, KIRO_PROD_CLIENT_CONCURRENCY,
-  KIRO_PROD_CLIENT_MAX_BUDGET_USD, KIRO_PROD_CLIENT_CANCEL_AFTER,
+  KIRO_PROD_CLIENT_MAX_BUDGET_USD, KIRO_PROD_CLIENT_AGENT_MAX_BUDGET_USD,
+  KIRO_PROD_CLIENT_CANCEL_AFTER,
   KIRO_PROD_FAIL_ON_WARNING.
 EOF
 }
@@ -101,6 +104,7 @@ LOAD_MAX_TOKENS="${KIRO_PROD_LOAD_MAX_TOKENS:-256}"
 CLIENT_SCENARIOS="${KIRO_PROD_CLIENT_SCENARIOS:-all}"
 CLIENT_CONCURRENCY="${KIRO_PROD_CLIENT_CONCURRENCY:-2}"
 CLIENT_MAX_BUDGET="${KIRO_PROD_CLIENT_MAX_BUDGET_USD:-${KIRO_DEV_MAX_BUDGET_USD:-0.10}}"
+CLIENT_AGENT_MAX_BUDGET="${KIRO_PROD_CLIENT_AGENT_MAX_BUDGET_USD:-${KIRO_DEV_AGENT_MAX_BUDGET_USD:-0.75}}"
 CLIENT_CANCEL_AFTER="${KIRO_PROD_CLIENT_CANCEL_AFTER:-${KIRO_DEV_CLIENT_CANCEL_AFTER:-8s}}"
 
 while (($# > 0)); do
@@ -187,6 +191,12 @@ while (($# > 0)); do
       shift 2
       ;;
     --client-max-budget-usd=*) CLIENT_MAX_BUDGET="${1#*=}"; shift ;;
+    --client-agent-max-budget-usd)
+      (($# >= 2)) || die "--client-agent-max-budget-usd requires a value"
+      CLIENT_AGENT_MAX_BUDGET="$2"
+      shift 2
+      ;;
+    --client-agent-max-budget-usd=*) CLIENT_AGENT_MAX_BUDGET="${1#*=}"; shift ;;
     --client-cancel-after)
       (($# >= 2)) || die "--client-cancel-after requires a value"
       CLIENT_CANCEL_AFTER="$2"
@@ -226,6 +236,7 @@ is_nonzero_duration "$CLIENT_CANCEL_AFTER" || die "invalid --client-cancel-after
 [[ -z "$THINKING_MODEL" || "$THINKING_MODEL" != *[[:space:]]* ]] || die "thinking model must not contain whitespace"
 [[ -z "$MATRIX_MODELS" || ("$MATRIX_MODELS" != *$'\n'* && "$MATRIX_MODELS" != *$'\r'*) ]] || die "matrix models must not contain newlines"
 [[ "$CLIENT_MAX_BUDGET" =~ ^[0-9]+([.][0-9]+)?$ ]] || die "--client-max-budget-usd must be a non-negative decimal"
+[[ "$CLIENT_AGENT_MAX_BUDGET" =~ ^[0-9]+([.][0-9]+)?$ ]] || die "--client-agent-max-budget-usd must be a non-negative decimal"
 is_positive_integer "$LOAD_CONCURRENCY" || die "--load-concurrency must be a positive integer"
 is_positive_integer "$LOAD_REQUESTS" || die "--load-requests must be a positive integer"
 is_positive_integer "$LOAD_MAX_TOKENS" || die "--load-max-tokens must be a positive integer"
@@ -247,6 +258,7 @@ if ((DRY_RUN)); then
     "$([[ $RUN_LOAD == 1 ]] && printf enabled || printf skipped)" "$LOAD_CONCURRENCY" "$LOAD_REQUESTS" "$LOAD_MAX_TOKENS"
   printf 'claude_code: %s scenarios=%s concurrency=%s\n' \
     "$([[ $RUN_CLIENT == 1 ]] && printf enabled || printf skipped)" "$CLIENT_SCENARIOS" "$CLIENT_CONCURRENCY"
+  printf 'claude_code_budgets: regular=%s agent=%s\n' "$CLIENT_MAX_BUDGET" "$CLIENT_AGENT_MAX_BUDGET"
   printf 'staircase: %s; soak: %s\n' \
     "$([[ $RUN_STAIRCASE == 1 ]] && printf enabled || printf disabled)" \
     "$([[ $RUN_SOAK == 1 ]] && printf enabled || printf disabled)"
@@ -684,7 +696,9 @@ else
     fi
     CLIENT_ARGS=(--scenarios "$CLIENT_SCENARIOS" --model "$CLIENT_MODEL" \
       --timeout "$REQUEST_TIMEOUT" --concurrency "$CLIENT_CONCURRENCY" \
-      --max-budget-usd "$CLIENT_MAX_BUDGET" --cancel-after "$CLIENT_CANCEL_AFTER")
+      --max-budget-usd "$CLIENT_MAX_BUDGET" \
+      --agent-max-budget-usd "$CLIENT_AGENT_MAX_BUDGET" \
+      --cancel-after "$CLIENT_CANCEL_AFTER")
     if [[ -n "$THINKING_MODEL" ]]; then
       CLIENT_ARGS+=(--thinking-model "$THINKING_MODEL")
     fi

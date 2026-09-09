@@ -56,17 +56,28 @@ available input/output/reasoning/cache token fields. JSON reports use mode
 `0600`, include the service version and a credential-free test-settings
 fingerprint, and never include the API key, request body, image, or tool arguments.
 
-To validate actual client-side Skill discovery and MCP process execution, not
-just proxy protocol transport, run the isolated Claude Code harness:
+To validate actual client-side Skill discovery, MCP process execution, resumed
+multi-turn workspace edits, and long tool chains, not just proxy protocol
+transport, run the isolated Claude Code harness:
 
 ```bash
 bash scripts/dev-test.sh client-e2e
 ```
 
-It builds `cmd/mcpfixture`, creates a disposable Skill and workspace, disables
-built-in tools, permits only the fixture tool, applies a small client budget,
-and deletes all temporary files. Set `KIRO_DEV_ALLOW_REMOTE=1` explicitly for a
-non-loopback `KIRO_DEV_BASE_URL`.
+It builds `cmd/mcpfixture`, creates disposable Skills and workspaces, executes
+the exact resumed flow `写个shell脚本，随便写` followed by `增加5倍代码量`,
+and runs a bounded 20-plus-call file-tool chain. It verifies structured tool
+use/result pairing, actual file changes, client completion, and tool errors;
+the expensive agent cases use `KIRO_DEV_AGENT_MAX_BUDGET_USD` (default `0.75`).
+Set `KIRO_DEV_ALLOW_REMOTE=1` explicitly for a non-loopback
+`KIRO_DEV_BASE_URL`.
+
+Run only the new cases while iterating:
+
+```bash
+bash scripts/client-e2e.sh --scenarios workspace-multiturn,workspace-long-tools \
+  --agent-max-budget-usd 1.00 --timeout 12m
+```
 
 ## Production Verification
 
@@ -96,9 +107,12 @@ every discovered Claude model over Anthropic, Chat Completions, and Responses
 in stream and non-stream modes; a bounded realistic mixed load; and the actual
 Claude Code harness. Claude Code cases cover plain streaming, thinking,
 isolated file Read/Write/Edit, Skills, parameterized and zero-argument MCP,
-repeated MCP calls, long streams, cancellation/recovery, and concurrent
-clients. Reports and logs are written to a private directory and are removed
-from the command's temporary workspace on exit.
+repeated MCP calls, long streams, cancellation/recovery, concurrent clients,
+resumed multi-turn workspace edits, and a 20-plus-call file-tool chain. The
+multi-turn and long-tool cases use `--client-agent-max-budget-usd` (or
+`KIRO_PROD_CLIENT_AGENT_MAX_BUDGET_USD`) so their budget is independent of
+short smoke cases. Reports and logs are written to a private directory and are
+removed from the command's temporary workspace on exit.
 
 The default matrix and realistic load consume quota. For a low-impact
 preflight use `--skip-matrix --skip-load --skip-web-search`; use

@@ -16,6 +16,7 @@ Options:
   --thinking-model MODEL   Thinking model (default: <model>-thinking).
   --timeout DURATION       Per-client timeout (default: KIRO_DEV_CLIENT_TIMEOUT or 5m).
   --max-budget-usd N       Claude Code budget per client (default: 0.10).
+  --agent-max-budget-usd N Budget for multi-turn/long-tool agent cases (default: 0.75).
   --concurrency N          Concurrent Claude Code clients (default: 2).
   --cancel-after DURATION  Cancellation probe deadline (default: 8s).
   --artifact-dir DIR       Preserve private client outputs in DIR.
@@ -25,7 +26,8 @@ Options:
 
 Scenario IDs:
   text-stream, skill-mcp, mcp-zero-arg, mcp-multi-call, file-tools,
-  thinking, long-stream, cancel-recover, concurrent-clients
+  thinking, long-stream, cancel-recover, concurrent-clients,
+  workspace-multiturn, workspace-long-tools
 
 Set KIRO_DEV_ALLOW_REMOTE=1 before testing a non-loopback base URL. The file
 tool case uses a disposable workspace and only Read/Write/Edit/Glob/Grep.
@@ -46,6 +48,7 @@ THINKING_MODEL="${KIRO_DEV_THINKING_MODEL:-}"
 SCENARIOS_RAW="${KIRO_DEV_CLIENT_SCENARIOS:-skill-mcp}"
 CLIENT_TIMEOUT="${KIRO_DEV_CLIENT_TIMEOUT:-5m}"
 MAX_BUDGET="${KIRO_DEV_MAX_BUDGET_USD:-0.10}"
+AGENT_MAX_BUDGET="${KIRO_DEV_AGENT_MAX_BUDGET_USD:-0.75}"
 CLIENT_CONCURRENCY="${KIRO_DEV_CLIENT_CONCURRENCY:-2}"
 CANCEL_AFTER="${KIRO_DEV_CLIENT_CANCEL_AFTER:-8s}"
 ARTIFACT_DIR="${KIRO_DEV_CLIENT_ARTIFACT_DIR:-}"
@@ -97,6 +100,15 @@ while (($# > 0)); do
       ;;
     --max-budget-usd=*)
       MAX_BUDGET="${1#*=}"
+      shift
+      ;;
+    --agent-max-budget-usd)
+      (($# >= 2)) || die "--agent-max-budget-usd requires a value"
+      AGENT_MAX_BUDGET="$2"
+      shift 2
+      ;;
+    --agent-max-budget-usd=*)
+      AGENT_MAX_BUDGET="${1#*=}"
       shift
       ;;
     --concurrency)
@@ -171,6 +183,7 @@ command -v go >/dev/null 2>&1 || die "go is required"
 command -v claude >/dev/null 2>&1 || die "Claude Code is required"
 command -v timeout >/dev/null 2>&1 || die "timeout is required"
 command -v rg >/dev/null 2>&1 || die "ripgrep (rg) is required"
+command -v jq >/dev/null 2>&1 || die "jq is required"
 [[ -n "${KIRO_DEV_API_KEY:-}" ]] || die "KIRO_DEV_API_KEY is required"
 [[ -n "$MODEL" ]] || die "model must not be empty"
 is_nonzero_duration "$CLIENT_TIMEOUT" || die "invalid --timeout: $CLIENT_TIMEOUT"
@@ -178,6 +191,7 @@ is_nonzero_duration "$CANCEL_AFTER" || die "invalid --cancel-after: $CANCEL_AFTE
 is_positive_integer "$CLIENT_CONCURRENCY" || die "--concurrency must be a positive integer"
 ((CLIENT_CONCURRENCY <= 20)) || die "--concurrency must not exceed 20 for client E2E"
 is_decimal "$MAX_BUDGET" || die "--max-budget-usd must be a non-negative decimal"
+is_decimal "$AGENT_MAX_BUDGET" || die "--agent-max-budget-usd must be a non-negative decimal"
 is_binary_flag "$FAIL_ON_WARNING" || die "--fail-on-warning must be 0 or 1"
 
 case "$BASE_URL" in
@@ -200,6 +214,7 @@ if [[ "$SCENARIOS_RAW" == "all" ]]; then
   SCENARIO_LIST=(
     text-stream skill-mcp mcp-zero-arg mcp-multi-call file-tools
     thinking long-stream cancel-recover concurrent-clients
+    workspace-multiturn workspace-long-tools
   )
 else
   IFS=',' read -r -a requested_scenarios <<< "$SCENARIOS_RAW"
@@ -207,7 +222,7 @@ else
     scenario="${scenario//[[:space:]]/}"
     [[ -n "$scenario" ]] || die "--scenarios contains an empty value"
     case "$scenario" in
-      text-stream|skill-mcp|mcp-zero-arg|mcp-multi-call|file-tools|thinking|long-stream|cancel-recover|concurrent-clients) ;;
+      text-stream|skill-mcp|mcp-zero-arg|mcp-multi-call|file-tools|thinking|long-stream|cancel-recover|concurrent-clients|workspace-multiturn|workspace-long-tools) ;;
       *) die "unknown client scenario: $scenario" ;;
     esac
     if [[ -z "${SCENARIO_SEEN[$scenario]:-}" ]]; then
@@ -244,7 +259,8 @@ FIXTURE_BIN="$TMP_DIR/mcpfixture"
 MCP_CONFIG="$TMP_DIR/mcp.json"
 AUDIT_PATH="$TMP_DIR/mcp-audit.log"
 SUMMARY_PATH="$TMP_DIR/client-summary.tsv"
-mkdir -p "$WORKSPACE/.claude/skills/kiro-devcheck" "$FILE_WORKSPACE" "$CONCURRENT_ROOT"
+CLIENT_CONFIG_DIR="$TMP_DIR/claude-config"
+mkdir -p "$WORKSPACE/.claude/skills/kiro-devcheck" "$FILE_WORKSPACE" "$CONCURRENT_ROOT" "$CLIENT_CONFIG_DIR"
 
 if ((KEEP_ARTIFACTS)); then
   if [[ -z "$ARTIFACT_DIR" ]]; then
@@ -290,24 +306,76 @@ write_skill() {
   chmod 600 "$path"
 }
 
-run_cli() {
-  local deadline="$1"
-  local model="$2"
-  local workspace="$3"
-  local output="$4"
-  local prompt="$5"
+run_cli_with_budget() {
+  local budget="$1"
+  local persist_session="$2"
+  local deadline="$3"
+  local model="$4"
+  local workspace="$5"
+  local output="$6"
+  local prompt="$7"
   local timeout_signal="${CLI_TIMEOUT_SIGNAL:-TERM}"
-  shift 5
+  local -a persistence_args=()
+  if ((persist_session == 0)); then
+    persistence_args+=(--no-session-persistence)
+  fi
+  shift 7
   (
     cd "$workspace"
     export ANTHROPIC_BASE_URL="$BASE_URL"
     export ANTHROPIC_API_KEY="${KIRO_DEV_API_KEY}"
+    export CLAUDE_CONFIG_DIR="$CLIENT_CONFIG_DIR"
     timeout --foreground --signal="$timeout_signal" --kill-after=20s "$deadline" \
       claude --bare --print --verbose --include-partial-messages \
         --setting-sources project --add-dir "$workspace" --model "$model" \
-        --no-session-persistence --max-budget-usd "$MAX_BUDGET" \
+        "${persistence_args[@]}" --max-budget-usd "$budget" \
         --output-format stream-json "$@" -- "$prompt"
   ) >"$output" 2>&1
+}
+
+run_cli() {
+  run_cli_with_budget "$MAX_BUDGET" 0 "$@"
+}
+
+run_cli_session() {
+  run_cli_with_budget "$AGENT_MAX_BUDGET" 1 "$@"
+}
+
+run_cli_resume() {
+  local deadline="$1"
+  local model="$2"
+  local workspace="$3"
+  local output="$4"
+  local session_id="$5"
+  local prompt="$6"
+  local timeout_signal="${CLI_TIMEOUT_SIGNAL:-TERM}"
+  shift 6
+  (
+    cd "$workspace"
+    export ANTHROPIC_BASE_URL="$BASE_URL"
+    export ANTHROPIC_API_KEY="${KIRO_DEV_API_KEY}"
+    export CLAUDE_CONFIG_DIR="$CLIENT_CONFIG_DIR"
+    timeout --foreground --signal="$timeout_signal" --kill-after=20s "$deadline" \
+      claude --bare --print --verbose --include-partial-messages \
+        --resume "$session_id" --model "$model" --max-budget-usd "$AGENT_MAX_BUDGET" \
+        --output-format stream-json "$@" -- "$prompt"
+  ) >"$output" 2>&1
+}
+
+client_tool_use_count() {
+  jq -s 'map(select(.type == "assistant") | .message.content[]? | select(.type == "tool_use")) | length' "$1"
+}
+
+client_tool_result_count() {
+  jq -s 'map(select(.type == "user") | .message.content[]? | select(.type == "tool_result")) | length' "$1"
+}
+
+client_tool_error_count() {
+  jq -s '[.[] | select(.type == "user") | .message.content[]? | select(.type == "tool_result" and .is_error == true)] | length' "$1"
+}
+
+client_result_subtype() {
+  jq -r 'select(.type == "result") | .subtype // "unknown"' "$1" | tail -n 1
 }
 
 assert_client_result() {
@@ -600,6 +668,83 @@ case_concurrent_clients() {
   CASE_DETAIL="${CLIENT_CONCURRENCY} isolated Claude Code clients completed concurrently"
 }
 
+case_workspace_multiturn() {
+  local workspace="$TMP_DIR/workspace-multiturn"
+  local first="$TMP_DIR/workspace-multiturn-first.jsonl"
+  local second="$TMP_DIR/workspace-multiturn-second.jsonl"
+  local session_id second_status second_tools second_results second_errors subtype
+  mkdir -p "$workspace"
+  set +e
+  run_cli_session "$CLIENT_TIMEOUT" "$MODEL" "$workspace" "$first" \
+    '写个shell脚本，随便写'
+  local first_status=$?
+  set -e
+  if ((first_status != 0)) || ! has_client_success_result "$first"; then
+    CASE_DETAIL="initial Claude Code workspace turn failed (status ${first_status})"
+    return 1
+  fi
+  session_id="$(jq -r 'select(.session_id != null) | .session_id' "$first" | tail -n 1)"
+  if [[ -z "$session_id" ]]; then
+    CASE_DETAIL="initial turn did not expose a resumable Claude Code session"
+    return 1
+  fi
+  set +e
+  run_cli_resume "$CLIENT_TIMEOUT" "$MODEL" "$workspace" "$second" "$session_id" \
+    '增加5倍代码量' --tools 'Read,Write,Edit,Bash' --allowedTools 'Read,Write,Edit,Bash'
+  second_status=$?
+  set -e
+  second_tools="$(client_tool_use_count "$second")"
+  second_results="$(client_tool_result_count "$second")"
+  second_errors="$(client_tool_error_count "$second")"
+  subtype="$(client_result_subtype "$second")"
+  if ((second_tools < 1 || second_results < 1)); then
+    CASE_DETAIL="multi-turn edit produced no structured tool/result pair (status ${second_status}, subtype ${subtype})"
+    return 1
+  fi
+  if ((second_status != 0 && subtype != "error_max_budget_usd")); then
+    CASE_DETAIL="multi-turn edit exited unexpectedly (status ${second_status}, subtype ${subtype})"
+    return 1
+  fi
+  if ((second_errors > 0)); then
+    CASE_STATUS_HINT=WARN
+    CASE_DETAIL="structured tools survived the resumed turn, but Claude Code reported ${second_errors} tool error(s)"
+    return 0
+  fi
+  if [[ "$subtype" == "error_max_budget_usd" ]]; then
+    CASE_STATUS_HINT=WARN
+    CASE_DETAIL="structured tools survived the resumed turn before the Claude Code budget was exhausted (${second_tools} calls)"
+    return 0
+  fi
+  CASE_DETAIL="resumed Claude Code turn issued ${second_tools} structured tool calls"
+}
+
+case_workspace_long_tools() {
+  local workspace="$TMP_DIR/workspace-long-tools"
+  local output="$TMP_DIR/workspace-long-tools.jsonl"
+  local tool_uses tool_results tool_errors subtype file_count
+  mkdir -p "$workspace"
+  set +e
+  run_cli_session "$CLIENT_TIMEOUT" "$MODEL" "$workspace" "$output" \
+    'Complete this task in the current workspace without asking for confirmation. Use Read, Write, Edit, Glob, Grep, and Bash only. Bash may use pwd, find, wc, grep, and sort, and must stay inside the current workspace. Create 12 small text files in three subdirectories with cross references. Inspect the tree, read files in multiple batches, use Grep to find references, edit at least 8 files to add a second version and update references, reread the edited files, and run final consistency checks. Make at least 20 separate tool calls across multiple turns. Finish with the exact marker LONG_TOOL_STRESS_OK.' \
+    --tools 'Read,Write,Edit,Glob,Grep,Bash' --allowedTools 'Read,Write,Edit,Glob,Grep,Bash' --permission-mode acceptEdits
+  local status=$?
+  set -e
+  tool_uses="$(client_tool_use_count "$output")"
+  tool_results="$(client_tool_result_count "$output")"
+  tool_errors="$(client_tool_error_count "$output")"
+  subtype="$(client_result_subtype "$output")"
+  file_count="$(find "$workspace" -type f | wc -l)"
+  if ((status != 0)) || [[ "$subtype" != "success" ]]; then
+    CASE_DETAIL="long tool chain did not finish (status ${status}, subtype ${subtype}, calls ${tool_uses}, files ${file_count})"
+    return 1
+  fi
+  if ((tool_uses < 20 || tool_results < tool_uses || tool_errors > 0)) || ! rg -q 'LONG_TOOL_STRESS_OK' "$output"; then
+    CASE_DETAIL="long tool chain integrity failed (calls ${tool_uses}, results ${tool_results}, errors ${tool_errors}, files ${file_count})"
+    return 1
+  fi
+  CASE_DETAIL="${tool_uses} structured tool calls and ${tool_results} results completed across ${file_count} files"
+}
+
 mkdir -p "$TMP_DIR/thinking-workspace" "$TMP_DIR/long-workspace" "$TMP_DIR/cancel-workspace" "$TMP_DIR/recovery-workspace"
 printf 'scenario\tstatus\tdetail\n' >"$SUMMARY_PATH"
 chmod 600 "$SUMMARY_PATH"
@@ -618,6 +763,8 @@ for scenario in "${SCENARIO_LIST[@]}"; do
     long-stream) run_case "$scenario" case_long_stream ;;
     cancel-recover) run_case "$scenario" case_cancel_recover ;;
     concurrent-clients) run_case "$scenario" case_concurrent_clients ;;
+    workspace-multiturn) run_case "$scenario" case_workspace_multiturn ;;
+    workspace-long-tools) run_case "$scenario" case_workspace_long_tools ;;
   esac
 done
 

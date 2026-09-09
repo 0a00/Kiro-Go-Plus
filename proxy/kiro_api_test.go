@@ -349,6 +349,7 @@ func TestListProfileArnsRejectsRepeatedNextToken(t *testing.T) {
 }
 
 func TestListAvailableModelsFollowsPaginationAndCachesTokenLimits(t *testing.T) {
+	resetModelDiscoveryTestState(t)
 	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatalf("init config: %v", err)
 	}
@@ -406,6 +407,7 @@ func TestListAvailableModelsFollowsPaginationAndCachesTokenLimits(t *testing.T) 
 }
 
 func TestListAvailableModelsFallsBackFromManagementToLegacyAndLearnsRoute(t *testing.T) {
+	resetModelDiscoveryTestState(t)
 	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatalf("init config: %v", err)
 	}
@@ -455,6 +457,7 @@ func TestListAvailableModelsFallsBackFromManagementToLegacyAndLearnsRoute(t *tes
 }
 
 func TestListAvailableModelsRuntimePreferenceStillTriesLegacyForOrdinaryAccount(t *testing.T) {
+	resetModelDiscoveryTestState(t)
 	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatalf("init config: %v", err)
 	}
@@ -492,11 +495,10 @@ func TestListAvailableModelsRuntimePreferenceStillTriesLegacyForOrdinaryAccount(
 }
 
 func TestListAvailableModelsReusesRealListForOrdinaryAccountWithoutProfile(t *testing.T) {
+	resetModelDiscoveryTestState(t)
 	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatalf("init config: %v", err)
 	}
-	resetRealModelListSnapshots()
-	t.Cleanup(resetRealModelListSnapshots)
 	sharedAccountEndpointRoutes.reset()
 	t.Cleanup(sharedAccountEndpointRoutes.reset)
 	var modelsCalls int32
@@ -534,6 +536,7 @@ func TestListAvailableModelsReusesRealListForOrdinaryAccountWithoutProfile(t *te
 }
 
 func TestListAvailableModelsUsesCompatibilitySnapshotForUnsupportedBuilderID(t *testing.T) {
+	resetModelDiscoveryTestState(t)
 	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatalf("init config: %v", err)
 	}
@@ -582,6 +585,7 @@ func TestListAvailableModelsUsesCompatibilitySnapshotForUnsupportedBuilderID(t *
 }
 
 func TestListAvailableModelsDoesNotHideAuthenticationFailure(t *testing.T) {
+	resetModelDiscoveryTestState(t)
 	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatalf("init config: %v", err)
 	}
@@ -602,6 +606,12 @@ func TestListAvailableModelsDoesNotHideAuthenticationFailure(t *testing.T) {
 	if err == nil || snapshot.Source == modelListSourceCompatibility {
 		t.Fatalf("authentication failure was hidden by compatibility models: snapshot=%+v err=%v", snapshot, err)
 	}
+}
+
+func resetModelDiscoveryTestState(t *testing.T) {
+	t.Helper()
+	resetRealModelListSnapshots()
+	t.Cleanup(resetRealModelListSnapshots)
 }
 
 func TestKiroControlPlaneRegionCandidatesUseProfileThenAccountRegion(t *testing.T) {
