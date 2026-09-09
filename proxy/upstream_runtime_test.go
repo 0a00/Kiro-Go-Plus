@@ -551,6 +551,96 @@ func TestCallKiroAPIStopsToolStreamThatNeverCompletes(t *testing.T) {
 	}
 }
 
+func TestCallKiroAPIRecoversToolAssemblyTimeoutWithRebuiltPayload(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	retry := config.GetRetryConfig()
+	retry.MaxAccountAttempts = 1
+	retry.MaxUpstreamAttempts = 2
+	retry.MaxRetryDurationSeconds = 5
+	retry.FirstTokenTimeoutSeconds = 5
+	retry.StreamIdleTimeoutSeconds = 5
+	retry.ToolAssemblyTimeoutSeconds = 1
+	if err := config.UpdateRetryConfig(retry); err != nil {
+		t.Fatalf("update retry config: %v", err)
+	}
+	longTool := config.GetLongToolConfig()
+	longTool.TruncationRetries = 1
+	if err := config.UpdateLongToolConfig(longTool); err != nil {
+		t.Fatalf("update long-tool config: %v", err)
+	}
+	_ = config.UpdatePreferredEndpoint("auto")
+	_ = config.UpdateEndpointFallback(true)
+	sharedAccountEndpointRoutes.reset()
+	t.Cleanup(sharedAccountEndpointRoutes.reset)
+
+	var requests atomic.Int32
+	var sawRecoveryHint atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempt := requests.Add(1)
+		body, _ := io.ReadAll(r.Body)
+		var requestPayload KiroPayload
+		_ = json.Unmarshal(body, &requestPayload)
+		if attempt > 1 && strings.Contains(requestPayload.ConversationState.CurrentMessage.UserInputMessage.Content, toolRecoveryHintMarker) {
+			sawRecoveryHint.Store(true)
+		}
+		w.WriteHeader(http.StatusOK)
+		if attempt == 1 {
+			_, _ = w.Write(awsEventStreamFrame(t, "toolUseEvent", map[string]interface{}{
+				"toolUseId": "toolu_stalled",
+				"name":      "Write",
+				"input":     `{"content":"unfinished`,
+			}))
+			if flusher, ok := w.(http.Flusher); ok {
+				flusher.Flush()
+			}
+			<-r.Context().Done()
+			return
+		}
+		_, _ = w.Write(awsEventStreamFrame(t, "toolUseEvent", map[string]interface{}{
+			"toolUseId": "toolu_recovered",
+			"name":      "Write",
+			"input":     `{"content":"complete"}`,
+			"stop":      true,
+		}))
+		_, _ = w.Write(awsEventStreamFrame(t, "metadataEvent", map[string]interface{}{"stopReason": "tool_use"}))
+	}))
+	defer server.Close()
+
+	oldEndpoints := kiroEndpoints
+	kiroEndpoints = []kiroEndpoint{
+		{Key: "kiro", URL: server.URL, Name: "Kiro IDE"},
+		{Key: "runtime", URL: server.URL, Name: "Kiro Runtime"},
+	}
+	t.Cleanup(func() { kiroEndpoints = oldEndpoints })
+
+	payload := &KiroPayload{requireActionableOutput: true, requireToolUse: true, deferTextUntilComplete: true}
+	payload.ConversationState.CurrentMessage.UserInputMessage.ModelID = "claude-sonnet-4.6"
+	payload.ConversationState.CurrentMessage.UserInputMessage.Content = "Create the file."
+	var tool KiroToolWrapper
+	tool.ToolSpecification.Name = "Write"
+	payload.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext = &UserInputMessageContext{Tools: []KiroToolWrapper{tool}}
+
+	var toolUses []KiroToolUse
+	startedAt := time.Now()
+	err := CallKiroAPI(&config.Account{ID: "assembly-timeout-account", AccessToken: "token"}, payload, &KiroStreamCallback{
+		OnToolUse: func(toolUse KiroToolUse) { toolUses = append(toolUses, toolUse) },
+	})
+	if err != nil {
+		t.Fatalf("expected recovery after tool assembly timeout, got %v", err)
+	}
+	if elapsed := time.Since(startedAt); elapsed > 3*time.Second {
+		t.Fatalf("tool assembly recovery took too long: %s", elapsed)
+	}
+	if requests.Load() != 2 || !sawRecoveryHint.Load() {
+		t.Fatalf("expected one rebuilt retry, requests=%d hint=%v", requests.Load(), sawRecoveryHint.Load())
+	}
+	if len(toolUses) != 1 || toolUses[0].ToolUseID != "toolu_recovered" || toolUses[0].Input["content"] != "complete" {
+		t.Fatalf("partial tool leaked or recovered tool missing: %+v", toolUses)
+	}
+}
+
 func TestCallKiroAPIAllowsToolAssemblyThatKeepsReceivingFragments(t *testing.T) {
 	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatalf("init config: %v", err)

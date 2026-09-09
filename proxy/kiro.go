@@ -1353,8 +1353,18 @@ endpointLoop:
 				}
 			}
 			if err != nil {
+				toolAssemblyTimedOut := false
 				if toolSnapshot, timedOut := toolMonitor.TimedOut(); timedOut {
-					err = newToolAssemblyTimeoutError(ep.Name, toolSnapshot.Name, toolSnapshot.ArgumentBytes, toolArgumentIdleTimeout)
+					toolAssemblyTimedOut = true
+					timeoutErr := newToolAssemblyTimeoutError(ep.Name, toolSnapshot.Name, toolSnapshot.ArgumentBytes, toolArgumentIdleTimeout)
+					// A stalled argument stream needs the same payload rebuild as a
+					// truncated tool stream. Count it against the bounded recovery
+					// budget so a watchdog cancellation cannot expand into a full
+					// account/endpoint retry storm.
+					allowRetry := payload != nil && payload.recordToolTruncation(toolSnapshot.ArgumentBytes, toolSnapshot.FragmentCount, !meaningfulGate.hasActionableOutput())
+					timeoutErr.RetryAcrossEndpoints = allowRetry
+					timeoutErr.RetryAcrossAccounts = allowRetry
+					err = timeoutErr
 				}
 				if requestContext.Err() != nil {
 					sharedUpstreamHealth.releaseEndpoint(endpointCircuitKey)
@@ -1395,7 +1405,7 @@ endpointLoop:
 					err = classifyTransportError(ep.Name, err)
 				}
 				lastErr = err
-				retrySameEndpoint := endpointAttempt < preOutputStreamRetries &&
+				retrySameEndpoint := !toolAssemblyTimedOut && endpointAttempt < preOutputStreamRetries &&
 					isRetryablePreOutputStreamError(err, meaningfulGate)
 				attemptStatus := "stream_error"
 				if meaningfulGate.hasEmittedOutput() {
@@ -1498,7 +1508,6 @@ func isRetryablePreOutputStreamError(err error, gate *meaningfulStreamCallback) 
 	upstreamErr, ok := asUpstreamError(err)
 	return ok && (upstreamErr.Kind == UpstreamErrorTransient ||
 		upstreamErr.Kind == UpstreamErrorStreamTruncated ||
-		upstreamErr.Kind == UpstreamErrorToolAssemblyTimeout ||
 		upstreamErr.Kind == UpstreamErrorEmptyResponse) && upstreamErr.RetryAcrossEndpoints
 }
 
