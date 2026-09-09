@@ -87,6 +87,26 @@ func TestConfigureClaudeToolStreamingModes(t *testing.T) {
 	}
 }
 
+func TestClaudeCodeUserAgentVariants(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		ua   string
+		want bool
+	}{
+		{name: "claude code", ua: "claude-code/2.1.263", want: true},
+		{name: "claude cli", ua: "claude-cli/2.1.263", want: true},
+		{name: "underscore cli", ua: "Claude_CLI/2.1.263", want: true},
+		{name: "anthropic cli", ua: "anthropic-cli/1.0", want: true},
+		{name: "generic sdk", ua: "anthropic-sdk-go/1.0", want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isClaudeCodeUserAgent(tc.ua); got != tc.want {
+				t.Fatalf("isClaudeCodeUserAgent(%q) = %v, want %v", tc.ua, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestLongToolConfigAPI(t *testing.T) {
 	tempDir := t.TempDir()
 	if err := config.Init(filepath.Join(tempDir, "config.json")); err != nil {

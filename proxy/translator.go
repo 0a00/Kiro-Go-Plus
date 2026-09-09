@@ -842,10 +842,14 @@ func extractClaudeUserContent(content interface{}) (string, []KiroImage, []KiroT
 						resultContent = toolResultImagePlaceholder
 					}
 				}
+				status := "success"
+				if failed, ok := block["is_error"].(bool); ok && failed {
+					status = "error"
+				}
 				toolResults = append(toolResults, KiroToolResult{
 					ToolUseID: toolUseID,
 					Content:   []KiroResultContent{{Text: resultContent}},
-					Status:    "success",
+					Status:    status,
 				})
 			}
 		}

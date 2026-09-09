@@ -71,6 +71,20 @@ func requiresStrictClaudeToolUse(req *ClaudeRequest) bool {
 	return req != nil && req.ToolUsePolicy == toolUsePolicyExplicit
 }
 
+// isClaudeCodeUserAgent recognizes the User-Agent variants emitted by Claude
+// Code releases. Claude Code needs tool argument deltas early in balanced mode
+// so a long-running tool turn remains visibly active to the client.
+func isClaudeCodeUserAgent(userAgent string) bool {
+	value := strings.ToLower(strings.TrimSpace(userAgent))
+	if value == "" {
+		return false
+	}
+	return strings.Contains(value, "claude-code") ||
+		strings.Contains(value, "claude_cli") ||
+		strings.Contains(value, "claude-cli") ||
+		strings.Contains(value, "anthropic-cli")
+}
+
 func parseClaudeToolChoice(raw interface{}) (mode, name string, err error) {
 	if raw == nil {
 		return "auto", "", nil

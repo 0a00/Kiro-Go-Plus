@@ -2137,7 +2137,7 @@ func configureClaudeToolStreaming(payload *KiroPayload, req *ClaudeRequest, thin
 	// completion. Other tool turns still commit validated text promptly.
 	payload.deferTextUntilComplete = useSafeBehavior && guardActionableStream && highRiskTools
 	payload.streamThinkingPrecommit = guardActionableStream && thinking && !thinkingOpts.OmitDisplay
-	claudeCodeClient := strings.Contains(strings.ToLower(req.ClientUserAgent), "claude-code")
+	claudeCodeClient := isClaudeCodeUserAgent(req.ClientUserAgent)
 	// Claude Code needs visible progress while long tool JSON is assembled.
 	// Keep the safer buffered behavior for other clients in balanced mode.
 	payload.streamToolUseDeltas = req.Stream && len(req.Tools) > 0 &&

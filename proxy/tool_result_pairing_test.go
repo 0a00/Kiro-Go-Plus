@@ -121,6 +121,31 @@ func TestClaudeToKiroFlattensMismatchedToolResults(t *testing.T) {
 	}
 }
 
+func TestClaudeToKiroPreservesToolResultErrorStatus(t *testing.T) {
+	request := &ClaudeRequest{
+		Model: "claude-sonnet-4.6",
+		Tools: []ClaudeTool{{Name: "Bash", Description: "run commands", InputSchema: map[string]interface{}{"type": "object"}}},
+		Messages: []ClaudeMessage{
+			{Role: "user", Content: "run the command"},
+			{Role: "assistant", Content: []interface{}{
+				map[string]interface{}{"type": "tool_use", "id": "tool_a", "name": "Bash", "input": map[string]interface{}{"command": "false"}},
+			}},
+			{Role: "user", Content: []interface{}{
+				map[string]interface{}{"type": "tool_result", "tool_use_id": "tool_a", "is_error": true, "content": "command failed"},
+			}},
+		},
+	}
+
+	payload := ClaudeToKiro(request, false)
+	current := payload.ConversationState.CurrentMessage.UserInputMessage
+	if current.UserInputMessageContext == nil || len(current.UserInputMessageContext.ToolResults) != 1 {
+		t.Fatalf("expected one structured tool result, got %#v", current.UserInputMessageContext)
+	}
+	if got := current.UserInputMessageContext.ToolResults[0].Status; got != "error" {
+		t.Fatalf("tool result status = %q, want error", got)
+	}
+}
+
 func TestClaudeToKiroFlattensValidToolResultWhenToolsAreOmitted(t *testing.T) {
 	request := &ClaudeRequest{
 		Model: "claude-sonnet-4.6",
