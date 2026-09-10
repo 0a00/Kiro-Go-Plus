@@ -2827,7 +2827,11 @@ func handleToolUseEvent(event map[string]interface{}, pending *pendingToolUseSet
 				current = latest
 			}
 		}
-		if current == nil && name != "" {
+		if current == nil {
+			// Some Kiro data planes split the tool metadata across frames: the
+			// identifier can arrive before the name and input. Keep the state
+			// keyed by the real ID so later frames cannot be mistaken for a new
+			// tool or for a stray tool result.
 			current = &toolUseState{ToolUseID: toolUseID, Name: name, ContentBlockIndex: contentBlockIndex}
 			pending.add(current)
 			created = true
@@ -2864,6 +2868,12 @@ func handleToolUseEvent(event map[string]interface{}, pending *pendingToolUseSet
 	if current == nil && isStop {
 		return nil
 	}
+	if current != nil && name != "" && current.Name == "" {
+		current.Name = name
+	}
+	if current != nil && current.Name == "" && isStop {
+		return &EventStreamError{Kind: EventStreamInvalidPayload, Message: "toolUseEvent completed without a tool name"}
+	}
 	if current == nil {
 		return &EventStreamError{
 			Kind:    EventStreamInvalidPayload,
@@ -2876,7 +2886,7 @@ func handleToolUseEvent(event map[string]interface{}, pending *pendingToolUseSet
 	if created && current.GeneratedID && callback != nil && callback.OnToolUseActivity != nil {
 		callback.OnToolUseActivity()
 	}
-	if (created || !current.StreamStarted) && !current.GeneratedID {
+	if (created || !current.StreamStarted) && !current.GeneratedID && current.Name != "" {
 		startToolUseStream(current, callback)
 	}
 

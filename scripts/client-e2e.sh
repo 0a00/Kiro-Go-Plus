@@ -15,6 +15,7 @@ Options:
   --model MODEL            Claude model (default: KIRO_DEV_MODEL or claude-sonnet-5).
   --thinking-model MODEL   Thinking model (default: <model>-thinking).
   --timeout DURATION       Per-client timeout (default: KIRO_DEV_CLIENT_TIMEOUT or 5m).
+  --agent-timeout DURATION Timeout for multi-turn and long-tool clients (default: KIRO_DEV_AGENT_TIMEOUT or 15m).
   --max-budget-usd N       Claude Code budget per client (default: 0.10).
   --agent-max-budget-usd N Budget for multi-turn/long-tool agent cases (default: 0.75).
   --concurrency N          Concurrent Claude Code clients (default: 2).
@@ -50,6 +51,7 @@ MODEL="${KIRO_DEV_MODEL:-claude-sonnet-5}"
 THINKING_MODEL="${KIRO_DEV_THINKING_MODEL:-}"
 SCENARIOS_RAW="${KIRO_DEV_CLIENT_SCENARIOS:-skill-mcp}"
 CLIENT_TIMEOUT="${KIRO_DEV_CLIENT_TIMEOUT:-5m}"
+AGENT_TIMEOUT="${KIRO_DEV_AGENT_TIMEOUT:-15m}"
 MAX_BUDGET="${KIRO_DEV_MAX_BUDGET_USD:-0.10}"
 AGENT_MAX_BUDGET="${KIRO_DEV_AGENT_MAX_BUDGET_USD:-0.75}"
 CLIENT_CONCURRENCY="${KIRO_DEV_CLIENT_CONCURRENCY:-2}"
@@ -94,6 +96,15 @@ while (($# > 0)); do
       ;;
     --timeout=*)
       CLIENT_TIMEOUT="${1#*=}"
+      shift
+      ;;
+    --agent-timeout)
+      (($# >= 2)) || die "--agent-timeout requires a value"
+      AGENT_TIMEOUT="$2"
+      shift 2
+      ;;
+    --agent-timeout=*)
+      AGENT_TIMEOUT="${1#*=}"
       shift
       ;;
     --max-budget-usd)
@@ -192,6 +203,7 @@ command -v git >/dev/null 2>&1 || die "git is required"
 [[ -n "${KIRO_DEV_API_KEY:-}" ]] || die "KIRO_DEV_API_KEY is required"
 [[ -n "$MODEL" ]] || die "model must not be empty"
 is_nonzero_duration "$CLIENT_TIMEOUT" || die "invalid --timeout: $CLIENT_TIMEOUT"
+is_nonzero_duration "$AGENT_TIMEOUT" || die "invalid --agent-timeout: $AGENT_TIMEOUT"
 is_nonzero_duration "$CANCEL_AFTER" || die "invalid --cancel-after: $CANCEL_AFTER"
 is_positive_integer "$CLIENT_CONCURRENCY" || die "--concurrency must be a positive integer"
 ((CLIENT_CONCURRENCY <= 20)) || die "--concurrency must not exceed 20 for client E2E"
@@ -683,8 +695,9 @@ case_workspace_multiturn() {
   local session_id second_status second_tools second_results second_errors subtype
   mkdir -p "$workspace"
   set +e
-  run_cli_session "$CLIENT_TIMEOUT" "$MODEL" "$workspace" "$first" \
-    '写个shell脚本，随便写'
+  run_cli_session "$AGENT_TIMEOUT" "$MODEL" "$workspace" "$first" \
+    '写个shell脚本，随便写' \
+    --permission-mode acceptEdits
   local first_status=$?
   set -e
   if ((first_status != 0)) || ! has_client_success_result "$first"; then
@@ -697,8 +710,9 @@ case_workspace_multiturn() {
     return 1
   fi
   set +e
-  run_cli_resume "$CLIENT_TIMEOUT" "$MODEL" "$workspace" "$second" "$session_id" \
-    '增加5倍代码量' --tools 'Read,Write,Edit,Bash' --allowedTools 'Read,Write,Edit,Bash'
+  run_cli_resume "$AGENT_TIMEOUT" "$MODEL" "$workspace" "$second" "$session_id" \
+    '增加5倍代码量' --tools 'Read,Write,Edit,Bash' --allowedTools 'Read,Write,Edit,Bash' \
+    --permission-mode acceptEdits
   second_status=$?
   set -e
   second_tools="$(client_tool_use_count "$second")"
@@ -732,7 +746,7 @@ case_workspace_long_tools() {
   local tool_uses tool_results tool_errors subtype file_count
   mkdir -p "$workspace"
   set +e
-  run_cli_session "$CLIENT_TIMEOUT" "$MODEL" "$workspace" "$output" \
+  run_cli_session "$AGENT_TIMEOUT" "$MODEL" "$workspace" "$output" \
     'Complete this task in the current workspace without asking for confirmation. Use Read, Write, Edit, Glob, Grep, and Bash only. Bash may use pwd, find, wc, grep, and sort, and must stay inside the current workspace. Create 12 small text files in three subdirectories with cross references. Inspect the tree, read files in multiple batches, use Grep to find references, edit at least 8 files to add a second version and update references, reread the edited files, and run final consistency checks. Make at least 20 separate tool calls across multiple turns. Finish with the exact marker LONG_TOOL_STRESS_OK.' \
     --tools 'Read,Write,Edit,Glob,Grep,Bash' --allowedTools 'Read,Write,Edit,Glob,Grep,Bash' --permission-mode acceptEdits
   local status=$?
@@ -768,7 +782,7 @@ case_workspace_repo_loop() {
   git -C "$workspace" add .
   git -C "$workspace" commit -qm 'fixture baseline'
   set +e
-  run_cli_session "$CLIENT_TIMEOUT" "$MODEL" "$workspace" "$output" \
+  run_cli_session "$AGENT_TIMEOUT" "$MODEL" "$workspace" "$output" \
     'Work as a developer in this existing git repository. Inspect the README, source, and test script with Read and Glob. Make a concrete small change: replace REPO_OLD with REPO_NEW, document the change in README.md, and add a shell syntax check. Use Edit or Write for file changes, Bash for the check, then inspect git diff and run git diff --check. Do not commit. Finish with the exact marker REPO_WORKFLOW_OK.' \
     --tools 'Read,Write,Edit,Glob,Grep,Bash' --allowedTools 'Read,Write,Edit,Glob,Grep,Bash' --permission-mode acceptEdits
   status=$?
@@ -798,7 +812,7 @@ case_workspace_error_recovery() {
   mkdir -p "$workspace"
   printf '%s\n' 'Known recovery input.' >"$workspace/known.txt"
   set +e
-  run_cli_session "$CLIENT_TIMEOUT" "$MODEL" "$workspace" "$output" \
+  run_cli_session "$AGENT_TIMEOUT" "$MODEL" "$workspace" "$output" \
     'Test tool error recovery. First try to read the deliberately missing file missing-file.txt. That failure is expected; do not stop. Then read known.txt, create recovered.txt containing exactly TOOL_ERROR_RECOVERY_OK, read it back, and finish with the exact marker TOOL_ERROR_RECOVERY_DONE.' \
     --tools 'Read,Write' --allowedTools 'Read,Write' --permission-mode acceptEdits
   status=$?
@@ -828,7 +842,7 @@ case_workspace_parallel_tools() {
   printf '%s\n' 'PARALLEL_C' >"$workspace/c.txt"
   printf '%s\n' 'PARALLEL_D' >"$workspace/d.txt"
   set +e
-  run_cli_session "$CLIENT_TIMEOUT" "$MODEL" "$workspace" "$output" \
+  run_cli_session "$AGENT_TIMEOUT" "$MODEL" "$workspace" "$output" \
     'Inspect this workspace as a coding assistant. Use Glob to find the four text files, then issue separate Read calls for a.txt, b.txt, c.txt, and d.txt; independent reads may be parallel. Create summary.txt containing all four values, reread it, and finish with the exact marker PARALLEL_TOOLS_OK.' \
     --tools 'Read,Write,Glob' --allowedTools 'Read,Write,Glob' --permission-mode acceptEdits
   status=$?

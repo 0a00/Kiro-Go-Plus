@@ -119,6 +119,44 @@ func TestParseEventStreamHandlesSeparateToolFramesAndStopEvent(t *testing.T) {
 	}
 }
 
+func TestParseEventStreamAcceptsToolMetadataSplitAcrossFrames(t *testing.T) {
+	stream := bytes.NewReader(bytes.Join([][]byte{
+		awsEventStreamFrame(t, "toolUseStartEvent", map[string]interface{}{
+			"toolUseId": "toolu_split",
+		}),
+		awsEventStreamFrame(t, "toolUseInputEvent", map[string]interface{}{
+			"toolUseId": "toolu_split",
+			"name":      "Write",
+			"input":     `{"path":"a.txt","content":"ok"}`,
+		}),
+		awsEventStreamFrame(t, "toolUseStopEvent", map[string]interface{}{
+			"toolUseId": "toolu_split",
+		}),
+	}, nil))
+
+	var toolUses []KiroToolUse
+	var starts, stops int
+	err := parseEventStream(stream, &KiroStreamCallback{
+		OnToolUseStart: func(_, name string) {
+			starts++
+			if name != "Write" {
+				t.Errorf("tool name = %q, want Write", name)
+			}
+		},
+		OnToolUseStop: func(string) { stops++ },
+		OnToolUse:     func(toolUse KiroToolUse) { toolUses = append(toolUses, toolUse) },
+	})
+	if err != nil {
+		t.Fatalf("split tool metadata was rejected: %v", err)
+	}
+	if starts != 1 || stops != 1 || len(toolUses) != 1 {
+		t.Fatalf("unexpected split tool callbacks: starts=%d stops=%d uses=%d", starts, stops, len(toolUses))
+	}
+	if toolUses[0].ToolUseID != "toolu_split" || toolUses[0].Input["content"] != "ok" {
+		t.Fatalf("unexpected split tool use: %#v", toolUses[0])
+	}
+}
+
 func TestParseEventStreamWaitsForRealToolIDBeforeStreaming(t *testing.T) {
 	stream := bytes.NewReader(bytes.Join([][]byte{
 		awsEventStreamFrame(t, "toolUseStartEvent", map[string]interface{}{
