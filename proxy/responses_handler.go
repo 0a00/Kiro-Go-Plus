@@ -389,8 +389,15 @@ func (h *Handler) handleResponsesNonStream(
 		}
 
 		responseModel = exposedRequestModel(payload, model)
-		finalContent, _ := extractThinkingFromContent(content)
-		if !thinking {
+		finalContent, taggedReasoning := splitThinkingTags(content)
+		if thinking {
+			// Prefer the upstream-native reasoning stream when both formats are
+			// present. Some Kiro responses repeat the same reasoning as tagged
+			// assistant text; appending it would double-count the output.
+			if strings.TrimSpace(reasoningContent) == "" {
+				reasoningContent = taggedReasoning
+			}
+		} else {
 			reasoningContent = ""
 		}
 
@@ -742,29 +749,33 @@ func (h *Handler) handleResponsesStream(
 		payload.setPromptCacheDiagnostic(cacheDiagnostic)
 
 		var (
-			fullText           strings.Builder
-			reasoningText      strings.Builder
-			toolUses           []KiroToolUse
-			inputTokens        int
-			outputTokens       int
-			credits            float64
-			realInputTokens    int
-			upstreamUsage      KiroTokenUsage
-			upstreamStopReason string
+			fullText             strings.Builder
+			currentMessageText   strings.Builder
+			reasoningText        strings.Builder
+			currentReasoningText strings.Builder
+			toolUses             []KiroToolUse
+			inputTokens          int
+			outputTokens         int
+			credits              float64
+			realInputTokens      int
+			upstreamUsage        KiroTokenUsage
+			upstreamStopReason   string
 		)
 
-		messageItemID := generateOutputItemID("msg")
-		reasoningItemID := generateOutputItemID("rs")
+		messageItemID := ""
+		reasoningItemID := ""
 		messageStarted := false
 		reasoningStarted := false
 		outputIndex := 0
 		contentIndex := 0
+		var thinkingSource thinkingStreamSource
+		tagParser := newThinkingTagParser(&thinkingSource)
 
 		finishReasoning := func() {
 			if !reasoningStarted {
 				return
 			}
-			text := reasoningText.String()
+			text := currentReasoningText.String()
 			send("response.reasoning_summary_text.done", map[string]interface{}{
 				"type":          "response.reasoning_summary_text.done",
 				"item_id":       reasoningItemID,
@@ -796,6 +807,43 @@ func (h *Handler) handleResponsesStream(
 				},
 			})
 			reasoningStarted = false
+			currentReasoningText.Reset()
+			reasoningItemID = ""
+			outputIndex++
+		}
+
+		finishMessage := func() {
+			if !messageStarted {
+				return
+			}
+			text := currentMessageText.String()
+			send("response.content_part.done", map[string]interface{}{
+				"type":          "response.content_part.done",
+				"item_id":       messageItemID,
+				"output_index":  outputIndex,
+				"content_index": contentIndex,
+				"part": map[string]interface{}{
+					"type": "output_text",
+					"text": text,
+				},
+			})
+			send("response.output_item.done", map[string]interface{}{
+				"type":         "response.output_item.done",
+				"output_index": outputIndex,
+				"item": map[string]interface{}{
+					"id":     messageItemID,
+					"type":   "message",
+					"role":   "assistant",
+					"status": "completed",
+					"content": []map[string]interface{}{{
+						"type": "output_text",
+						"text": text,
+					}},
+				},
+			})
+			messageStarted = false
+			currentMessageText.Reset()
+			messageItemID = ""
 			outputIndex++
 		}
 
@@ -803,6 +851,9 @@ func (h *Handler) handleResponsesStream(
 			if reasoningStarted {
 				return
 			}
+			finishMessage()
+			reasoningItemID = generateOutputItemID("rs")
+			currentReasoningText.Reset()
 			reasoningStarted = true
 			send("response.output_item.added", map[string]interface{}{
 				"type":         "response.output_item.added",
@@ -831,6 +882,8 @@ func (h *Handler) handleResponsesStream(
 				return
 			}
 			finishReasoning()
+			messageItemID = generateOutputItemID("msg")
+			currentMessageText.Reset()
 			messageStarted = true
 			send("response.output_item.added", map[string]interface{}{
 				"type":         "response.output_item.added",
@@ -855,6 +908,80 @@ func (h *Handler) handleResponsesStream(
 			})
 		}
 
+		emitVisibleText := func(text string) {
+			if text == "" {
+				return
+			}
+			fullText.WriteString(text)
+			currentMessageText.WriteString(text)
+			ensureMessageStarted()
+			send("response.output_text.delta", map[string]interface{}{
+				"type":          "response.output_text.delta",
+				"item_id":       messageItemID,
+				"output_index":  outputIndex,
+				"content_index": contentIndex,
+				"delta":         text,
+			})
+			responseStarted = true
+		}
+
+		emitReasoningText := func(text string, state thinkingTagSegmentKind) {
+			if !thinking {
+				return
+			}
+			if state == thinkingTagEnd && text == "" && !reasoningStarted {
+				return
+			}
+			ensureReasoningStarted()
+			if text != "" {
+				reasoningText.WriteString(text)
+				currentReasoningText.WriteString(text)
+				send("response.reasoning_summary_text.delta", map[string]interface{}{
+					"type":          "response.reasoning_summary_text.delta",
+					"item_id":       reasoningItemID,
+					"output_index":  outputIndex,
+					"summary_index": 0,
+					"delta":         text,
+				})
+				responseStarted = true
+			}
+			if state == thinkingTagEnd {
+				finishReasoning()
+			}
+		}
+
+		processText := func(text string, isThinking bool, forceFlush bool) {
+			if isThinking {
+				if !thinking || !allowReasoningSource(&thinkingSource) {
+					return
+				}
+				if text == "" {
+					return
+				}
+				ensureReasoningStarted()
+				reasoningText.WriteString(text)
+				currentReasoningText.WriteString(text)
+				send("response.reasoning_summary_text.delta", map[string]interface{}{
+					"type":          "response.reasoning_summary_text.delta",
+					"item_id":       reasoningItemID,
+					"output_index":  outputIndex,
+					"summary_index": 0,
+					"delta":         text,
+				})
+				responseStarted = true
+				return
+			}
+			segments := tagParser.feed(text, forceFlush)
+			for _, segment := range segments {
+				switch segment.kind {
+				case thinkingTagVisible:
+					emitVisibleText(segment.text)
+				case thinkingTagStart, thinkingTagMiddle, thinkingTagEnd:
+					emitReasoningText(segment.text, segment.kind)
+				}
+			}
+		}
+
 		callback := &KiroStreamCallback{
 			OnText: func(text string, isThinking bool) {
 				firstContent.MarkOutput(text, isThinking)
@@ -862,62 +989,16 @@ func (h *Handler) handleResponsesStream(
 					return
 				}
 				if isThinking {
-					reasoningText.WriteString(text)
-					if thinking {
-						ensureReasoningStarted()
-						send("response.reasoning_summary_text.delta", map[string]interface{}{
-							"type":          "response.reasoning_summary_text.delta",
-							"item_id":       reasoningItemID,
-							"output_index":  outputIndex,
-							"summary_index": 0,
-							"delta":         text,
-						})
-						responseStarted = true
-					}
+					processText(text, true, false)
 					return
 				}
-				fullText.WriteString(text)
-				ensureMessageStarted()
-				send("response.output_text.delta", map[string]interface{}{
-					"type":          "response.output_text.delta",
-					"item_id":       messageItemID,
-					"output_index":  outputIndex,
-					"content_index": contentIndex,
-					"delta":         text,
-				})
-				responseStarted = true
+				processText(text, false, false)
 			},
 			OnToolUse: func(tu KiroToolUse) {
 				firstContent.MarkToolOutput()
+				processText("", false, true)
 				finishReasoning()
-				if messageStarted {
-					send("response.content_part.done", map[string]interface{}{
-						"type":          "response.content_part.done",
-						"item_id":       messageItemID,
-						"output_index":  outputIndex,
-						"content_index": contentIndex,
-						"part": map[string]interface{}{
-							"type": "output_text",
-							"text": fullText.String(),
-						},
-					})
-					send("response.output_item.done", map[string]interface{}{
-						"type":         "response.output_item.done",
-						"output_index": outputIndex,
-						"item": map[string]interface{}{
-							"id":     messageItemID,
-							"type":   "message",
-							"role":   "assistant",
-							"status": "completed",
-							"content": []map[string]interface{}{{
-								"type": "output_text",
-								"text": fullText.String(),
-							}},
-						},
-					})
-					messageStarted = false
-					outputIndex++
-				}
+				finishMessage()
 
 				toolUses = append(toolUses, tu)
 				item := buildResponseToolOutputItem(tu, customTools)
@@ -984,7 +1065,9 @@ func (h *Handler) handleResponsesStream(
 
 		resetAttempt := func() {
 			fullText.Reset()
+			currentMessageText.Reset()
 			reasoningText.Reset()
+			currentReasoningText.Reset()
 			toolUses = nil
 			inputTokens = 0
 			outputTokens = 0
@@ -994,9 +1077,13 @@ func (h *Handler) handleResponsesStream(
 			upstreamStopReason = ""
 			messageStarted = false
 			reasoningStarted = false
+			messageItemID = ""
+			reasoningItemID = ""
 			outputIndex = 0
 			contentIndex = 0
 			responseStarted = false
+			thinkingSource = thinkingSourceUnknown
+			tagParser.reset()
 		}
 
 		// Retry only before responseStarted becomes true. The reset prevents a
@@ -1042,38 +1129,13 @@ func (h *Handler) handleResponsesStream(
 		}
 
 		responseModel = exposedRequestModel(payload, model)
-		finalContent, _ := extractThinkingFromContent(fullText.String())
-		reasoning := reasoningText.String()
-		if !thinking {
-			reasoning = ""
-		}
+		processText("", false, true)
 		finishReasoning()
-
-		if messageStarted {
-			send("response.content_part.done", map[string]interface{}{
-				"type":          "response.content_part.done",
-				"item_id":       messageItemID,
-				"output_index":  outputIndex,
-				"content_index": contentIndex,
-				"part": map[string]interface{}{
-					"type": "output_text",
-					"text": finalContent,
-				},
-			})
-			send("response.output_item.done", map[string]interface{}{
-				"type":         "response.output_item.done",
-				"output_index": outputIndex,
-				"item": map[string]interface{}{
-					"id":     messageItemID,
-					"type":   "message",
-					"role":   "assistant",
-					"status": "completed",
-					"content": []map[string]interface{}{{
-						"type": "output_text",
-						"text": finalContent,
-					}},
-				},
-			})
+		finishMessage()
+		finalContent := strings.TrimSpace(fullText.String())
+		reasoning := ""
+		if thinking {
+			reasoning = reasoningText.String()
 		}
 
 		inputTokens = resolveInputTokenCount(inputTokens, upstreamUsage, realInputTokens, estimatedInputTokens)

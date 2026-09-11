@@ -515,11 +515,19 @@ api_probe() (
   body="$probe_dir/logs.json"
   if ((failed == 0)) && ! grep -Eq '"logs"[[:space:]]*:' "$body"; then failed=1; fi
 
-  if ! root_status="$(curl --silent --show-error --connect-timeout 5 --max-time 20 \
-    --output "$probe_dir/root.json" --write-out '%{http_code}' "$BASE_URL/")"; then
-    root_status=""
-    failed=1
-  fi
+	# A bare root health probe can race a container restart or a listener reload.
+	# Retry a few times without masking a persistent failure.
+	root_status=""
+	for root_attempt in 1 2 3; do
+		root_status="$(curl --silent --show-error --connect-timeout 5 --max-time 20 \
+			--output "$probe_dir/root.json" --write-out '%{http_code}' "$BASE_URL/" || true)"
+		if [[ "$root_status" == 200 ]] && grep -Eq '"status"[[:space:]]*:[[:space:]]*"ok"' "$probe_dir/root.json"; then
+			break
+		fi
+		if ((root_attempt < 3)); then
+			sleep 1
+		fi
+	done
   if [[ "$root_status" != 200 ]] || ! grep -Eq '"status"[[:space:]]*:[[:space:]]*"ok"' "$probe_dir/root.json"; then
     printf 'root health alias returned HTTP %s or a non-ok payload\n' "$root_status"
     failed=1

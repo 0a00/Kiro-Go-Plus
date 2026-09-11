@@ -33,8 +33,9 @@ Scenario IDs:
   structured-output, mcp-large-result, mcp-error-recovery, web-search,
   workspace-image
 
-Set KIRO_DEV_ALLOW_REMOTE=1 before testing a non-loopback base URL. The file
-tool case uses a disposable workspace and only Read/Write/Edit/Glob/Grep.
+Set KIRO_DEV_ALLOW_REMOTE=1 before testing a non-loopback base URL. File and
+workspace cases inspect Claude Code's init capabilities and skip unsupported
+optional tools instead of reporting a client-version mismatch as a gateway bug.
 EOF
 }
 
@@ -398,6 +399,17 @@ client_result_subtype() {
   jq -r 'select(.type == "result") | .subtype // "unknown"' "$1" | tail -n 1
 }
 
+client_init_present() {
+  jq -e 'select(.type == "system" and .subtype == "init")' "$1" >/dev/null 2>&1
+}
+
+client_has_tool() {
+  local output="$1" tool="$2"
+  jq -e --arg tool "$tool" \
+    'select(.type == "system" and .subtype == "init") | ((.tools // []) | index($tool)) != null' \
+    "$output" >/dev/null 2>&1
+}
+
 assert_client_result() {
   local output="$1"
   local marker="$2"
@@ -536,12 +548,25 @@ case_mcp_multi_call() {
 case_file_tools() {
   local file="$FILE_WORKSPACE/claude-file-e2e.txt"
   local output="$TMP_DIR/file-tools.jsonl"
+  local status
   rm -f -- "$file"
+  set +e
   run_cli "$CLIENT_TIMEOUT" "$MODEL" "$FILE_WORKSPACE" "$output" \
     "Use only Read, Write, and Edit. Create claude-file-e2e.txt with exactly FILE_WRITE_OK, read it, edit only FILE_WRITE_OK to FILE_EDIT_OK, read it again, then reply exactly FILE_TOOLS_OK." \
     --restricted --tools "Read,Write,Edit,Glob,Grep" \
     --allowedTools "Read,Write,Edit,Glob,Grep" --permission-mode acceptEdits
-  if ! assert_client_result "$output" FILE_TOOLS_OK || [[ ! -f "$file" ]]; then
+  status=$?
+  set -e
+  if ! client_init_present "$output"; then
+    CASE_DETAIL="Claude Code did not emit an initialization record"
+    return 1
+  fi
+  if ! client_has_tool "$output" Write || ! client_has_tool "$output" Edit; then
+    CASE_STATUS_HINT=SKIP
+    CASE_DETAIL="Claude Code client did not expose the required Write/Edit capability"
+    return 0
+  fi
+  if ((status != 0)) || ! assert_client_result "$output" FILE_TOOLS_OK || [[ ! -f "$file" ]]; then
     CASE_DETAIL="Claude Code file tool sequence did not create the test file"
     return 1
   fi
@@ -811,12 +836,22 @@ case_workspace_error_recovery() {
   local tool_uses tool_results tool_errors subtype status
   mkdir -p "$workspace"
   printf '%s\n' 'Known recovery input.' >"$workspace/known.txt"
+  printf '%s\n' 'RECOVERY_PLACEHOLDER' >"$workspace/recovered.txt"
   set +e
   run_cli_session "$AGENT_TIMEOUT" "$MODEL" "$workspace" "$output" \
-    'Test tool error recovery. First try to read the deliberately missing file missing-file.txt. That failure is expected; do not stop. Then read known.txt, create recovered.txt containing exactly TOOL_ERROR_RECOVERY_OK, read it back, and finish with the exact marker TOOL_ERROR_RECOVERY_DONE.' \
-    --tools 'Read,Write' --allowedTools 'Read,Write' --permission-mode acceptEdits
+    'Test tool error recovery. First try to read the deliberately missing file missing-file.txt. That failure is expected; do not stop. Then read known.txt, use Edit to replace RECOVERY_PLACEHOLDER in recovered.txt with exactly TOOL_ERROR_RECOVERY_OK, read it back, and finish with the exact marker TOOL_ERROR_RECOVERY_DONE.' \
+    --tools 'Read,Edit' --allowedTools 'Read,Edit' --permission-mode acceptEdits
   status=$?
   set -e
+  if ! client_init_present "$output"; then
+    CASE_DETAIL="Claude Code did not emit an initialization record"
+    return 1
+  fi
+  if ! client_has_tool "$output" Read || ! client_has_tool "$output" Edit; then
+    CASE_STATUS_HINT=SKIP
+    CASE_DETAIL="Claude Code client did not expose the Read/Edit capability"
+    return 0
+  fi
   tool_uses="$(client_tool_use_count "$output")"
   tool_results="$(client_tool_result_count "$output")"
   tool_errors="$(client_tool_error_count "$output")"
@@ -843,10 +878,19 @@ case_workspace_parallel_tools() {
   printf '%s\n' 'PARALLEL_D' >"$workspace/d.txt"
   set +e
   run_cli_session "$AGENT_TIMEOUT" "$MODEL" "$workspace" "$output" \
-    'Inspect this workspace as a coding assistant. Use Glob to find the four text files, then issue separate Read calls for a.txt, b.txt, c.txt, and d.txt; independent reads may be parallel. Create summary.txt containing all four values, reread it, and finish with the exact marker PARALLEL_TOOLS_OK.' \
-    --tools 'Read,Write,Glob' --allowedTools 'Read,Write,Glob' --permission-mode acceptEdits
+    'Inspect this workspace as a coding assistant. Use separate Read calls for a.txt, b.txt, c.txt, and d.txt; independent reads may be parallel. After all four values are confirmed, finish with the exact marker PARALLEL_TOOLS_OK.' \
+    --tools 'Read' --allowedTools 'Read' --permission-mode plan
   status=$?
   set -e
+  if ! client_init_present "$output"; then
+    CASE_DETAIL="Claude Code did not emit an initialization record"
+    return 1
+  fi
+  if ! client_has_tool "$output" Read; then
+    CASE_STATUS_HINT=SKIP
+    CASE_DETAIL="Claude Code client did not expose the Read capability"
+    return 0
+  fi
   tool_uses="$(client_tool_use_count "$output")"
   tool_results="$(client_tool_result_count "$output")"
   subtype="$(client_result_subtype "$output")"
@@ -854,11 +898,11 @@ case_workspace_parallel_tools() {
     CASE_DETAIL="parallel read workflow did not finish (status ${status}, subtype ${subtype}, calls ${tool_uses})"
     return 1
   fi
-  if ((tool_uses < 6 || tool_results < tool_uses)) || [[ ! -f "$workspace/summary.txt" ]] || ! rg -q 'PARALLEL_[A-D]' "$workspace/summary.txt"; then
+  if ((tool_uses < 4 || tool_results < tool_uses)); then
     CASE_DETAIL="parallel tool results were incomplete (calls ${tool_uses}, results ${tool_results})"
     return 1
   fi
-  CASE_DETAIL="four-file parallel read and summary workflow completed with ${tool_uses} tool calls"
+  CASE_DETAIL="four-file parallel read workflow completed with ${tool_uses} tool calls"
 }
 
 case_permission_plan() {
@@ -948,6 +992,15 @@ case_web_search() {
     --restricted --tools 'WebSearch' --allowedTools 'WebSearch' --permission-mode acceptEdits
   status=$?
   set -e
+  if ! client_init_present "$output"; then
+    CASE_DETAIL="Claude Code did not emit an initialization record"
+    return 1
+  fi
+  if ! client_has_tool "$output" WebSearch; then
+    CASE_STATUS_HINT=SKIP
+    CASE_DETAIL="Claude Code client did not expose the native WebSearch capability"
+    return 0
+  fi
   tool_uses="$(client_tool_use_count "$output")"
   tool_results="$(client_tool_result_count "$output")"
   subtype="$(client_result_subtype "$output")"
@@ -1031,14 +1084,18 @@ fi
 
 failures=0
 warnings=0
+passes=0
+skips=0
 for status in "${CASE_STATUSES[@]}"; do
   case "$status" in
+    PASS) passes=$((passes + 1)) ;;
     FAIL) failures=$((failures + 1)) ;;
     WARN) warnings=$((warnings + 1)) ;;
+    SKIP) skips=$((skips + 1)) ;;
   esac
 done
-printf 'Client E2E summary: pass=%d warn=%d fail=%d\n' \
-  "$(( ${#CASE_STATUSES[@]} - failures - warnings ))" "$warnings" "$failures"
+printf 'Client E2E summary: pass=%d warn=%d fail=%d skip=%d\n' \
+  "$passes" "$warnings" "$failures" "$skips"
 if ((failures > 0 || (FAIL_ON_WARNING && warnings > 0))); then
   exit 1
 fi

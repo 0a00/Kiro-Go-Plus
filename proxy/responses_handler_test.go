@@ -704,3 +704,80 @@ func TestResponsesEmitsReasoningOutputAndStreamEvents(t *testing.T) {
 		}
 	}
 }
+
+func TestResponsesExtractsTaggedThinkingAcrossUpstreamFrames(t *testing.T) {
+	h, cleanup := setupResponsesTestHandler(t)
+	defer cleanup()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "<thin"}))
+		_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "king>\n内部"}))
+		_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "思考</thinking>最终答案"}))
+		_, _ = w.Write(awsEventStreamFrame(t, "metadataEvent", map[string]interface{}{"stopReason": "end_turn"}))
+	}))
+	defer server.Close()
+	defer swapKiroEndpointsForTest(t, server)()
+
+	nonStream := httptest.NewRecorder()
+	h.handleOpenAIResponses(nonStream, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(
+		`{"model":"claude-sonnet-4.5-thinking","input":"tagged thinking","store":false}`,
+	)))
+	if nonStream.Code != http.StatusOK {
+		t.Fatalf("non-stream status=%d body=%s", nonStream.Code, nonStream.Body.String())
+	}
+	var response ResponsesObject
+	if err := json.Unmarshal(nonStream.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode non-stream response: %v body=%s", err, nonStream.Body.String())
+	}
+	if len(response.Output) != 2 || response.Output[0].Type != "reasoning" || response.Output[0].Summary[0].Text != "\n内部思考" {
+		t.Fatalf("unexpected tagged non-stream output: %+v", response.Output)
+	}
+	if response.Output[1].Type != "message" || response.Output[1].Content[0].Text != "最终答案" {
+		t.Fatalf("unexpected tagged visible output: %+v", response.Output)
+	}
+
+	plain := httptest.NewRecorder()
+	h.handleOpenAIResponses(plain, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(
+		`{"model":"claude-sonnet-4.5","input":"tagged plain response","store":false}`,
+	)))
+	var plainResponse ResponsesObject
+	if err := json.Unmarshal(plain.Body.Bytes(), &plainResponse); err != nil {
+		t.Fatalf("decode plain response: %v body=%s", err, plain.Body.String())
+	}
+	if len(plainResponse.Output) != 1 || plainResponse.Output[0].Type != "message" || plainResponse.Output[0].Content[0].Text != "最终答案" || strings.Contains(plain.Body.String(), "<thinking>") {
+		t.Fatalf("plain Responses tag handling leaked or changed output: %s", plain.Body.String())
+	}
+
+	stream := httptest.NewRecorder()
+	h.handleOpenAIResponses(stream, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(
+		`{"model":"claude-sonnet-4.5-thinking","input":"tagged thinking","stream":true,"store":false}`,
+	)))
+	body := stream.Body.String()
+	for _, event := range []string{
+		"event: response.reasoning_summary_part.added",
+		"event: response.reasoning_summary_text.delta",
+		"event: response.reasoning_summary_text.done",
+		"event: response.output_text.delta",
+		"event: response.completed",
+	} {
+		if !strings.Contains(body, event) {
+			t.Fatalf("missing %q in tagged stream:\n%s", event, body)
+		}
+	}
+	if strings.Contains(body, "\\u003cthinking\\u003e") || strings.Contains(body, "<thinking>") || strings.Contains(body, "<think>") {
+		t.Fatalf("thinking tag leaked into Responses stream:\n%s", body)
+	}
+	if !strings.Contains(body, "内部") || !strings.Contains(body, "最终答案") {
+		t.Fatalf("tagged reasoning or visible text missing:\n%s", body)
+	}
+
+	plainStream := httptest.NewRecorder()
+	h.handleOpenAIResponses(plainStream, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(
+		`{"model":"claude-sonnet-4.5","input":"tagged plain stream","stream":true,"store":false}`,
+	)))
+	plainBody := plainStream.Body.String()
+	if strings.Contains(plainBody, "response.reasoning_summary") || strings.Contains(plainBody, "<thinking>") || !strings.Contains(plainBody, "最终答案") {
+		t.Fatalf("plain Responses stream tag handling is invalid:\n%s", plainBody)
+	}
+}

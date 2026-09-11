@@ -151,11 +151,11 @@ func (r *runner) runThinkingProtocols(parent context.Context) {
 	}{
 		{
 			name: "chat-thinking-stream", protocol: "openai", path: "/v1/chat/completions",
-			payload: openAIChatPayload(r.thinking, true, "Calculate 211 * 37 carefully, then answer in one sentence.", 768),
+			payload: openAIChatPayload(r.thinking, true, "Calculate 211 * 37 carefully, then answer in one sentence.", 4096),
 		},
 		{
 			name: "responses-thinking-stream", protocol: "responses", path: "/v1/responses",
-			payload: responsesPayload(r.thinking, true, "Calculate 211 * 37 carefully, then answer in one sentence.", 768),
+			payload: responsesPayload(r.thinking, true, "Calculate 211 * 37 carefully, then answer in one sentence.", 4096),
 		},
 	}
 	tests[0].payload["reasoning_effort"] = "medium"
@@ -168,6 +168,12 @@ func (r *runner) runThinkingProtocols(parent context.Context) {
 		if result.Status == statusPass && response.stream.thinkingDeltas == 0 {
 			result.Detail += "; no protocol-visible reasoning delta observed"
 			result.Status = statusWarn
+		} else if result.Status == statusPass && test.protocol == "responses" && bytes.Contains(response.stream.output, []byte("<thinking>")) {
+			result.Detail += "; thinking tags leaked into visible output"
+			result.Status = statusFail
+		} else if result.Status == statusPass && test.protocol == "responses" && bytes.Contains(response.stream.output, []byte("<think>")) {
+			result.Detail += "; think tags leaked into visible output"
+			result.Status = statusFail
 		}
 		r.add(result)
 	}

@@ -1244,7 +1244,24 @@ func loadResponseMatchesMarker(response apiResponse, probe loadProbe) bool {
 	if probe.validation == loadValidationContains {
 		return containsLoadMarker(text, probe.expectedMarker)
 	}
-	return strings.TrimSpace(text) == probe.expectedMarker
+	return exactLoadMarker(text, probe.expectedMarker)
+}
+
+// exactLoadMarker accepts the harmless terminal punctuation models often add
+// while retaining an exact, single-marker assertion. Extra words, digits, and
+// foreign request markers remain failures.
+func exactLoadMarker(text, marker string) bool {
+	text = strings.TrimSpace(text)
+	marker = strings.TrimSpace(marker)
+	if text == marker || marker == "" {
+		return text == marker
+	}
+	for _, suffix := range []string{".", "。", "!", "！", "?", "？"} {
+		if strings.TrimSpace(strings.TrimSuffix(text, suffix)) == marker {
+			return true
+		}
+	}
+	return false
 }
 
 func containsLoadMarker(text, marker string) bool {

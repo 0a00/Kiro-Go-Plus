@@ -161,6 +161,42 @@ func TestOpenAIAndResponsesNonStreamDiscardTruncatedAttempt(t *testing.T) {
 	}
 }
 
+func TestResponsesTaggedThinkingRetryDoesNotLeakDiscardedAttempt(t *testing.T) {
+	var hits atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if hits.Add(1) == 1 {
+			writeIntegrityText(t, w, "<thinking>", false)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "<thinking>kept</thinking>answer"}))
+		_, _ = w.Write(awsEventStreamFrame(t, "metadataEvent", map[string]interface{}{"stopReason": "end_turn"}))
+	}))
+	defer upstream.Close()
+	h := setupStreamIntegrityPathTest(t, upstream)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{
+		"model":"claude-sonnet-4.5-thinking",
+		"stream":true,
+		"store":false,
+		"input":"retry tagged thinking"
+	}`)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected recovered 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if hits.Load() != 2 {
+		t.Fatalf("expected one same-account retry, hits=%d body=%s", hits.Load(), body)
+	}
+	if strings.Contains(body, "discarded") || !strings.Contains(body, "kept") || !strings.Contains(body, "answer") {
+		t.Fatalf("tagged retry leaked or lost content: %s", body)
+	}
+	if !strings.Contains(body, "response.reasoning_summary_text.delta") || strings.Contains(body, "<thinking>") {
+		t.Fatalf("recovered Responses stream has invalid reasoning translation: %s", body)
+	}
+}
+
 func TestClaudeStreamDoesNotReplayAfterActionableOutput(t *testing.T) {
 	var hits atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

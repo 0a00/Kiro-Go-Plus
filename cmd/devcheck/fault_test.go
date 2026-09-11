@@ -267,3 +267,16 @@ func TestClassifyLoadSampleRejectsCrossTalkMarkers(t *testing.T) {
 		t.Fatalf("non-exact marker accepted: %+v", sample)
 	}
 }
+
+func TestExactLoadMarkerAllowsOnlyTerminalPunctuation(t *testing.T) {
+	for _, text := range []string{"LOAD_OK_7", "LOAD_OK_7.", "LOAD_OK_7。", "LOAD_OK_7!", "LOAD_OK_7？"} {
+		if !exactLoadMarker(text, "LOAD_OK_7") {
+			t.Fatalf("terminal punctuation was rejected: %q", text)
+		}
+	}
+	for _, text := range []string{"LOAD_OK_7 extra", "LOAD_OK_70", "LOAD_OK_6.", "prefix LOAD_OK_7"} {
+		if exactLoadMarker(text, "LOAD_OK_7") {
+			t.Fatalf("non-exact marker was accepted: %q", text)
+		}
+	}
+}

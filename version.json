@@ -1,5 +1,5 @@
 {
-  "version": "1.2.75",
-  "changelog": "Recover buffered high-risk tool turns and recalculate fallback context limits.\n恢复缓冲的高风险工具回合，并按兜底目标模型重算上下文上限。",
+  "version": "1.2.76",
+  "changelog": "Translate tagged thinking into structured Responses reasoning events and harden production test verdicts.\n将标签式思考转换为结构化 Responses 推理事件，并完善生产测试判定。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }
