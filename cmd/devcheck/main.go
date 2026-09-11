@@ -189,6 +189,7 @@ type devReport struct {
 	SoakTokenBudget          int              `json:"soakTokenBudget,omitempty"`
 	Model                    string           `json:"model,omitempty"`
 	Models                   []string         `json:"models,omitempty"`
+	ModelRouteCoverage       string           `json:"modelRouteCoverage,omitempty"`
 	Results                  []scenarioResult `json:"results"`
 	Summary                  map[string]int   `json:"summary"`
 	BaselineCompared         bool             `json:"baselineCompared,omitempty"`
@@ -652,6 +653,7 @@ func (r *runner) writeReport(path string) error {
 		SoakTokenBudget:          r.opts.soakTokenBudget,
 		Model:                    r.model,
 		Models:                   append([]string(nil), r.selected...),
+		ModelRouteCoverage:       modelRouteCoverage(r.opts),
 		Results:                  r.results,
 		Summary:                  r.summary(),
 		BaselineCompared:         r.baselineCompared,
@@ -664,6 +666,13 @@ func (r *runner) writeReport(path string) error {
 	}
 	data = append(data, '\n')
 	return writePrivateFileAtomically(path, data)
+}
+
+func modelRouteCoverage(opts options) string {
+	if opts.suite != "matrix" {
+		return ""
+	}
+	return "requested-model compatibility only; upstream route identity is intentionally hidden"
 }
 
 // writePrivateFileAtomically prevents readers from observing a half-written

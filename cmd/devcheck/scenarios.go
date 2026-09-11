@@ -487,7 +487,9 @@ func (r *runner) runProtocolMatrix(parent context.Context) {
 			response := r.post(ctx, matrix.path, matrix.payload(model, matrix.stream, "Reply with exactly MATRIX_OK.", maxTokens), true, matrix.stream)
 			cancel()
 			if matrix.stream {
-				r.add(streamScenarioResult(matrix.name, matrix.protocol, model, response))
+				result := streamScenarioResult(matrix.name, matrix.protocol, model, response)
+				result.Detail += "; coverage=requested-model compatibility only; upstream route identity hidden"
+				r.add(result)
 				continue
 			}
 			result := responseScenarioResult(matrix.name, matrix.protocol, model, response, false)
@@ -498,6 +500,7 @@ func (r *runner) runProtocolMatrix(parent context.Context) {
 				result.Status = statusPass
 				result.Detail = fmt.Sprintf("text_chars=%d", len([]rune(responseText(response.body))))
 			}
+			result.Detail += "; coverage=requested-model compatibility only; upstream route identity hidden"
 			r.add(result)
 		}
 	}

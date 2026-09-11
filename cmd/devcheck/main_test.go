@@ -342,6 +342,15 @@ func TestWriteReportUsesPrivatePermissionsAndOmitsAPIKey(t *testing.T) {
 	}
 }
 
+func TestMatrixReportMarksHiddenUpstreamRouteCoverage(t *testing.T) {
+	if got := modelRouteCoverage(options{suite: "matrix"}); got == "" || !strings.Contains(got, "upstream route identity") {
+		t.Fatalf("matrix route coverage note = %q", got)
+	}
+	if got := modelRouteCoverage(options{suite: "full"}); got != "" {
+		t.Fatalf("non-matrix route coverage note = %q", got)
+	}
+}
+
 func TestWriteReportReplacesSymlinkWithoutTouchingTarget(t *testing.T) {
 	directory := t.TempDir()
 	target := filepath.Join(directory, "target.json")
