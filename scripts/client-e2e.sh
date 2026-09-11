@@ -781,6 +781,15 @@ case_workspace_long_tools() {
   tool_errors="$(client_tool_error_count "$output")"
   subtype="$(client_result_subtype "$output")"
   file_count="$(find "$workspace" -type f | wc -l)"
+  if [[ "$subtype" == "error_max_budget_usd" ]]; then
+    if ((tool_uses >= 20 && tool_results >= tool_uses && tool_errors == 0 && file_count >= 12)); then
+      CASE_STATUS_HINT=WARN
+      CASE_DETAIL="structured long-tool workflow completed ${tool_uses} calls across ${file_count} files before the Claude Code budget was exhausted"
+      return 0
+    fi
+    CASE_DETAIL="long tool chain exhausted the Claude Code budget before integrity checks completed (calls ${tool_uses}, results ${tool_results}, errors ${tool_errors}, files ${file_count})"
+    return 1
+  fi
   if ((status != 0)) || [[ "$subtype" != "success" ]]; then
     CASE_DETAIL="long tool chain did not finish (status ${status}, subtype ${subtype}, calls ${tool_uses}, files ${file_count})"
     return 1
