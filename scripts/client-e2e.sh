@@ -748,7 +748,7 @@ case_workspace_multiturn() {
     CASE_DETAIL="multi-turn edit produced no structured tool/result pair (status ${second_status}, subtype ${subtype})"
     return 1
   fi
-  if ((second_status != 0 && subtype != "error_max_budget_usd")); then
+  if ((second_status != 0)) && [[ "$subtype" != "error_max_budget_usd" ]]; then
     CASE_DETAIL="multi-turn edit exited unexpectedly (status ${second_status}, subtype ${subtype})"
     return 1
   fi
