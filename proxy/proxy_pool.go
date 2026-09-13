@@ -214,7 +214,7 @@ func (h *Handler) addProxyPoolEntries(w http.ResponseWriter, values []string) {
 	for _, entry := range entries {
 		seen[entry.ProxyURL] = struct{}{}
 	}
-	added := 0
+	newEntries := make([]config.ProxyPoolEntry, 0, len(values))
 	errors := make([]string, 0)
 	for index, raw := range values {
 		normalized, err := normalizeProxyPoolLine(raw)
@@ -226,20 +226,18 @@ func (h *Handler) addProxyPoolEntries(w http.ResponseWriter, values []string) {
 			continue
 		}
 		seen[normalized] = struct{}{}
-		entries = append(entries, config.ProxyPoolEntry{
+		newEntries = append(newEntries, config.ProxyPoolEntry{
 			ID:       uuid.NewString(),
 			ProxyURL: normalized,
 			Enabled:  true,
 			Health:   "unknown",
 		})
-		added++
 	}
-	if added > 0 {
-		if err := config.ReplaceProxyPoolEntries(entries); err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error(), "added": 0, "errors": errors})
-			return
-		}
+	added, addErr := config.AppendProxyPoolEntries(newEntries)
+	if addErr != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": addErr.Error(), "added": 0, "errors": errors})
+		return
 	}
 	json.NewEncoder(w).Encode(map[string]interface{}{"success": len(errors) == 0, "added": added, "errors": errors})
 }
@@ -342,24 +340,15 @@ func (h *Handler) assignProxyPoolEntries(w http.ResponseWriter, proxyID string, 
 }
 
 func (h *Handler) apiDeleteProxyPoolEntry(w http.ResponseWriter, r *http.Request, id string) {
-	entries := config.GetProxyPoolEntries()
-	filtered := entries[:0]
-	found := false
-	for _, entry := range entries {
-		if entry.ID == id {
-			found = true
-			continue
-		}
-		filtered = append(filtered, entry)
+	found, err := config.DeleteProxyPoolEntry(id)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
 	}
 	if !found {
 		w.WriteHeader(http.StatusNotFound)
 		json.NewEncoder(w).Encode(map[string]string{"error": "proxy pool entry not found"})
-		return
-	}
-	if err := config.ReplaceProxyPoolEntries(filtered); err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
 	json.NewEncoder(w).Encode(map[string]bool{"success": true})

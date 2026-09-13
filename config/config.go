@@ -3893,6 +3893,58 @@ func ReplaceProxyPoolEntries(entries []ProxyPoolEntry) error {
 	return nil
 }
 
+func AppendProxyPoolEntries(entries []ProxyPoolEntry) (int, error) {
+	if len(entries) == 0 {
+		return 0, nil
+	}
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	previous := append([]ProxyPoolEntry(nil), cfg.ProxyPool...)
+	seen := make(map[string]struct{}, len(cfg.ProxyPool)+len(entries))
+	for _, entry := range cfg.ProxyPool {
+		seen[entry.ProxyURL] = struct{}{}
+	}
+	added := 0
+	for _, entry := range entries {
+		if _, exists := seen[entry.ProxyURL]; exists {
+			continue
+		}
+		seen[entry.ProxyURL] = struct{}{}
+		cfg.ProxyPool = append(cfg.ProxyPool, entry)
+		added++
+	}
+	if len(cfg.ProxyPool) > 100000 {
+		cfg.ProxyPool = previous
+		return 0, fmt.Errorf("proxy pool cannot contain more than 100000 entries")
+	}
+	if added == 0 {
+		return 0, nil
+	}
+	if err := Save(); err != nil {
+		cfg.ProxyPool = previous
+		return 0, err
+	}
+	return added, nil
+}
+
+func DeleteProxyPoolEntry(id string) (bool, error) {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	for i := range cfg.ProxyPool {
+		if cfg.ProxyPool[i].ID != id {
+			continue
+		}
+		previous := append([]ProxyPoolEntry(nil), cfg.ProxyPool...)
+		cfg.ProxyPool = append(cfg.ProxyPool[:i], cfg.ProxyPool[i+1:]...)
+		if err := Save(); err != nil {
+			cfg.ProxyPool = previous
+			return false, err
+		}
+		return true, nil
+	}
+	return false, nil
+}
+
 // UpdateProxyPoolHealth updates only probe-owned fields, preserving concurrent
 // admin additions, deletions, labels, and enable/disable changes.
 func UpdateProxyPoolHealth(updates map[string]ProxyPoolHealthUpdate) error {
