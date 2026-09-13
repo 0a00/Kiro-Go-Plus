@@ -407,6 +407,34 @@ type LogArchiveConfig struct {
 	MaxBytes       int64 `json:"maxBytes"`
 }
 
+// ImportWatcherConfig controls the optional local credential drop-folder
+// importer. The directory is always resolved beside the active config file.
+type ImportWatcherConfig struct {
+	Enabled         bool `json:"enabled"`
+	IntervalSeconds int  `json:"intervalSeconds"`
+}
+
+// ProxyPoolEntry is a reusable outbound proxy with persisted health metadata.
+// ProxyURL is encrypted at rest when KIRO_MASTER_KEY is configured.
+type ProxyPoolEntry struct {
+	ID                  string `json:"id"`
+	ProxyURL            string `json:"proxyURL"`
+	Label               string `json:"label,omitempty"`
+	Enabled             bool   `json:"enabled"`
+	Health              string `json:"health,omitempty"`
+	LatencyMs           int    `json:"latencyMs,omitempty"`
+	LastCheckedAt       int64  `json:"lastCheckedAt,omitempty"`
+	ConsecutiveFailures int    `json:"consecutiveFailures,omitempty"`
+}
+
+type ProxyPoolHealthUpdate struct {
+	ID                  string
+	Health              string
+	LatencyMs           int
+	LastCheckedAt       int64
+	ConsecutiveFailures int
+}
+
 const (
 	DefaultLogArchiveRetentionDays = 90
 	MinLogArchiveRetentionDays     = 0
@@ -512,6 +540,12 @@ type Config struct {
 	// LogArchive controls bounded long-term JSONL log retention.
 	LogArchive LogArchiveConfig `json:"logArchive,omitempty"`
 
+	// ImportWatcher controls the optional local credential drop-folder importer.
+	ImportWatcher ImportWatcherConfig `json:"importWatcher,omitempty"`
+
+	// ProxyPool stores reusable per-account outbound proxies.
+	ProxyPool []ProxyPoolEntry `json:"proxyPool,omitempty"`
+
 	// WebSearch controls the optional Anthropic web_search shim.
 	WebSearch WebSearchConfig `json:"webSearch,omitempty"`
 
@@ -613,7 +647,7 @@ const (
 )
 
 // Version current version
-const Version = "1.2.76"
+const Version = "1.2.77"
 
 var (
 	cfg           *Config
@@ -678,6 +712,7 @@ func loadLocked() error {
 				Diagnostics:               defaultDiagnosticConfig(),
 				RequestLog:                defaultRequestLogConfig(),
 				LogArchive:                defaultLogArchiveConfig(),
+				ImportWatcher:             defaultImportWatcherConfig(),
 				WebSearch:                 defaultWebSearchConfig(),
 				CountTokensProvider:       defaultCountTokensProviderConfig(),
 				ToolStreamMode:            ToolStreamModeSafe,
@@ -829,6 +864,9 @@ func loadLocked() error {
 			c.LogArchive.MaxBytes = defaults.MaxBytes
 		}
 	}
+	if !rawConfigHasKey(data, "importWatcher") {
+		c.ImportWatcher = defaultImportWatcherConfig()
+	}
 	if !rawConfigHasKey(data, "webSearch") {
 		c.WebSearch = defaultWebSearchConfig()
 	}
@@ -867,6 +905,7 @@ func loadLocked() error {
 	normalizeDiagnosticLocked()
 	normalizeRequestLogLocked()
 	normalizeLogArchiveLocked()
+	normalizeImportWatcherLocked()
 	normalizeWebSearchLocked()
 	normalizeCountTokensProviderLocked()
 
@@ -1734,6 +1773,20 @@ func normalizeLogArchiveLocked() {
 	}
 }
 
+func defaultImportWatcherConfig() ImportWatcherConfig {
+	return ImportWatcherConfig{Enabled: false, IntervalSeconds: 15}
+}
+
+func normalizeImportWatcherLocked() {
+	defaults := defaultImportWatcherConfig()
+	if cfg.ImportWatcher.IntervalSeconds < 5 {
+		cfg.ImportWatcher.IntervalSeconds = defaults.IntervalSeconds
+	}
+	if cfg.ImportWatcher.IntervalSeconds > 3600 {
+		cfg.ImportWatcher.IntervalSeconds = 3600
+	}
+}
+
 func defaultWebSearchConfig() WebSearchConfig {
 	return WebSearchConfig{Enabled: false, MaxRounds: DefaultWebSearchMaxRounds}
 }
@@ -2568,6 +2621,30 @@ func GetLogArchiveConfig() LogArchiveConfig {
 		out.MaxBytes = MaxLogArchiveMaxBytes
 	}
 	return out
+}
+
+func GetImportWatcherConfig() ImportWatcherConfig {
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	if cfg == nil {
+		return defaultImportWatcherConfig()
+	}
+	value := cfg.ImportWatcher
+	if value.IntervalSeconds < 5 {
+		value.IntervalSeconds = 15
+	}
+	if value.IntervalSeconds > 3600 {
+		value.IntervalSeconds = 3600
+	}
+	return value
+}
+
+func UpdateImportWatcherConfig(value ImportWatcherConfig) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	cfg.ImportWatcher = value
+	normalizeImportWatcherLocked()
+	return Save()
 }
 
 func UpdateLogArchiveConfig(archive LogArchiveConfig) error {
@@ -3770,6 +3847,97 @@ func UpdateProxySettings(proxyURL string) error {
 	defer cfgLock.Unlock()
 	cfg.ProxyURL = proxyURL
 	return Save()
+}
+
+func GetProxyPoolEntries() []ProxyPoolEntry {
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	if cfg == nil {
+		return nil
+	}
+	entries := make([]ProxyPoolEntry, len(cfg.ProxyPool))
+	copy(entries, cfg.ProxyPool)
+	return entries
+}
+
+func ReplaceProxyPoolEntries(entries []ProxyPoolEntry) error {
+	if len(entries) > 100000 {
+		return fmt.Errorf("proxy pool cannot contain more than 100000 entries")
+	}
+	seen := make(map[string]struct{}, len(entries))
+	for i := range entries {
+		entries[i].ID = strings.TrimSpace(entries[i].ID)
+		entries[i].ProxyURL = strings.TrimSpace(entries[i].ProxyURL)
+		if entries[i].ID == "" {
+			entries[i].ID = newUUID()
+		}
+		if entries[i].ProxyURL == "" {
+			return fmt.Errorf("proxy pool entry %d has an empty proxy URL", i+1)
+		}
+		if _, ok := seen[entries[i].ID]; ok {
+			return fmt.Errorf("duplicate proxy pool entry id %q", entries[i].ID)
+		}
+		seen[entries[i].ID] = struct{}{}
+		if entries[i].ConsecutiveFailures < 0 {
+			entries[i].ConsecutiveFailures = 0
+		}
+	}
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	previous := cfg.ProxyPool
+	cfg.ProxyPool = append([]ProxyPoolEntry(nil), entries...)
+	if err := Save(); err != nil {
+		cfg.ProxyPool = previous
+		return err
+	}
+	return nil
+}
+
+// UpdateProxyPoolHealth updates only probe-owned fields, preserving concurrent
+// admin additions, deletions, labels, and enable/disable changes.
+func UpdateProxyPoolHealth(updates map[string]ProxyPoolHealthUpdate) error {
+	if len(updates) == 0 {
+		return nil
+	}
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	previous := append([]ProxyPoolEntry(nil), cfg.ProxyPool...)
+	for i := range cfg.ProxyPool {
+		update, ok := updates[cfg.ProxyPool[i].ID]
+		if !ok {
+			continue
+		}
+		cfg.ProxyPool[i].Health = update.Health
+		cfg.ProxyPool[i].LatencyMs = update.LatencyMs
+		cfg.ProxyPool[i].LastCheckedAt = update.LastCheckedAt
+		cfg.ProxyPool[i].ConsecutiveFailures = max(0, update.ConsecutiveFailures)
+	}
+	if err := Save(); err != nil {
+		cfg.ProxyPool = previous
+		return err
+	}
+	return nil
+}
+
+// UpdateAccountProxyURLs applies many fixed proxy assignments in one config
+// write, preserving every other account field and avoiding O(N) saves.
+func UpdateAccountProxyURLs(updates map[string]string) error {
+	if len(updates) == 0 {
+		return nil
+	}
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	previous := append([]Account(nil), cfg.Accounts...)
+	for i := range cfg.Accounts {
+		if value, ok := updates[cfg.Accounts[i].ID]; ok {
+			cfg.Accounts[i].ProxyURL = strings.TrimSpace(value)
+		}
+	}
+	if err := Save(); err != nil {
+		cfg.Accounts = previous
+		return err
+	}
+	return nil
 }
 
 func GetOutboundIPv6Config() outboundipv6.Config {

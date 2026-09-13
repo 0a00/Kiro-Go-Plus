@@ -117,28 +117,37 @@ func convertResponsesInputItemsWithTools(items []json.RawMessage) (responsesInpu
 				ToolCallID: callID,
 			})
 
-		case typ == "function_call" || typ == "custom_tool_call":
+		case typ == "function_call" || typ == "custom_tool_call" || isResponsesHistoryToolCallType(typ):
 			flushPendingUser()
 			tc := ToolCall{
 				ID:   stringField(obj, "call_id", "id"),
 				Type: "function",
 			}
 			tc.Function.Name, _ = obj["name"].(string)
+			if strings.TrimSpace(tc.Function.Name) == "" {
+				tc.Function.Name = responsesHistoryToolName(typ)
+			}
 			if typ == "custom_tool_call" {
 				rawInput := stringifyArbitrary(obj["input"])
 				encoded, _ := json.Marshal(map[string]interface{}{"input": rawInput})
 				tc.Function.Arguments = string(encoded)
 			} else {
 				tc.Function.Arguments = stringifyArbitrary(obj["arguments"])
+				if tc.Function.Arguments == "" {
+					tc.Function.Arguments = stringifyArbitrary(obj["action"])
+				}
+				if tc.Function.Arguments == "" {
+					tc.Function.Arguments = stringifyArbitrary(obj["input"])
+				}
 			}
-			if strings.TrimSpace(tc.ID) == "" || strings.TrimSpace(tc.Function.Name) == "" {
+			if strings.TrimSpace(tc.ID) == "" {
 				return responsesInputResult{}, fmt.Errorf("input item %d %s requires call_id and name", index, typ)
 			}
 			appendResponsesAssistantToolCall(&messages, tc)
 
-		case typ == "custom_tool_call_output":
+		case typ == "custom_tool_call_output" || isResponsesHistoryToolOutputType(typ):
 			flushPendingUser()
-			callID := stringField(obj, "call_id", "tool_call_id")
+			callID := stringField(obj, "call_id", "tool_call_id", "id", "approval_request_id")
 			if strings.TrimSpace(callID) == "" {
 				return responsesInputResult{}, fmt.Errorf("input item %d custom_tool_call_output requires call_id", index)
 			}
@@ -158,10 +167,20 @@ func convertResponsesInputItemsWithTools(items []json.RawMessage) (responsesInpu
 			}
 			result.AdditionalTools = append(result.AdditionalTools, envelope.Tools...)
 
-		case typ == "reasoning" || typ == "item_reference":
+		case typ == "reasoning" || typ == "item_reference" || typ == "mcp_list_tools" || typ == "mcp_approval_request":
 			// Reasoning signatures cannot be replayed safely through Kiro, and
-			// item_reference is resolved by previous_response_id expansion.
+			// item_reference is resolved by previous_response_id expansion. MCP
+			// discovery/approval items have no Kiro input equivalent; preserving
+			// them as fake user text would corrupt tool history.
 			continue
+
+		case typ == "compaction":
+			// Codex may replay a compaction marker in a stateless continuation.
+			// Keep a bounded textual marker instead of rejecting the entire request.
+			flushPendingUser()
+			if summary := responseCompactionSummary(obj); summary != "" {
+				messages = append(messages, OpenAIMessage{Role: "system", Content: summary})
+			}
 
 		case typ == "input_text" || typ == "text":
 			text, _ := obj["text"].(string)
@@ -173,7 +192,7 @@ func convertResponsesInputItemsWithTools(items []json.RawMessage) (responsesInpu
 				"text": text,
 			})
 
-		case typ == "input_image", typ == "image", typ == "image_url":
+		case typ == "input_image", typ == "image", typ == "image_url", typ == "input_file", typ == "file":
 			pendingUserParts = append(pendingUserParts, map[string]interface{}(obj))
 
 		case typ == "output_text":
@@ -218,6 +237,55 @@ func appendResponsesAssistantToolCall(messages *[]OpenAIMessage, toolCall ToolCa
 		return
 	}
 	*messages = append(*messages, OpenAIMessage{Role: "assistant", Content: "", ToolCalls: []ToolCall{toolCall}})
+}
+
+func isResponsesHistoryToolCallType(typ string) bool {
+	switch typ {
+	case "web_search_call", "file_search_call", "code_interpreter_call",
+		"computer_call", "local_shell_call", "image_generation_call", "mcp_call":
+		return true
+	default:
+		return false
+	}
+}
+
+func isResponsesHistoryToolOutputType(typ string) bool {
+	switch typ {
+	case "computer_call_output", "local_shell_call_output", "mcp_approval_response":
+		return true
+	default:
+		return false
+	}
+}
+
+func responsesHistoryToolName(typ string) string {
+	switch typ {
+	case "web_search_call":
+		return "web_search"
+	case "file_search_call":
+		return "file_search"
+	case "code_interpreter_call":
+		return "code_interpreter"
+	case "computer_call":
+		return "computer"
+	case "local_shell_call":
+		return "local_shell"
+	case "image_generation_call":
+		return "image_generation"
+	case "mcp_call":
+		return "mcp"
+	default:
+		return typ
+	}
+}
+
+func responseCompactionSummary(obj map[string]interface{}) string {
+	for _, key := range []string{"summary", "text", "content"} {
+		if value := strings.TrimSpace(stringifyArbitrary(obj[key])); value != "" {
+			return "Conversation compaction summary:\n" + value
+		}
+	}
+	return "Conversation history was compacted before this turn."
 }
 
 func buildMessageFromInputItem(obj map[string]interface{}, role string) (*OpenAIMessage, error) {

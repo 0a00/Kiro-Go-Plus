@@ -1049,6 +1049,60 @@
           </div>
         </div>
 
+        <!-- Credential import watcher -->
+        <div class="card settings-card" data-settings-group="integrations">
+          <div class="card-header"><span class="card-title" data-i18n="settings.importWatcher"></span></div>
+          <div class="form-group">
+            <label class="flex items-center gap-2">
+              <span class="switch"><input type="checkbox" id="importWatcherEnabled" /><span class="slider"></span></span>
+              <span data-i18n="settings.importWatcherEnabled"></span>
+            </label>
+            <small data-i18n="settings.importWatcherHint"></small>
+          </div>
+          <div class="form-group">
+            <label data-i18n="settings.importWatcherDirectory"></label>
+            <input type="text" id="importWatcherDirectory" readonly />
+          </div>
+          <div class="form-group">
+            <label data-i18n="settings.importWatcherInterval"></label>
+            <input type="number" id="importWatcherInterval" min="5" max="3600" step="1" />
+            <small id="importWatcherStatus" aria-live="polite"></small>
+          </div>
+          <div class="flex gap-2 flex-wrap">
+            <button class="btn btn-primary" id="saveImportWatcherBtn" data-i18n="settings.saveImportWatcher"></button>
+            <button class="btn btn-outline" id="scanImportWatcherBtn" type="button">
+              <i class="fa-solid fa-rotate" aria-hidden="true"></i>
+              <span data-i18n="settings.scanImportWatcher"></span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Proxy pool -->
+        <div class="card settings-card" data-settings-group="integrations">
+          <div class="card-header"><span class="card-title" data-i18n="settings.proxyPool"></span></div>
+          <small data-i18n="settings.proxyPoolHint"></small>
+          <div class="form-group">
+            <label data-i18n="settings.proxyPoolBatch"></label>
+            <textarea id="proxyPoolBatch" class="font-mono" rows="4" placeholder="socks5://user:pass@host:port"></textarea>
+          </div>
+          <div class="flex gap-2 flex-wrap">
+            <button class="btn btn-primary" id="addProxyPoolBtn" type="button"><i class="fa-solid fa-plus"></i><span data-i18n="settings.proxyPoolAdd"></span></button>
+            <button class="btn btn-outline" id="checkProxyPoolBtn" type="button"><i class="fa-solid fa-heart-pulse"></i><span data-i18n="settings.proxyPoolCheck"></span></button>
+          </div>
+          <div id="proxyPoolEntries" class="settings-list"></div>
+          <div class="form-group">
+            <label data-i18n="settings.proxyPoolAssign"></label>
+            <select id="proxyPoolAssignId"></select>
+            <input type="text" id="proxyPoolAccountIds" placeholder="account-id,account-id" />
+            <label class="flex items-center gap-2">
+              <span class="switch"><input type="checkbox" id="proxyPoolRoundRobin" /><span class="slider"></span></span>
+              <span data-i18n="settings.proxyPoolRoundRobin"></span>
+            </label>
+          </div>
+          <button class="btn btn-secondary" id="assignProxyPoolBtn" type="button" data-i18n="settings.proxyPoolAssignButton"></button>
+          <small id="proxyPoolEncryptionStatus" aria-live="polite"></small>
+        </div>
+
         <!-- Count tokens provider settings -->
         <div class="card settings-card" data-settings-group="integrations">
           <div class="card-header"><span class="card-title" data-i18n="settings.countTokensProvider"></span></div>

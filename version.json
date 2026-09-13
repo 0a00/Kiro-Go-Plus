@@ -1,5 +1,5 @@
 {
-  "version": "1.2.76",
-  "changelog": "Translate tagged thinking into structured Responses reasoning events and harden production test verdicts.\n将标签式思考转换为结构化 Responses 推理事件，并完善生产测试判定。",
+  "version": "1.2.77",
+  "changelog": "Sync OpenAI stream/Responses compatibility, profileless Builder ID routing, secure credential imports, and fixed proxy pools.\n同步 OpenAI 流式与 Responses 兼容、无 Profile Builder ID 路由、安全凭据导入和固定代理池。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }

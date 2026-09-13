@@ -94,6 +94,36 @@ func TestAPIKeyAccountEndpointsSkipRuntimeAndPreferKiro(t *testing.T) {
 	}
 }
 
+func TestProfilelessBuilderIDAccountSkipsRuntimeAndPrefersCodeWhisperer(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	account := &config.Account{AuthMethod: "idc", Provider: "BuilderId", Region: "us-east-1"}
+	endpoints := getRequestEndpointsForAccount("auto", &KiroPayload{}, account)
+	if len(endpoints) == 0 || endpoints[0].Key != "codewhisperer" {
+		t.Fatalf("profileless Builder ID endpoint order = %+v", endpoints)
+	}
+	for _, endpoint := range endpoints {
+		if endpoint.RequiresProfileArn || endpoint.Key == "runtime" {
+			t.Fatalf("profileless Builder ID received profile-bound endpoint: %+v", endpoints)
+		}
+	}
+	if got := accountAutoEndpointHint(account); got != "codewhisperer" {
+		t.Fatalf("profileless Builder ID hint = %q, want codewhisperer", got)
+	}
+}
+
+func TestBuilderIDWithProfileStillPrefersRuntime(t *testing.T) {
+	account := &config.Account{
+		AuthMethod: "idc", Provider: "BuilderId", Region: "us-east-1",
+		ProfileArn: "arn:aws:codewhisperer:us-east-1:123456789012:profile/test",
+	}
+	endpoints := getRequestEndpointsForAccount("auto", &KiroPayload{}, account)
+	if len(endpoints) == 0 || endpoints[0].Key != "runtime" {
+		t.Fatalf("profile-backed Builder ID endpoint order = %+v", endpoints)
+	}
+}
+
 func TestAccountEndpointPreferenceOverridesGlobalFixedEndpoint(t *testing.T) {
 	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatalf("init config: %v", err)

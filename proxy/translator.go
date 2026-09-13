@@ -1416,22 +1416,29 @@ func KiroToClaudeResponse(content, thinkingContent string, includeEmptyThinkingB
 // ==================== OpenAI API 类型 ====================
 
 type OpenAIRequest struct {
-	Model               string          `json:"model"`
-	Messages            []OpenAIMessage `json:"messages"`
-	MaxTokens           int             `json:"max_tokens,omitempty"`
-	MaxCompletionTokens int             `json:"max_completion_tokens,omitempty"`
-	MaxOutputTokens     int             `json:"max_output_tokens,omitempty"`
-	ContextWindow       int             `json:"context_window,omitempty"`
-	MaxInputTokens      int             `json:"max_input_tokens,omitempty"`
-	Temperature         *float64        `json:"temperature,omitempty"`
-	TopP                *float64        `json:"top_p,omitempty"`
-	Stream              bool            `json:"stream,omitempty"`
-	Tools               []OpenAITool    `json:"tools,omitempty"`
-	ToolChoice          json.RawMessage `json:"tool_choice,omitempty"`
-	ReasoningEffort     string          `json:"reasoning_effort,omitempty"`
+	Model               string               `json:"model"`
+	Messages            []OpenAIMessage      `json:"messages"`
+	MaxTokens           int                  `json:"max_tokens,omitempty"`
+	MaxCompletionTokens int                  `json:"max_completion_tokens,omitempty"`
+	MaxOutputTokens     int                  `json:"max_output_tokens,omitempty"`
+	ContextWindow       int                  `json:"context_window,omitempty"`
+	MaxInputTokens      int                  `json:"max_input_tokens,omitempty"`
+	Temperature         *float64             `json:"temperature,omitempty"`
+	TopP                *float64             `json:"top_p,omitempty"`
+	Stream              bool                 `json:"stream,omitempty"`
+	StreamOptions       *OpenAIStreamOptions `json:"stream_options,omitempty"`
+	Tools               []OpenAITool         `json:"tools,omitempty"`
+	ToolChoice          json.RawMessage      `json:"tool_choice,omitempty"`
+	ReasoningEffort     string               `json:"reasoning_effort,omitempty"`
 
 	NativeEffort     string `json:"-"`
 	NativeEffortPath string `json:"-"`
+}
+
+// OpenAIStreamOptions keeps include_usage tri-state so omitted requests can
+// retain the gateway's historical usage frame for existing aggregators.
+type OpenAIStreamOptions struct {
+	IncludeUsage *bool `json:"include_usage,omitempty"`
 }
 
 type OpenAIMessage struct {

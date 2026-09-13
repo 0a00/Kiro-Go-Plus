@@ -16,6 +16,7 @@
 Kiro-Go Plus 保留原 Kiro-Go 的接口兼容性和部署方式，重点增强生产环境中的稳定性与可运维性：
 
 - 协议兼容：Anthropic `/v1/messages`、OpenAI `/v1/chat/completions`、OpenAI `/v1/responses`、`/v1/models`
+- OpenAI 流式兼容：显式 `stream_options.include_usage` 时返回标准独立 usage 结束帧；省略该字段保留历史聚合器兼容格式
 - 上游通道：Kiro Runtime 主通道，支持旧 Kiro / CodeWhisperer / Amazon Q 端点回退
 - 多账号调度：加权、优先级、均衡三种模式，账号级并发限制、粘性会话和失败切换
 - 刷新体系：Token 刷新去重、并发队列、超时、抖动、自适应批量刷新，适合几十到数百账号
@@ -26,7 +27,7 @@ Kiro-Go Plus 保留原 Kiro-Go 的接口兼容性和部署方式，重点增强�
 - 扩展能力：Claude Opus 5 与 Sonnet 5 元数据、GPT-5.6 别名、动态模型能力与 effort 发现、可选安全格式未列出模型透传、文本/思考/工具能力自检、多轮 Web Search、外部 Token 计数和 Responses 历史存储
 - 运维能力：账号库存诊断（延迟/错误 EWMA 与粘性命中率）、持久化请求元数据、有界长期 JSONL 日志归档、账号选择/排队与首 SSE/思考/文本/工具输出耗时、有效上游事件间隔、工具分片和组装等待、可选完整日志（脱敏请求/输出、重试和流时间线）、诊断事件、Webhook 告警、`/health`、`/ready`
 - Token 与 Agent 稳定性：支持 Kiro 原生 reasoning effort，可配置默认思考、最大输出和上下文预算；客户端显式值优先；Claude 工具流支持安全、自适应、平衡和实时四档策略
-- 出站网络：全局和账号级 HTTP / SOCKS5 代理
+- 出站网络：全局和账号级 HTTP / SOCKS5 代理；可选代理池健康检查与账号固定/轮询分配
 
 Prompt Cache 统计不会缓存模型响应正文或减少 Kiro 请求。`official_actual` 只透传上游真实字段，`matched_prefix` 保留旧版估算，`aggregator_target` 在有效预热命中后按总输入目标区间重分配字段且不改变总 Token。旧配置升级后保留 `matched_prefix`，接入 New API/Sub2API 时需在 Web 设置中选择 `aggregator_target`。持久化仅保存版本化提示词指纹和元数据，文件权限为 `0600`。
 
@@ -46,8 +47,11 @@ Token 预算优先级为：请求显式参数、模型专属配置、Web 全局�
 - Token 与模型刷新周期、刷新并发、批量大小、到期账号立即刷新和失败账号重试
 - Prompt Cache 创建比例、读取比例、TTL、容量和隔离方式
 - Web Search 开关与单请求轮数上限、Token 计数、Responses 存储、诊断、完整请求日志、长期日志归档和告警
+- 可选凭据目录自动导入：Web 开启后扫描配置旁的 `imports/`，成功和失败文件分别归档，默认关闭
 - Claude Agent 工具调用强制策略、思考/输出/上下文 Token 默认值、响应格式、长工具保护，以及安全/自适应/平衡/实时四档模式
 - API Key、配额、管理密码、监听地址和客户端指纹
+
+代理池凭据会随账号配置使用 `KIRO_MASTER_KEY` 加密；健康检查只验证代理链路，不会自动启用、解封或删除账号。目录自动导入也不会绕过当前凭据校验，文件必须先完成稳定写入才会处理。
 
 除监听地址等需要进程重启的项目外，设置保存后会立即生效。
 

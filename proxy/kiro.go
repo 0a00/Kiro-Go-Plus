@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"kiro-go/auth"
 	"kiro-go/config"
 	"kiro-go/internal/clientcache"
 	"kiro-go/internal/httpbody"
@@ -862,7 +863,18 @@ func accountPrefersRuntime(account *config.Account) bool {
 	return method == "idc" || provider == "builderid" || provider == "enterprise"
 }
 
+func isProfilelessBuilderIDAccount(account *config.Account) bool {
+	if account == nil || strings.TrimSpace(account.ProfileArn) != "" {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(account.Provider), "builderid") ||
+		auth.IsBuilderIDStartURL(account.StartUrl)
+}
+
 func accountAutoEndpointHint(account *config.Account) string {
+	if isProfilelessBuilderIDAccount(account) {
+		return "codewhisperer"
+	}
 	if accountPrefersRuntime(account) {
 		return "runtime"
 	}
@@ -874,7 +886,7 @@ func getRequestEndpointsForAccount(preferred string, payload *KiroPayload, accou
 		preferred = preferredEndpointForAccount(account)
 	}
 	endpoints := getRequestEndpoints(preferred, payload)
-	if isKiroAPIKeyAccount(account) && strings.TrimSpace(account.ProfileArn) == "" {
+	if (isKiroAPIKeyAccount(account) || isProfilelessBuilderIDAccount(account)) && strings.TrimSpace(account.ProfileArn) == "" {
 		compatible := make([]kiroEndpoint, 0, len(endpoints))
 		for _, endpoint := range endpoints {
 			if !endpoint.RequiresProfileArn {

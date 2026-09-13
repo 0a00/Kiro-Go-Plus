@@ -112,6 +112,7 @@ type Handler struct {
 	requestDetails       *requestDetailStore
 	logArchiveMu         sync.Mutex
 	logArchive           *logArchive
+	importWatcher        *importWatcherState
 	diagnosticLog        *diagnosticLog
 	alerts               *healthAlertManager
 	autoRefreshMu        sync.Mutex
@@ -398,6 +399,7 @@ func NewHandler() *Handler {
 		requestLog:       requestLog,
 		requestDetails:   requestDetails,
 		logArchive:       logArchive,
+		importWatcher:    newImportWatcherState(),
 		diagnosticLog:    newDiagnosticLog(config.GetDiagnosticConfig().MaxEntries),
 		alerts:           newHealthAlertManager(),
 		autoRefreshFail:  pool.GetPool().RefreshFailureCooldowns(),
@@ -415,6 +417,7 @@ func NewHandler() *Handler {
 	h.startBackgroundTask(h.backgroundStatsSaver)
 	h.startBackgroundTask(h.backgroundResponsesGC)
 	h.startBackgroundTask(h.backgroundPromptCacheGC)
+	h.startBackgroundTask(h.backgroundImportWatcher)
 	return h
 }
 
@@ -3523,17 +3526,18 @@ func (h *Handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 
 	namespaceConversationID(kiroPayload, requestConversationNamespace(r, apiKeyID))
 	if req.Stream {
-		h.handleOpenAIStream(w, kiroPayload, req.Model, thinking, estimatedInputTokens, cacheProfile, apiKeyID)
+		h.handleOpenAIStream(w, kiroPayload, req.Model, thinking, estimatedInputTokens, cacheProfile, apiKeyID, req.StreamOptions)
 	} else {
 		h.handleOpenAINonStream(w, kiroPayload, req.Model, thinking, estimatedInputTokens, cacheProfile, apiKeyID)
 	}
 }
 
 // handleOpenAIStream OpenAI 流式响应
-func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int, cacheProfile *promptCacheProfile, apiKeyID string) {
+func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int, cacheProfile *promptCacheProfile, apiKeyID string, streamOptions *OpenAIStreamOptions) {
 	startedAt := time.Now()
 	firstContent := payload.beginRequestTiming(startedAt)
 	responseModel := exposedRequestModel(payload, model)
+	streamUsageMode := resolveOpenAIStreamUsageMode(streamOptions)
 	prepareSSEHeaders(w)
 
 	flusher, ok := w.(http.Flusher)
@@ -3736,6 +3740,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 					}},
 				}
 			}
+			applyOpenAIStreamUsageNull(chunk, streamUsageMode)
 			data, _ := json.Marshal(chunk)
 			writeOpenAIData(data, true)
 		}
@@ -3897,6 +3902,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 						"finish_reason": nil,
 					}},
 				}
+				applyOpenAIStreamUsageNull(chunk, streamUsageMode)
 				toolCallIndex++
 				data, _ := json.Marshal(chunk)
 				writeOpenAIData(data, true)
@@ -4039,20 +4045,11 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 
 		finishReason := mapOpenAIFinishReason(upstreamStopReason, len(toolCalls))
 
-		chunk := map[string]interface{}{
-			"id":      chatID,
-			"object":  "chat.completion.chunk",
-			"created": time.Now().Unix(),
-			"model":   responseModel,
-			"choices": []map[string]interface{}{{
-				"index":         0,
-				"delta":         map[string]interface{}{},
-				"finish_reason": finishReason,
-			}},
-			"usage": buildOpenAIUsageMap(inputTokens, outputTokens, thinkingTokens, cacheUsage),
+		usage := buildOpenAIUsageMap(inputTokens, outputTokens, thinkingTokens, cacheUsage)
+		for _, chunk := range buildOpenAIStreamTerminalChunks(chatID, responseModel, finishReason, usage, streamUsageMode) {
+			data, _ := json.Marshal(chunk)
+			writeOpenAIData(data, false)
 		}
-		data, _ := json.Marshal(chunk)
-		writeOpenAIData(data, false)
 		writeOpenAIDone()
 		entry.DurationMs = requestDurationMs(startedAt)
 		h.recordRequestLogForPayload(payload, entry)
@@ -4538,6 +4535,12 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 		h.apiUpdateLogArchive(w, r)
 	case path == "/log-archive" && r.Method == "DELETE":
 		h.apiClearLogArchive(w, r)
+	case path == "/import-watcher" && r.Method == "GET":
+		h.apiGetImportWatcher(w, r)
+	case path == "/import-watcher" && r.Method == "POST":
+		h.apiUpdateImportWatcher(w, r)
+	case path == "/import-watcher/scan" && r.Method == "POST":
+		h.apiScanImportWatcher(w, r)
 	case path == "/request-details" && r.Method == "GET":
 		h.apiGetRequestDetail(w, r, false)
 	case path == "/request-details/download" && r.Method == "GET":
@@ -4578,6 +4581,12 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 		h.apiGetProxy(w, r)
 	case path == "/proxy" && r.Method == "POST":
 		h.apiUpdateProxy(w, r)
+	case path == "/proxy-pool" && r.Method == "GET":
+		h.apiGetProxyPool(w, r)
+	case path == "/proxy-pool" && r.Method == "POST":
+		h.apiUpdateProxyPool(w, r)
+	case strings.HasPrefix(path, "/proxy-pool/") && r.Method == "DELETE":
+		h.apiDeleteProxyPoolEntry(w, r, strings.TrimPrefix(path, "/proxy-pool/"))
 	case path == "/ipv6" && r.Method == "GET":
 		h.apiGetOutboundIPv6(w, r)
 	case path == "/ipv6" && r.Method == "POST":

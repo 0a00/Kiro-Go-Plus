@@ -68,6 +68,9 @@ func configSecretFields(value *Config) []configSecretField {
 	for i := range value.ApiKeys {
 		fields = append(fields, configSecretField{name: "apiKeys.key", value: &value.ApiKeys[i].Key})
 	}
+	for i := range value.ProxyPool {
+		fields = append(fields, configSecretField{name: "proxyPool.proxyURL", value: &value.ProxyPool[i].ProxyURL})
+	}
 	for i := range value.Accounts {
 		account := &value.Accounts[i]
 		fields = append(fields,
@@ -117,6 +120,7 @@ func configForPersistence(value *Config) (*Config, error) {
 	snapshot := *value
 	snapshot.Accounts = append([]Account(nil), value.Accounts...)
 	snapshot.ApiKeys = append([]ApiKeyEntry(nil), value.ApiKeys...)
+	snapshot.ProxyPool = append([]ProxyPoolEntry(nil), value.ProxyPool...)
 
 	key, err := masterKeyFromEnvironment()
 	if err != nil {

@@ -2022,6 +2022,8 @@
       loadDiagnosticsConfig(),
       loadRequestLogConfig(),
       loadLogArchiveConfig(),
+      loadImportWatcherConfig(),
+      loadProxyPoolConfig(),
       loadCountTokensProviderConfig(),
       loadWebSearchConfig(),
       loadPromptFilter(),
@@ -3027,6 +3029,144 @@
     $('logArchiveRetentionDays').value = Number.isFinite(Number(cfg.retentionDays)) ? cfg.retentionDays : 90;
     $('logArchiveMaxMiB').value = Math.round((Number(cfg.maxBytes) || 4294967296) / 1048576);
     renderLogArchiveStatus(d);
+  }
+
+  function renderImportWatcherStatus(status) {
+    const value = status || {};
+    const text = t(
+      'settings.importWatcherStatus',
+      value.pending || 0,
+      value.lastImported || 0,
+      value.lastFailed || 0,
+      value.lastSkipped || 0
+    );
+    $('importWatcherStatus').textContent = value.lastError ? text + ' | ' + value.lastError : text;
+  }
+
+  async function loadImportWatcherConfig() {
+    const res = await api('/import-watcher');
+    const d = await res.json();
+    const status = d.status || d;
+    $('importWatcherEnabled').checked = status.enabled === true;
+    $('importWatcherDirectory').value = status.directory || '';
+    $('importWatcherInterval').value = Number(status.intervalSeconds) || 15;
+    renderImportWatcherStatus(status);
+  }
+
+  async function saveImportWatcherConfig() {
+    const intervalSeconds = Math.round(Number($('importWatcherInterval').value) || 0);
+    if (intervalSeconds < 5 || intervalSeconds > 3600) {
+      toast(t('settings.importWatcherInvalid'), 'warning');
+      return;
+    }
+    const res = await api('/import-watcher', {
+      method: 'POST',
+      body: JSON.stringify({ enabled: $('importWatcherEnabled').checked, intervalSeconds })
+    });
+    const d = await res.json().catch(() => ({}));
+    if (!res.ok || d.success === false) {
+      toast(t('common.saveFailed') + ': ' + (d.error || t('common.unknownError')), 'error');
+      return;
+    }
+    toast(t('settings.importWatcherSaved'), 'success');
+    renderImportWatcherStatus(d.status || {});
+  }
+
+  async function scanImportWatcher() {
+    const res = await api('/import-watcher/scan', { method: 'POST' });
+    const d = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      toast(d.error || t('common.unknownError'), 'warning');
+      return;
+    }
+    toast(t('settings.importWatcherScanStarted'), 'success');
+    setTimeout(loadImportWatcherConfig, 500);
+  }
+
+  let proxyPoolEntriesCache = [];
+
+  function renderProxyPoolEntries(entries) {
+    proxyPoolEntriesCache = Array.isArray(entries) ? entries : [];
+    const select = $('proxyPoolAssignId');
+    select.innerHTML = '<option value="">' + escapeHtml(t('settings.proxyPoolRoundRobinAll')) + '</option>' +
+      proxyPoolEntriesCache.map(entry => '<option value="' + escapeAttr(entry.id) + '">' + escapeHtml(entry.label || entry.proxyURL || entry.id) + '</option>').join('');
+    const container = $('proxyPoolEntries');
+    if (!proxyPoolEntriesCache.length) {
+      container.innerHTML = '<small>' + escapeHtml(t('settings.proxyPoolEmpty')) + '</small>';
+      return;
+    }
+    container.innerHTML = proxyPoolEntriesCache.map(entry => {
+      const state = entry.health || 'unknown';
+      const label = entry.label || entry.proxyURL || entry.id;
+      return '<div class="settings-list-row"><div><strong>' + escapeHtml(label) + '</strong><small>' +
+        escapeHtml(state) + (entry.latencyMs ? ' · ' + entry.latencyMs + 'ms' : '') +
+        (entry.proxyPasswordSet ? ' · ' + escapeHtml(t('settings.proxyPoolPasswordSet')) : '') +
+        '</small></div><button class="btn btn-outline btn-sm" type="button" data-proxy-pool-delete="' + escapeAttr(entry.id) + '">' +
+        escapeHtml(t('common.remove')) + '</button></div>';
+    }).join('');
+  }
+
+  async function loadProxyPoolConfig() {
+    const res = await api('/proxy-pool');
+    const data = await res.json();
+    renderProxyPoolEntries(data.entries || []);
+    $('proxyPoolEncryptionStatus').textContent = data.credentialEncryption
+      ? t('settings.proxyPoolEncrypted')
+      : t('settings.proxyPoolPlaintextWarning');
+  }
+
+  async function addProxyPoolEntries() {
+    const values = $('proxyPoolBatch').value.split(/\r?\n/).map(value => value.trim()).filter(Boolean);
+    if (!values.length) return;
+    const res = await api('/proxy-pool', { method: 'POST', body: JSON.stringify({ action: 'add', proxies: values }) });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      toast(data.error || t('common.unknownError'), 'error');
+      return;
+    }
+    $('proxyPoolBatch').value = '';
+    toast(t('settings.proxyPoolAdded', data.added || 0), data.errors && data.errors.length ? 'warning' : 'success');
+    loadProxyPoolConfig();
+  }
+
+  async function checkProxyPool() {
+    const res = await api('/proxy-pool', { method: 'POST', body: JSON.stringify({ action: 'check', checkAll: true }) });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      toast(data.error || t('common.unknownError'), 'error');
+      return;
+    }
+    toast(t('settings.proxyPoolChecked'), 'success');
+    loadProxyPoolConfig();
+  }
+
+  async function assignProxyPool() {
+    const ids = $('proxyPoolAccountIds').value.split(',').map(value => value.trim()).filter(Boolean);
+    const res = await api('/proxy-pool', {
+      method: 'POST',
+      body: JSON.stringify({
+        action: 'assign',
+        proxyId: $('proxyPoolAssignId').value,
+        accountIds: ids,
+        roundRobin: $('proxyPoolRoundRobin').checked
+      })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      toast(data.error || t('common.unknownError'), 'error');
+      return;
+    }
+    toast(t('settings.proxyPoolAssigned', data.assigned || 0), 'success');
+  }
+
+  async function deleteProxyPoolEntry(id) {
+    const res = await api('/proxy-pool/' + encodeURIComponent(id), { method: 'DELETE' });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      toast(data.error || t('common.unknownError'), 'error');
+      return;
+    }
+    loadProxyPoolConfig();
   }
 
   async function saveLogArchiveConfig() {
@@ -5172,6 +5312,15 @@
 	$('saveLogArchiveBtn').addEventListener('click', saveLogArchiveConfig);
 	$('clearLogArchiveBtn').addEventListener('click', clearLogArchive);
 	$('clearRequestDetailsBtn').addEventListener('click', clearRequestDetails);
+    $('saveImportWatcherBtn').addEventListener('click', saveImportWatcherConfig);
+    $('scanImportWatcherBtn').addEventListener('click', scanImportWatcher);
+    $('addProxyPoolBtn').addEventListener('click', addProxyPoolEntries);
+    $('checkProxyPoolBtn').addEventListener('click', checkProxyPool);
+    $('assignProxyPoolBtn').addEventListener('click', assignProxyPool);
+    $('proxyPoolEntries').addEventListener('click', e => {
+      const button = e.target.closest('[data-proxy-pool-delete]');
+      if (button) deleteProxyPoolEntry(button.dataset.proxyPoolDelete);
+    });
     $('saveCountTokensProviderBtn').addEventListener('click', saveCountTokensProviderConfig);
     $('saveWebSearchBtn').addEventListener('click', saveWebSearchConfig);
     $('saveThinkingBtn').addEventListener('click', saveThinkingConfig);

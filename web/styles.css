@@ -4486,6 +4486,27 @@ select {
   padding: 1.25rem 1.5rem;
 }
 
+.settings-list {
+  display: grid;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+
+.settings-list-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+}
+
+.settings-list-row small {
+  display: block;
+  color: var(--text-muted);
+}
+
 .settings-card > .form-group,
 .settings-card > .form-grid-2,
 .settings-card > .input-row,

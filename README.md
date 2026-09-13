@@ -16,6 +16,7 @@ English | [中文](README_CN.md)
 Kiro-Go Plus preserves Kiro-Go's API and deployment compatibility while adding production reliability and operations features:
 
 - API compatibility: Anthropic `/v1/messages`, OpenAI `/v1/chat/completions`, OpenAI `/v1/responses`, and `/v1/models`
+- OpenAI streaming compatibility: explicit `stream_options.include_usage` requests receive the standard separate usage terminal frame, while omitted options retain the legacy aggregator-compatible format
 - Upstream routing: Kiro Runtime as the primary path with legacy Kiro / CodeWhisperer / Amazon Q fallback
 - Multi-account scheduling: weighted, priority, and balanced modes; per-account concurrency, sticky routing, and failover
 - Refresh coordination: deduplication, bounded queues, timeouts, jitter, and adaptive batches for tens or hundreds of accounts
@@ -26,7 +27,7 @@ Kiro-Go Plus preserves Kiro-Go's API and deployment compatibility while adding p
 - Prompt Cache accounting: official upstream usage, legacy matched-prefix efficiency, or a total-input target range compatible with New API/Sub2API; includes 5m/1h TTLs, sharded LRU, API-key isolation, persistence, and diagnostics
 - Extensions: Claude Opus 5 and Sonnet 5 metadata, GPT-5.6 aliases, dynamic model capability/effort discovery, optional safe unlisted-model pass-through, text/thinking/tool self-tests, multi-round Web Search, external token counting, and Responses history
 - Operations: account inventory diagnostics with latency/error EWMAs and affinity rates, persisted request metadata, bounded long-term JSONL log archives, account selection/queue and first SSE/thinking/text/tool timing, effective upstream event gaps, tool-fragment/assembly timing, optional complete logs with sanitized request/output, retries and stream timelines, diagnostic events, webhook alerts, `/health`, and `/ready`
-- Networking: global and per-account HTTP / SOCKS5 proxies
+- Networking: global and per-account HTTP / SOCKS5 proxies, with optional proxy-pool health checks and fixed/round-robin account assignment
 
 Prompt Cache accounting does not cache model response bodies or reduce Kiro requests. `official_actual` forwards only upstream cache usage, `matched_prefix` preserves the legacy estimate, and `aggregator_target` redistributes a warm hit into the configured total-input range without changing total tokens. Existing configurations migrate to `matched_prefix`; select `aggregator_target` in Web settings for New API/Sub2API accounting. Persistence stores only versioned prompt fingerprints and metadata with `0600` permissions.
 
@@ -39,6 +40,7 @@ Credential import narrowly repairs exports labeled as generic `social` when the 
 Open `/admin` to manage:
 
 - Account import, routability/inventory diagnostics, enable/disable state, weights, priority, per-account concurrency, and proxies
+- Optional credential drop-folder import: enable it in Web settings to scan `imports/` beside the active config; files are archived as processed or failed and the feature is off by default
 - Large credential JSON imports support up to 20,000 accounts and 64 MiB per selection; the Web panel automatically submits bounded sequential batches, displays read/parse/import progress, saves completed batches immediately, and can cancel an in-flight import
 - Kiro API Key batch import: paste one `ksk_` key per line; common region/proxy settings are applied, duplicates are reported, and usable entries are persisted even when other lines fail
 - Runtime/legacy endpoint preference and automatic fallback
@@ -48,6 +50,8 @@ Open `/admin` to manage:
 - Web Search enablement and per-request round limit, token counting, Responses storage, diagnostics, complete request logging, long-term log archives, and alerts
 - Claude Agent tool enforcement, thinking/output/context token defaults, response formats, long-tool protection, and safe/adaptive/balanced/live stream modes
 - API keys, quotas, admin password, listener settings, and client fingerprints
+
+Proxy-pool credentials are encrypted with `KIRO_MASTER_KEY` when configured. Health checks only validate the proxy path; they never enable, unban, or delete accounts. The import watcher waits for a stable file before processing and still runs the normal credential validation and refresh path.
 
 Settings apply immediately unless the panel explicitly reports that a process restart is required.
 

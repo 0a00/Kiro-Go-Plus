@@ -50,6 +50,40 @@ func TestResponsesCodexAdditionalToolsAndCompatibilityItems(t *testing.T) {
 	}
 }
 
+func TestResponsesOfficialToolHistoryItemsRemainPaired(t *testing.T) {
+	raw := json.RawMessage(`[
+		{"type":"message","role":"user","content":"continue"},
+		{"type":"web_search_call","id":"ws_1","action":{"type":"search","queries":["kiro"]}},
+		{"type":"computer_call","call_id":"computer_1","action":{"type":"click","x":1,"y":2}},
+		{"type":"computer_call_output","call_id":"computer_1","output":{"type":"computer_screenshot","image_url":"data:image/png;base64,AA=="}},
+		{"type":"local_shell_call","call_id":"shell_1","action":{"type":"exec","command":["pwd"]}},
+		{"type":"local_shell_call_output","call_id":"shell_1","output":"/workspace"},
+		{"type":"mcp_call","id":"mcp_1","name":"lookup","arguments":"{}"},
+		{"type":"mcp_approval_response","approval_request_id":"mcp_1","approve":true},
+		{"type":"compaction","summary":"Earlier tool history was compacted."}
+	]`)
+
+	result, err := parseResponsesInputWithTools(raw)
+	if err != nil {
+		t.Fatalf("official Responses history was rejected: %v", err)
+	}
+	if len(result.Messages) != 8 {
+		t.Fatalf("unexpected normalized message count: %d (%+v)", len(result.Messages), result.Messages)
+	}
+	wantRoles := []string{"user", "assistant", "tool", "assistant", "tool", "assistant", "tool", "system"}
+	for i, want := range wantRoles {
+		if result.Messages[i].Role != want {
+			t.Fatalf("message %d role = %q, want %q: %+v", i, result.Messages[i].Role, want, result.Messages)
+		}
+	}
+	if result.Messages[1].ToolCalls[0].Function.Name != "web_search" {
+		t.Fatalf("web search history name = %q", result.Messages[1].ToolCalls[0].Function.Name)
+	}
+	if result.Messages[2].ToolCallID != "computer_1" || result.Messages[4].ToolCallID != "shell_1" || result.Messages[6].ToolCallID != "mcp_1" {
+		t.Fatalf("tool result IDs were not preserved: %+v", result.Messages)
+	}
+}
+
 func TestResponsesCustomToolCallHistory(t *testing.T) {
 	raw := json.RawMessage(`[
 		{"type":"message","role":"user","content":"run it"},
