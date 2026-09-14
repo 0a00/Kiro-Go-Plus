@@ -49,6 +49,7 @@ func TestConfigureClaudeToolStreamingModes(t *testing.T) {
 		{name: "safe inferred", mode: config.ToolStreamModeSafe, policy: toolUsePolicyInferred, requireActionable: true, deferText: true, streamThinking: true},
 		{name: "adaptive high risk", mode: config.ToolStreamModeAdaptive, policy: toolUsePolicyInferred, requireActionable: true, deferText: true, streamThinking: true, toolName: "Write"},
 		{name: "adaptive low risk", mode: config.ToolStreamModeAdaptive, policy: toolUsePolicyInferred, streamToolDeltas: true, toolName: "WebSearch"},
+		{name: "safe Claude Code", mode: config.ToolStreamModeSafe, policy: toolUsePolicyInferred, streamToolDeltas: true, requireActionable: true, deferText: true, streamThinking: true, claudeCode: true},
 		{name: "balanced inferred", mode: config.ToolStreamModeBalanced, policy: toolUsePolicyInferred, requireActionable: true, deferText: true, streamThinking: true},
 		{name: "balanced Claude Code", mode: config.ToolStreamModeBalanced, policy: toolUsePolicyInferred, streamToolDeltas: true, requireActionable: true, deferText: true, streamThinking: true, claudeCode: true},
 		{name: "live inferred", mode: config.ToolStreamModeLive, policy: toolUsePolicyInferred, streamToolDeltas: true},
@@ -104,6 +105,44 @@ func TestClaudeCodeUserAgentVariants(t *testing.T) {
 				t.Fatalf("isClaudeCodeUserAgent(%q) = %v, want %v", tc.ua, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestClaudeCodeToolArgumentIdleTimeoutUsesAssemblyGrace(t *testing.T) {
+	retry := config.RetryConfig{
+		ToolAssemblyTimeoutSeconds:     600,
+		ToolArgumentIdleTimeoutSeconds: 180,
+		StreamIdleTimeoutSeconds:       300,
+	}
+
+	if got := toolArgumentIdleTimeoutForRequest(retry, &KiroPayload{clientUserAgent: "claude-code/2.1.263"}); got != 600*time.Second {
+		t.Fatalf("Claude Code timeout = %s, want 10m", got)
+	}
+	if got := streamIdleTimeoutForRequest(retry, &KiroPayload{
+		clientUserAgent:        "claude-code/2.1.263",
+		deferTextUntilComplete: true,
+	}); got != 600*time.Second {
+		t.Fatalf("Claude Code stream idle timeout = %s, want 10m", got)
+	}
+	if got := streamIdleTimeoutForRequest(retry, &KiroPayload{
+		clientUserAgent:         "claude-code/2.1.263",
+		requireActionableOutput: true,
+	}); got != 600*time.Second {
+		t.Fatalf("Claude Code non-stream tool timeout = %s, want 10m", got)
+	}
+	if got := toolArgumentIdleTimeoutForRequest(retry, &KiroPayload{clientUserAgent: "anthropic-sdk-go/1.0"}); got != 180*time.Second {
+		t.Fatalf("generic client timeout = %s, want 3m", got)
+	}
+	if got := streamIdleTimeoutForRequest(retry, &KiroPayload{
+		clientUserAgent:        "anthropic-sdk-go/1.0",
+		deferTextUntilComplete: true,
+	}); got != 300*time.Second {
+		t.Fatalf("generic stream idle timeout = %s, want 5m", got)
+	}
+
+	retry.ToolArgumentIdleTimeoutSeconds = 900
+	if got := toolArgumentIdleTimeoutForRequest(retry, &KiroPayload{clientUserAgent: "claude-code/2.1.263"}); got != 900*time.Second {
+		t.Fatalf("explicit longer Claude Code timeout = %s, want 15m", got)
 	}
 }
 

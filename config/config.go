@@ -261,6 +261,8 @@ type AutoRefreshConfig struct {
 
 // RetryConfig bounds retries across accounts and upstream endpoint fallbacks.
 type RetryConfig struct {
+	// MaxAccountAttempts=0 enables unlimited polling mode. The request handler
+	// still applies an internal safety cap for a single large-pool request.
 	MaxAccountAttempts             int  `json:"maxAccountAttempts"`
 	AccountSelectionTimeoutSeconds int  `json:"accountSelectionTimeoutSeconds"`
 	MaxUpstreamAttempts            int  `json:"maxUpstreamAttempts"`

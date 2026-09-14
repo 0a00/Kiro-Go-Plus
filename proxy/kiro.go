@@ -301,7 +301,10 @@ type KiroPayload struct {
 	toolInputPolicies map[string]toolInputPolicy
 
 	requestContext context.Context
-	attemptBudget  *upstreamAttemptBudget
+	// clientUserAgent is request-local metadata used to apply safe streaming
+	// accommodations for Claude Code without changing behavior for other clients.
+	clientUserAgent string
+	attemptBudget   *upstreamAttemptBudget
 	// allowCoolingEndpointRetry is enabled only while replaying a soft stream
 	// integrity failure on the same account. It is internal request state and is
 	// intentionally not serialized to the upstream payload.
@@ -902,6 +905,41 @@ func getRequestEndpointsForAccount(preferred string, payload *KiroPayload, accou
 	return endpoints
 }
 
+// toolArgumentIdleTimeoutForRequest keeps Claude Code long tool turns from
+// inheriting a shorter legacy argument-only timeout when the operator has
+// configured a larger assembly window. The upstream attempt budget remains the
+// hard upper bound, so this only changes the idle grace period.
+func toolArgumentIdleTimeoutForRequest(retry config.RetryConfig, payload *KiroPayload) time.Duration {
+	assemblyTimeout := time.Duration(retry.ToolAssemblyTimeoutSeconds) * time.Second
+	argumentTimeout := time.Duration(retry.ToolArgumentIdleTimeoutSeconds) * time.Second
+	if argumentTimeout <= 0 {
+		argumentTimeout = assemblyTimeout
+	}
+	if payload != nil && isClaudeCodeUserAgent(payload.clientUserAgent) {
+		// Claude Code needs the larger configured assembly window as a grace
+		// period for long workspace tools; the upstream attempt budget still
+		// bounds the total request duration.
+		if assemblyTimeout > argumentTimeout {
+			argumentTimeout = assemblyTimeout
+		}
+	} else if assemblyTimeout > 0 && assemblyTimeout < argumentTimeout {
+		// Preserve the stricter legacy behavior for generic clients.
+		argumentTimeout = assemblyTimeout
+	}
+	return argumentTimeout
+}
+
+func streamIdleTimeoutForRequest(retry config.RetryConfig, payload *KiroPayload) time.Duration {
+	idleTimeout := time.Duration(retry.StreamIdleTimeoutSeconds) * time.Second
+	if payload != nil && isClaudeCodeUserAgent(payload.clientUserAgent) &&
+		(payload.deferTextUntilComplete || payload.requireToolUse || payload.requireActionableOutput) {
+		if toolTimeout := toolArgumentIdleTimeoutForRequest(retry, payload); toolTimeout > idleTimeout {
+			idleTimeout = toolTimeout
+		}
+	}
+	return idleTimeout
+}
+
 // callKiroAPISingleModel calls the Kiro streaming API for one model, trying
 // each configured endpoint with automatic fallback. Model degradation is
 // handled by the public CallKiroAPI wrapper in model_fallback.go.
@@ -1209,14 +1247,7 @@ endpointLoop:
 			// strict and still require a structured tool call.
 			meaningfulGate.setAllowCompletedTextFallback(payload != nil && payload.toolUsePolicy == toolUsePolicyInferred)
 			wrappedCallback.streamDiagnostics = attemptDiagnostics
-			toolAssemblyTimeout := time.Duration(retryConfig.ToolAssemblyTimeoutSeconds) * time.Second
-			toolArgumentIdleTimeout := time.Duration(retryConfig.ToolArgumentIdleTimeoutSeconds) * time.Second
-			if toolArgumentIdleTimeout <= 0 {
-				toolArgumentIdleTimeout = toolAssemblyTimeout
-			}
-			if toolAssemblyTimeout > 0 && (toolArgumentIdleTimeout <= 0 || toolAssemblyTimeout < toolArgumentIdleTimeout) {
-				toolArgumentIdleTimeout = toolAssemblyTimeout
-			}
+			toolArgumentIdleTimeout := toolArgumentIdleTimeoutForRequest(retryConfig, payload)
 			wrappedCallback, toolMonitor := wrapToolAssemblyMonitor(wrappedCallback, toolArgumentIdleTimeout, func(toolAssemblySnapshot) {
 				cancelRequest()
 			})
@@ -1343,7 +1374,7 @@ endpointLoop:
 			}
 
 			var streamIdleTimedOut atomic.Bool
-			idleTimeout := time.Duration(retryConfig.StreamIdleTimeoutSeconds) * time.Second
+			idleTimeout := streamIdleTimeoutForRequest(retryConfig, payload)
 			err = func() error {
 				defer stopAndRecordToolAssembly(payload, toolMonitor)
 				if firstTokenTimer != nil {

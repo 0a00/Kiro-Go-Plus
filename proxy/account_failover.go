@@ -15,32 +15,40 @@ const (
 	accountRetryInitialDelay = 500 * time.Millisecond
 	accountRetryMinimumDelay = 250 * time.Millisecond
 	accountRetryMaximumDelay = 5 * time.Second
+	// Unlimited account polling remains time-bounded by selectionTimeout, but a
+	// single request must not scan a large pool thousands of times before that
+	// deadline. The handler derives a pool-sized cap within these bounds.
+	accountUnlimitedAttemptMinimum = 128
+	accountUnlimitedAttemptMaximum = 512
 )
 
 var errAccountSelectionTimeout = errors.New("account selection timed out")
+var errAccountAttemptLimit = errors.New("account selection attempt limit reached")
 
 // accountAttemptController keeps finite retry behavior unchanged while making
 // unlimited polling bounded and cancellation-aware. Selection time is
 // accumulated only while looking for an account, not during upstream calls.
 type accountAttemptController struct {
-	requestCtx         context.Context
-	shutdownCtx        context.Context
-	maxAttempts        int
-	attempts           int
-	rounds             int
-	excluded           map[string]bool
-	wait               func(time.Duration) bool
-	selectionDeadline  time.Time
-	selectionTimeout   time.Duration
-	selectionStarted   time.Time
-	selectionElapsed   time.Duration
-	selectionActive    bool
-	selectionTimedOut  bool
-	queueWaitElapsed   time.Duration
-	queueWaitCount     int
-	queueWaitReported  time.Duration
-	queueCountReported int
-	waitQueueFull      bool
+	requestCtx          context.Context
+	shutdownCtx         context.Context
+	maxAttempts         int
+	attempts            int
+	rounds              int
+	excluded            map[string]bool
+	wait                func(time.Duration) bool
+	selectionDeadline   time.Time
+	selectionTimeout    time.Duration
+	selectionStarted    time.Time
+	selectionElapsed    time.Duration
+	selectionActive     bool
+	selectionTimedOut   bool
+	unlimitedAttemptCap int
+	attemptCapReached   bool
+	queueWaitElapsed    time.Duration
+	queueWaitCount      int
+	queueWaitReported   time.Duration
+	queueCountReported  int
+	waitQueueFull       bool
 }
 
 func newAccountAttemptController(requestCtx, shutdownCtx context.Context, maxAttempts int) *accountAttemptController {
@@ -65,6 +73,16 @@ func (h *Handler) newAccountAttemptController(requestCtx context.Context) *accou
 	retry := config.GetRetryConfig()
 	controller := newAccountAttemptController(requestCtx, shutdownCtx, retry.MaxAccountAttempts)
 	controller.setSelectionTimeout(time.Duration(retry.AccountSelectionTimeoutSeconds) * time.Second)
+	if retry.MaxAccountAttempts == 0 && h != nil && h.pool != nil {
+		cap := h.pool.Count() * 2
+		if cap < accountUnlimitedAttemptMinimum {
+			cap = accountUnlimitedAttemptMinimum
+		}
+		if cap > accountUnlimitedAttemptMaximum {
+			cap = accountUnlimitedAttemptMaximum
+		}
+		controller.unlimitedAttemptCap = cap
+	}
 	// Unlimited account rotation must wait on pool state changes rather than
 	// waking every request on a fixed timer. The controller still owns the
 	// overall selection deadline; the pool only supplies an efficient wake-up
@@ -146,6 +164,10 @@ func (c *accountAttemptController) next() bool {
 		return false
 	}
 	if c.maxAttempts > 0 && c.attempts >= c.maxAttempts {
+		return false
+	}
+	if c.maxAttempts == 0 && c.unlimitedAttemptCap > 0 && c.attempts >= c.unlimitedAttemptCap {
+		c.attemptCapReached = true
 		return false
 	}
 	c.attempts++
@@ -235,6 +257,9 @@ func (c *accountAttemptController) stopErr() error {
 	if c.selectionTimedOut {
 		return fmt.Errorf("%w after %s", errAccountSelectionTimeout, c.selectionTimeout)
 	}
+	if c.attemptCapReached {
+		return fmt.Errorf("%w after %d attempts", errAccountAttemptLimit, c.attempts)
+	}
 	if !c.selectionActive || c.selectionDeadline.IsZero() {
 		return nil
 	}
@@ -257,7 +282,7 @@ func (c *accountAttemptController) selectionTimeRemaining() time.Duration {
 }
 
 func isAccountSelectionTimeout(err error) bool {
-	return errors.Is(err, errAccountSelectionTimeout)
+	return errors.Is(err, errAccountSelectionTimeout) || errors.Is(err, errAccountAttemptLimit)
 }
 
 func upstreamBusyRetryAfter(err error) time.Duration {

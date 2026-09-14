@@ -131,6 +131,25 @@ func TestAccountAttemptControllerUnlimitedModeEventuallyContinues(t *testing.T) 
 	}
 }
 
+func TestAccountAttemptControllerUnlimitedModeStopsAtSafetyCap(t *testing.T) {
+	controller := newAccountAttemptController(context.Background(), nil, 0)
+	controller.unlimitedAttemptCap = 3
+	for i := 0; i < 3; i++ {
+		if !controller.next() {
+			t.Fatalf("attempt %d was rejected before the safety cap", i+1)
+		}
+	}
+	if controller.next() {
+		t.Fatal("unlimited controller exceeded its safety cap")
+	}
+	if !errors.Is(controller.stopErr(), errAccountAttemptLimit) {
+		t.Fatalf("stop error = %v, want account attempt limit", controller.stopErr())
+	}
+	if !isAccountSelectionTimeout(controller.stopErr()) {
+		t.Fatal("safety cap should use the account-selection timeout handling path")
+	}
+}
+
 func TestAccountAttemptControllerExposesFullWaitQueueAsBusy(t *testing.T) {
 	controller := newAccountAttemptController(context.Background(), nil, 0)
 	controller.wait = func(time.Duration) bool {

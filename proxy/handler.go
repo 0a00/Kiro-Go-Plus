@@ -2123,6 +2123,7 @@ func configureClaudeToolStreaming(payload *KiroPayload, req *ClaudeRequest, thin
 	if payload == nil || req == nil {
 		return
 	}
+	payload.clientUserAgent = req.ClientUserAgent
 	safeMode := thinkingCfg.ToolStreamMode == config.ToolStreamModeSafe
 	liveMode := thinkingCfg.ToolStreamMode == config.ToolStreamModeLive
 	adaptiveMode := thinkingCfg.ToolStreamMode == config.ToolStreamModeAdaptive
@@ -2131,8 +2132,14 @@ func configureClaudeToolStreaming(payload *KiroPayload, req *ClaudeRequest, thin
 	useSafeBehavior := safeMode || ((adaptiveMode || balancedMode) && highRiskTools)
 	useLiveBehavior := liveMode || (adaptiveMode && !highRiskTools)
 	strictToolUse := requiresStrictClaudeToolUse(req)
+	claudeCodeClient := isClaudeCodeUserAgent(req.ClientUserAgent)
 	guardToolStream := len(req.Tools) > 0 && (useSafeBehavior || strictToolUse)
 	guardActionableStream := req.Stream && guardToolStream
+	// Claude Code can safely consume incremental tool argument frames while the
+	// gate still withholds unvalidated text and incomplete tool completion. This
+	// keeps the client visibly active even when a large workspace tool takes a
+	// long time to finish assembling.
+	claudeCodeToolStreaming := claudeCodeClient && !strictToolUse && (safeMode || adaptiveMode || balancedMode)
 
 	payload.requireActionableOutput = (len(req.Tools) > 0 || thinking) && (!req.Stream || guardActionableStream)
 	payload.toolUsePolicy = req.ToolUsePolicy
@@ -2140,11 +2147,10 @@ func configureClaudeToolStreaming(payload *KiroPayload, req *ClaudeRequest, thin
 	// completion. Other tool turns still commit validated text promptly.
 	payload.deferTextUntilComplete = useSafeBehavior && guardActionableStream && highRiskTools
 	payload.streamThinkingPrecommit = guardActionableStream && thinking && !thinkingOpts.OmitDisplay
-	claudeCodeClient := isClaudeCodeUserAgent(req.ClientUserAgent)
 	// Claude Code needs visible progress while long tool JSON is assembled.
 	// Keep the safer buffered behavior for other clients in balanced mode.
 	payload.streamToolUseDeltas = req.Stream && len(req.Tools) > 0 &&
-		(useLiveBehavior || (balancedMode && claudeCodeClient))
+		(useLiveBehavior || claudeCodeToolStreaming)
 	// Inferred workspace intent must also wait for a structured tool call. A
 	// natural-language promise such as "I will read the file" is not an
 	// executable Claude Code turn and must remain retryable.
