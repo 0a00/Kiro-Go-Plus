@@ -2135,11 +2135,12 @@ func configureClaudeToolStreaming(payload *KiroPayload, req *ClaudeRequest, thin
 	claudeCodeClient := isClaudeCodeUserAgent(req.ClientUserAgent)
 	guardToolStream := len(req.Tools) > 0 && (useSafeBehavior || strictToolUse)
 	guardActionableStream := req.Stream && guardToolStream
-	// Claude Code can safely consume incremental tool argument frames while the
-	// gate still withholds unvalidated text and incomplete tool completion. This
-	// keeps the client visibly active even when a large workspace tool takes a
-	// long time to finish assembling.
-	claudeCodeToolStreaming := claudeCodeClient && !strictToolUse && (safeMode || adaptiveMode || balancedMode)
+	// Claude Code can consume incremental low-risk tool frames, but high-risk
+	// workspace tools stay buffered in safe/adaptive modes. A partial Write/Edit
+	// JSON cannot be replayed after it reaches the client; buffering preserves a
+	// clean recovery boundary when Kiro truncates the upstream tool stream.
+	claudeCodeToolStreaming := claudeCodeClient && !strictToolUse &&
+		(balancedMode || ((safeMode || adaptiveMode) && !highRiskTools))
 
 	payload.requireActionableOutput = (len(req.Tools) > 0 || thinking) && (!req.Stream || guardActionableStream)
 	payload.toolUsePolicy = req.ToolUsePolicy
