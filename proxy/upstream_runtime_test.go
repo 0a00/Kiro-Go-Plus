@@ -217,6 +217,51 @@ func TestCallKiroAPIAcceptsCompletedTextBeforeTelemetryForInferredToolTurn(t *te
 	}
 }
 
+func TestCallKiroAPIAcceptsInferredTextAtCleanEOF(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	retry := config.GetRetryConfig()
+	retry.MaxAccountAttempts = 1
+	retry.MaxUpstreamAttempts = 1
+	retry.MaxRetryDurationSeconds = 5
+	if err := config.UpdateRetryConfig(retry); err != nil {
+		t.Fatalf("update retry config: %v", err)
+	}
+	_ = config.UpdatePreferredEndpoint("runtime")
+	_ = config.UpdateEndpointFallback(false)
+
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{
+			"content": "The requested workspace change is complete.",
+		}))
+	}))
+	defer server.Close()
+	oldEndpoints := kiroEndpoints
+	kiroEndpoints = []kiroEndpoint{{Key: "runtime", URL: server.URL, Name: "Kiro Runtime"}}
+	t.Cleanup(func() { kiroEndpoints = oldEndpoints })
+
+	payload := &KiroPayload{
+		requireActionableOutput: true,
+		requireToolUse:          true,
+		deferTextUntilComplete:  true,
+		toolUsePolicy:           toolUsePolicyInferred,
+	}
+	var visible strings.Builder
+	err := CallKiroAPI(&config.Account{ID: "inferred-eof-account", AccessToken: "token"}, payload, &KiroStreamCallback{
+		OnText: func(text string, _ bool) { visible.WriteString(text) },
+	})
+	if err != nil {
+		t.Fatalf("clean EOF text response was rejected: %v", err)
+	}
+	if requests.Load() != 1 || visible.String() != "The requested workspace change is complete." {
+		t.Fatalf("unexpected clean EOF result: requests=%d output=%q", requests.Load(), visible.String())
+	}
+}
+
 func TestEmptyResponseRetryExhaustionStillAllowsAccountFailover(t *testing.T) {
 	err := newEmptyResponseError("CodeWhisperer", false)
 	if err.RetryAcrossEndpoints {

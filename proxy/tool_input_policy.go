@@ -8,7 +8,8 @@ import (
 // eventStreamParseOptions carries request-scoped facts that cannot be inferred
 // from an upstream event stream alone.
 type eventStreamParseOptions struct {
-	toolInputPolicies map[string]toolInputPolicy
+	toolInputPolicies    map[string]toolInputPolicy
+	allowInferredTextEOF bool
 }
 
 type toolInputPolicy uint8
@@ -21,7 +22,16 @@ const (
 
 func eventStreamParseOptionsForPayload(payload *KiroPayload) eventStreamParseOptions {
 	options := eventStreamParseOptions{}
-	if payload == nil || len(payload.toolInputPolicies) == 0 {
+	if payload == nil {
+		return options
+	}
+	// Kiro occasionally closes an inferred Claude Code text turn without a
+	// terminal event. The meaningful-stream gate still decides whether the
+	// buffered text is substantive; this option only permits that gate to see
+	// the synthetic completion. Explicit tool_choice requests stay strict.
+	options.allowInferredTextEOF = payload.toolUsePolicy == toolUsePolicyInferred &&
+		payload.requireToolUse && payload.deferTextUntilComplete
+	if len(payload.toolInputPolicies) == 0 {
 		return options
 	}
 	options.toolInputPolicies = make(map[string]toolInputPolicy, len(payload.toolInputPolicies))

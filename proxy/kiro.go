@@ -1828,6 +1828,17 @@ func parseEventStreamWithOptions(body io.Reader, callback *KiroStreamCallback, o
 	}
 
 	legacyTelemetryCompletion := lastFrameWasTelemetry && !sawExplicitCompletion
+	if sawOutput && !sawExplicitCompletion && !legacyTelemetryCompletion && !recoveredToolUse && !sawToolUse && options.allowInferredTextEOF {
+		// Some Kiro data planes close a valid inferred workspace text turn at a
+		// frame boundary without sending a terminal metadata event. The stream
+		// had no pending tool and no decoder error, so expose a synthetic normal
+		// completion; the meaningful-stream gate still rejects a preamble-only
+		// response and keeps the request retryable.
+		sawExplicitCompletion = true
+		if callback.OnStopReason != nil {
+			callback.OnStopReason("end_turn")
+		}
+	}
 	if sawOutput && !sawExplicitCompletion && !legacyTelemetryCompletion && !recoveredToolUse && !sawToolUse {
 		const reason = "stream ended without a stop reason or completion event"
 		if callback.OnTruncated != nil {

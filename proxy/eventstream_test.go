@@ -167,6 +167,61 @@ func TestParseEventStreamMarksTextWithoutCompletionSignalTruncated(t *testing.T)
 	}
 }
 
+func TestParseEventStreamAllowsInferredTextOnCleanEOF(t *testing.T) {
+	stream := bytes.NewReader(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{
+		"content": "The requested workspace change is complete.",
+	}))
+	payload := &KiroPayload{
+		requireActionableOutput: true,
+		requireToolUse:          true,
+		deferTextUntilComplete:  true,
+		toolUsePolicy:           toolUsePolicyInferred,
+	}
+	var output strings.Builder
+	var completed bool
+	var stopReason string
+	err := parseEventStreamWithOptions(stream, &KiroStreamCallback{
+		OnText:       func(text string, _ bool) { output.WriteString(text) },
+		OnComplete:   func(_, _ int) { completed = true },
+		OnStopReason: func(reason string) { stopReason = reason },
+	}, eventStreamParseOptionsForPayload(payload))
+	if err != nil {
+		t.Fatalf("inferred text at clean EOF was rejected: %v", err)
+	}
+	if output.String() == "" || !completed || stopReason != "end_turn" {
+		t.Fatalf("clean EOF fallback did not flush output: output=%q completed=%v stop_reason=%q", output.String(), completed, stopReason)
+	}
+}
+
+func TestParseEventStreamDoesNotAllowCleanEOFTextForExplicitToolTurn(t *testing.T) {
+	stream := bytes.NewReader(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{
+		"content": "The requested workspace change is complete.",
+	}))
+	payload := &KiroPayload{
+		requireActionableOutput: true,
+		requireToolUse:          true,
+		deferTextUntilComplete:  true,
+		toolUsePolicy:           toolUsePolicyExplicit,
+	}
+	err := parseEventStreamWithOptions(stream, &KiroStreamCallback{}, eventStreamParseOptionsForPayload(payload))
+	assertEventStreamErrorKind(t, err, EventStreamIncompleteResponse)
+}
+
+func TestParseEventStreamDoesNotAllowCleanEOFWithPendingTool(t *testing.T) {
+	stream := bytes.NewReader(bytes.Join([][]byte{
+		awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "I will update the file."}),
+		awsEventStreamFrame(t, "toolUseEvent", map[string]interface{}{"toolUseId": "toolu_pending", "name": "Write", "input": `{"path":`}),
+	}, nil))
+	payload := &KiroPayload{
+		requireActionableOutput: true,
+		requireToolUse:          true,
+		deferTextUntilComplete:  true,
+		toolUsePolicy:           toolUsePolicyInferred,
+	}
+	err := parseEventStreamWithOptions(stream, &KiroStreamCallback{}, eventStreamParseOptionsForPayload(payload))
+	assertEventStreamErrorKind(t, err, EventStreamIncompleteToolUse)
+}
+
 func TestParseEventStreamRejectsTelemetryOnlyResponse(t *testing.T) {
 	stream := bytes.NewReader(awsEventStreamFrame(t, "usageEvent", map[string]interface{}{
 		"usageEvent": map[string]interface{}{"inputTokens": 12, "outputTokens": 0},

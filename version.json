@@ -1,5 +1,5 @@
 {
-  "version": "1.2.79",
-  "changelog": "Buffer high-risk Claude Code tools in safe mode for truncation recovery.\n安全模式缓冲 Claude Code 高风险工具，以便截断恢复。",
+  "version": "1.2.80",
+  "changelog": "Accept clean-EOF inferred Claude Code text turns without weakening explicit tool integrity.\n允许推断式 Claude Code 文本流在干净 EOF 时正常完成，不放宽显式工具完整性校验。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }
