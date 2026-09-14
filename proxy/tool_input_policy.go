@@ -30,7 +30,8 @@ func eventStreamParseOptionsForPayload(payload *KiroPayload) eventStreamParseOpt
 	// buffered text is substantive; this option only permits that gate to see
 	// the synthetic completion. Explicit tool_choice requests stay strict.
 	options.allowInferredTextEOF = payload.toolUsePolicy == toolUsePolicyInferred &&
-		payload.requireToolUse && payload.deferTextUntilComplete
+		payload.requireToolUse && payload.deferTextUntilComplete &&
+		isClaudeCodeUserAgent(payload.clientUserAgent)
 	if len(payload.toolInputPolicies) == 0 {
 		return options
 	}

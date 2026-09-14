@@ -249,6 +249,7 @@ func TestCallKiroAPIAcceptsInferredTextAtCleanEOF(t *testing.T) {
 		requireToolUse:          true,
 		deferTextUntilComplete:  true,
 		toolUsePolicy:           toolUsePolicyInferred,
+		clientUserAgent:         "claude-code/2.1.263",
 	}
 	var visible strings.Builder
 	err := CallKiroAPI(&config.Account{ID: "inferred-eof-account", AccessToken: "token"}, payload, &KiroStreamCallback{

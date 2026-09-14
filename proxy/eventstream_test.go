@@ -176,6 +176,7 @@ func TestParseEventStreamAllowsInferredTextOnCleanEOF(t *testing.T) {
 		requireToolUse:          true,
 		deferTextUntilComplete:  true,
 		toolUsePolicy:           toolUsePolicyInferred,
+		clientUserAgent:         "claude-code/2.1.263",
 	}
 	var output strings.Builder
 	var completed bool
@@ -202,6 +203,21 @@ func TestParseEventStreamDoesNotAllowCleanEOFTextForExplicitToolTurn(t *testing.
 		requireToolUse:          true,
 		deferTextUntilComplete:  true,
 		toolUsePolicy:           toolUsePolicyExplicit,
+	}
+	err := parseEventStreamWithOptions(stream, &KiroStreamCallback{}, eventStreamParseOptionsForPayload(payload))
+	assertEventStreamErrorKind(t, err, EventStreamIncompleteResponse)
+}
+
+func TestParseEventStreamDoesNotAllowCleanEOFTextForGenericClient(t *testing.T) {
+	stream := bytes.NewReader(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{
+		"content": "The requested workspace change is complete.",
+	}))
+	payload := &KiroPayload{
+		requireActionableOutput: true,
+		requireToolUse:          true,
+		deferTextUntilComplete:  true,
+		toolUsePolicy:           toolUsePolicyInferred,
+		clientUserAgent:         "anthropic-sdk-go/1.0",
 	}
 	err := parseEventStreamWithOptions(stream, &KiroStreamCallback{}, eventStreamParseOptionsForPayload(payload))
 	assertEventStreamErrorKind(t, err, EventStreamIncompleteResponse)
