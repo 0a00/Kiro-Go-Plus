@@ -1142,13 +1142,7 @@ endpointLoop:
 				return classifyRequestCancellation(ep.Name, err)
 			}
 			if !sharedUpstreamHealth.beginEndpoint(endpointCircuitKey, endpointCircuitLabel) {
-				lastErr = &UpstreamError{
-					Kind:                 UpstreamErrorEndpointUnavailable,
-					Endpoint:             ep.Name,
-					Message:              "endpoint circuit is open",
-					RetryAcrossEndpoints: true,
-					RetryAcrossAccounts:  true,
-				}
+				lastErr = newEndpointCircuitOpenError(ep.Name, sharedUpstreamHealth.endpointRetryAfter(endpointCircuitKey))
 				detailTrace.recordAttempt(accountID, accountEmail, ep.Name, endpointHost, attemptStartedAt, 0, "skipped", lastErr, requestDetailRetryReason(lastErr))
 				continue endpointLoop
 			}
@@ -1463,8 +1457,10 @@ endpointLoop:
 				if cooldown := sharedAccountEndpointRoutes.recordFailure(accountID, modelKey, ep, lastErr); cooldown > 0 {
 					logger.Warnf("[EndpointRouting] Account %s model %s endpoint %s cooling for %s after stream error: %v", accountID, modelKey, ep.Name, cooldown, lastErr)
 				}
-				if meaningfulGate.hasEmittedOutput() || !circuitEligibleFailure(err) {
+				if meaningfulGate.hasEmittedOutput() {
 					sharedUpstreamHealth.endpointSuccess(endpointCircuitKey, time.Since(attemptStartedAt))
+				} else if !circuitEligibleFailure(err) {
+					sharedUpstreamHealth.releaseEndpoint(endpointCircuitKey)
 				} else {
 					lastCircuitError = err
 					sharedUpstreamHealth.endpointFailure(endpointCircuitKey, err, time.Since(attemptStartedAt))
@@ -1512,8 +1508,10 @@ endpointLoop:
 					attemptStatus = "empty_response_retry"
 				}
 				detailTrace.recordAttempt(accountID, accountEmail, ep.Name, endpointHost, attemptStartedAt, http.StatusOK, attemptStatus, lastErr, requestDetailRetryReason(lastErr))
-				lastCircuitError = lastErr
-				sharedUpstreamHealth.endpointFailure(endpointCircuitKey, lastErr, time.Since(attemptStartedAt))
+				// A content-level empty response can be account-, model-, or prompt-
+				// specific. Keep its account endpoint cooldown, but do not poison the
+				// host-wide network circuit used by every account.
+				sharedUpstreamHealth.releaseEndpoint(endpointCircuitKey)
 				if retrySameEndpoint {
 					logger.Warnf("[KiroAPI] Endpoint %s returned no client-visible output (attempt %d/%d); retrying after %s",
 						ep.Name, endpointAttempt+1, preOutputStreamRetries+1, preOutputRetryBackoff)

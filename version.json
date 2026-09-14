@@ -1,5 +1,5 @@
 {
-  "version": "1.2.77",
-  "changelog": "Sync OpenAI stream/Responses compatibility, profileless Builder ID routing, secure credential imports, and fixed proxy pools.\n同步 OpenAI 流式与 Responses 兼容、无 Profile Builder ID 路由、安全凭据导入和固定代理池。",
+  "version": "1.2.78",
+  "changelog": "Keep Claude Code tool streams active and isolate content-level empty responses from shared endpoint circuits.\n保持 Claude Code 工具流活跃，并隔离内容级空响应与共享端点熔断。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }

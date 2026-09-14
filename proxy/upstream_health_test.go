@@ -81,11 +81,69 @@ func TestCallKiroAPISkipsOpenEndpointCircuit(t *testing.T) {
 		t.Fatal("expected first upstream failure")
 	}
 	secondPayload := &KiroPayload{}
-	if err := CallKiroAPI(account, secondPayload, &KiroStreamCallback{}); err == nil {
+	secondErr := CallKiroAPI(account, secondPayload, &KiroStreamCallback{})
+	if secondErr == nil {
 		t.Fatal("expected open-circuit failure")
+	}
+	upstreamErr, ok := asUpstreamError(secondErr)
+	if !ok || upstreamErr.Kind != UpstreamErrorEndpointUnavailable || upstreamErr.RetryAcrossAccounts || upstreamErr.RetryAfter <= 0 {
+		t.Fatalf("open circuit did not return a bounded retry error: %#v", secondErr)
+	}
+	if shouldRetryAcrossAccounts(secondErr) {
+		t.Fatal("shared open circuit would still scan another account")
+	}
+	if mapped := mapDownstreamError(secondErr); mapped.Status != http.StatusServiceUnavailable || mapped.RetryAfter == "" {
+		t.Fatalf("open circuit mapped to %+v, want retryable 503", mapped)
 	}
 	if got := requests.Load(); got != 1 {
 		t.Fatalf("expected open circuit to suppress second request, got %d requests", got)
+	}
+}
+
+func TestCallKiroAPIEmptyResponseDoesNotOpenSharedEndpointCircuit(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	retry := config.GetRetryConfig()
+	retry.EndpointFailureThreshold = 1
+	retry.EmptyResponseRetries = 0
+	retry.MaxUpstreamAttempts = 1
+	preOutputRetries := 0
+	retry.PreOutputStreamRetries = &preOutputRetries
+	if err := config.UpdateRetryConfig(retry); err != nil {
+		t.Fatalf("update retry config: %v", err)
+	}
+	if err := config.UpdatePreferredEndpoint("test"); err != nil {
+		t.Fatalf("set endpoint: %v", err)
+	}
+	if err := config.UpdateEndpointFallback(false); err != nil {
+		t.Fatalf("disable endpoint fallback: %v", err)
+	}
+
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(awsEventStreamFrame(t, "meteringEvent", map[string]interface{}{"usage": 1.0}))
+	}))
+	defer server.Close()
+	oldEndpoints := kiroEndpoints
+	kiroEndpoints = []kiroEndpoint{{Key: "test", URL: server.URL, Origin: "AI_EDITOR", Name: "test"}}
+	t.Cleanup(func() { kiroEndpoints = oldEndpoints })
+	oldHealth := sharedUpstreamHealth
+	sharedUpstreamHealth = newUpstreamHealthRegistry()
+	t.Cleanup(func() { sharedUpstreamHealth = oldHealth })
+
+	account := &config.Account{ID: "empty-account", AccessToken: "token"}
+	for attempt := 0; attempt < 2; attempt++ {
+		err := CallKiroAPI(account, &KiroPayload{}, &KiroStreamCallback{})
+		upstreamErr, ok := asUpstreamError(err)
+		if !ok || upstreamErr.Kind != UpstreamErrorEmptyResponse {
+			t.Fatalf("attempt %d error = %#v, want empty response", attempt+1, err)
+		}
+	}
+	if got := requests.Load(); got != 2 {
+		t.Fatalf("content-level empty response opened shared circuit; requests=%d", got)
 	}
 }
 

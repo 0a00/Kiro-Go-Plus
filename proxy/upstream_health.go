@@ -44,6 +44,23 @@ func (r *upstreamHealthRegistry) beginEndpoint(key, label string) bool {
 	return r.begin(r.endpoints, key, label)
 }
 
+func (r *upstreamHealthRegistry) endpointRetryAfter(key string) time.Duration {
+	if r == nil || strings.TrimSpace(key) == "" {
+		return 0
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	state := r.endpoints[key]
+	now := r.now()
+	if state.cooldownUntil.After(now) {
+		return state.cooldownUntil.Sub(now)
+	}
+	if state.probeInFlight {
+		return time.Second
+	}
+	return 0
+}
+
 func (r *upstreamHealthRegistry) beginProxy(key, label string) bool {
 	if sanitized, _ := sanitizedProxyURL(label); sanitized != "" {
 		label = sanitized
@@ -245,7 +262,7 @@ func circuitEligibleFailure(err error) bool {
 	}
 	switch upstreamErr.Kind {
 	case UpstreamErrorTransient, UpstreamErrorFirstTokenTimeout, UpstreamErrorToolAssemblyTimeout,
-		UpstreamErrorEndpointUnavailable, UpstreamErrorEmptyResponse, UpstreamErrorUnknown:
+		UpstreamErrorEndpointUnavailable, UpstreamErrorUnknown:
 		return true
 	default:
 		return false

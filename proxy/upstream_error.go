@@ -212,7 +212,13 @@ func mapDownstreamError(err error) downstreamError {
 		} else {
 			mapped.Status = 499 // Widely used convention for a canceled client request.
 		}
-	case UpstreamErrorEndpointUnavailable, UpstreamErrorEmptyResponse, UpstreamErrorStreamTruncated:
+	case UpstreamErrorEndpointUnavailable:
+		if upstreamErr.StatusCode == http.StatusServiceUnavailable || upstreamErr.RetryAfter > 0 {
+			mapped.Status = http.StatusServiceUnavailable
+		} else {
+			mapped.Status = http.StatusBadGateway
+		}
+	case UpstreamErrorEmptyResponse, UpstreamErrorStreamTruncated:
 		mapped.Status = http.StatusBadGateway
 	case UpstreamErrorTransient, UpstreamErrorUnknown:
 		if upstreamErr.StatusCode == http.StatusServiceUnavailable {
@@ -399,6 +405,23 @@ func classifyRequestCancellation(endpoint string, err error) *UpstreamError {
 
 func newEmptyResponseError(endpoint string, retryEndpoints bool) *UpstreamError {
 	return newEmptyResponseErrorWithDiagnostics(endpoint, retryEndpoints, nil)
+}
+
+func newEndpointCircuitOpenError(endpoint string, retryAfter time.Duration) *UpstreamError {
+	if retryAfter <= 0 {
+		retryAfter = time.Second
+	}
+	return &UpstreamError{
+		Kind:                 UpstreamErrorEndpointUnavailable,
+		StatusCode:           http.StatusServiceUnavailable,
+		Endpoint:             endpoint,
+		Message:              "endpoint circuit is open",
+		RetryAcrossEndpoints: true,
+		// The circuit is shared by endpoint host. Trying more accounts that resolve
+		// to the same host cannot recover it and only burns the selection budget.
+		RetryAcrossAccounts: false,
+		RetryAfter:          retryAfter,
+	}
 }
 
 func newEmptyResponseErrorWithDiagnostics(endpoint string, retryEndpoints bool, diagnostics *eventStreamDiagnostics) *UpstreamError {
