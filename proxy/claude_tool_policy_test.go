@@ -1,6 +1,8 @@
 package proxy
 
 import (
+	"kiro-go/config"
+	"path/filepath"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -84,6 +86,24 @@ func TestPrepareClaudeToolPolicyDoesNotForcePlainContinuation(t *testing.T) {
 	}
 	if req.RequireToolUse {
 		t.Fatal("plain explanatory continuation unexpectedly required a workspace tool")
+	}
+}
+
+func TestClaudeCodeTransparentModeRecognizesGatewayForwardedClient(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	req := &ClaudeRequest{
+		ClientUserAgent: "Go-http-client/1.1",
+		System: []interface{}{map[string]interface{}{
+			"type": "text", "text": "Claude Code interactive agent using tools",
+		}},
+		Tools: []ClaudeTool{
+			{Name: "ToolSearch"}, {Name: "AskUserQuestion"}, {Name: "Write"},
+		},
+	}
+	if !isClaudeCodeTransparentRequest(req) {
+		t.Fatal("gateway-forwarded Claude Code request was not recognized")
 	}
 }
 

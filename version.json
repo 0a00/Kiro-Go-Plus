@@ -1,5 +1,5 @@
 {
-  "version": "1.2.82",
-  "changelog": "Keep model fallback routing while preserving Claude Code transparent history and stream semantics.\n保留模型兜底路由，同时保持 Claude Code 透明历史与流语义。",
+  "version": "1.2.83",
+  "changelog": "Recognize Claude Code requests forwarded through generic gateway User-Agents.\n识别经其他网关转发、使用通用 User-Agent 的 Claude Code 请求。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }

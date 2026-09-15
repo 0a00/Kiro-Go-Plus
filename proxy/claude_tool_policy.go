@@ -69,7 +69,35 @@ func prepareClaudeToolPolicy(req *ClaudeRequest, enforceWorkspaceActions bool) e
 }
 
 func isClaudeCodeTransparentRequest(req *ClaudeRequest) bool {
-	return req != nil && isClaudeCodeUserAgent(req.ClientUserAgent) && config.GetClaudeCodeTransparentMode()
+	return req != nil && config.GetClaudeCodeTransparentMode() && looksLikeClaudeCodeRequest(req)
+}
+
+// looksLikeClaudeCodeRequest also recognizes Claude Code traffic that has
+// passed through another gateway and arrives with a generic Go/HTTP User-Agent.
+// Claude Code's characteristic tool registry is more reliable than transport
+// headers in that deployment shape.
+func looksLikeClaudeCodeRequest(req *ClaudeRequest) bool {
+	if req == nil {
+		return false
+	}
+	if isClaudeCodeUserAgent(req.ClientUserAgent) || isClaudeCodeSystemPrompt(extractSystemPrompt(req.System)) {
+		return true
+	}
+	hasToolSearch, hasAgentTool, hasMutation := false, false, false
+	for _, tool := range req.Tools {
+		name := strings.ToLower(strings.TrimSpace(tool.Name))
+		compact := strings.NewReplacer("_", "", "-", "", ".", "").Replace(name)
+		switch compact {
+		case "toolsearch":
+			hasToolSearch = true
+		case "agent", "artifact", "askuserquestion", "skill", "task":
+			hasAgentTool = true
+		}
+		if hasWorkspaceMutationTool([]ClaudeTool{tool}) {
+			hasMutation = true
+		}
+	}
+	return hasToolSearch && hasAgentTool && hasMutation
 }
 
 func requiresStrictClaudeToolUse(req *ClaudeRequest) bool {
