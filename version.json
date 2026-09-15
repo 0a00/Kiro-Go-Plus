@@ -1,5 +1,5 @@
 {
-  "version": "1.2.81",
-  "changelog": "Add Claude Code transparent compatibility mode with structured history and direct stream semantics.\n增加 Claude Code 透明兼容模式，保留结构化历史并直传流语义。",
+  "version": "1.2.82",
+  "changelog": "Keep model fallback routing while preserving Claude Code transparent history and stream semantics.\n保留模型兜底路由，同时保持 Claude Code 透明历史与流语义。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }

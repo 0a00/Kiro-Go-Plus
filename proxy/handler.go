@@ -2224,25 +2224,21 @@ func (h *Handler) handleClaudeMessages(w http.ResponseWriter, r *http.Request) {
 	apiKeyID := apiKeyIDFromContext(r.Context())
 	requestedModel := req.Model
 	var fallbackDecision modelFallbackDecision
-	if !transparentClaudeCode {
-		if routedModel, decision, changed := h.resolveRequestModelRoute(req.Model, actualModel, apiKeyID); changed {
-			actualModel = routedModel
-			fallbackDecision = decision
-			markModelRoute(r.Context(), actualModel)
-			contextWindowTokens = resolveContextWindowTokens(actualModel, req.ContextWindow, req.MaxInputTokens)
-			logger.Warnf("[ModelFallback] routing %s to %s before dispatch (rule=%s)", requestedModel, actualModel, decision.Rule.ID)
-		}
+	if routedModel, decision, changed := h.resolveRequestModelRoute(req.Model, actualModel, apiKeyID); changed {
+		actualModel = routedModel
+		fallbackDecision = decision
+		markModelRoute(r.Context(), actualModel)
+		contextWindowTokens = resolveContextWindowTokens(actualModel, req.ContextWindow, req.MaxInputTokens)
+		logger.Warnf("[ModelFallback] routing %s to %s before dispatch (rule=%s)", requestedModel, actualModel, decision.Rule.ID)
 	}
-	if !transparentClaudeCode && !h.requestedModelAvailable(req.Model, actualModel) {
+	if !h.requestedModelAvailable(req.Model, actualModel) {
 		h.sendClaudeError(w, http.StatusBadRequest, "invalid_request_error", "The requested model is not available")
 		return
 	}
-	if !transparentClaudeCode {
-		if fallbackModel, changed := maybeLongToolFallback(actualModel, req.MaxTokens, claudeToolNames(req.Tools)); changed {
-			actualModel = fallbackModel
-			markModelRoute(r.Context(), actualModel)
-			contextWindowTokens = resolveContextWindowTokens(actualModel, req.ContextWindow, req.MaxInputTokens)
-		}
+	if fallbackModel, changed := maybeLongToolFallback(actualModel, req.MaxTokens, claudeToolNames(req.Tools)); changed {
+		actualModel = fallbackModel
+		markModelRoute(r.Context(), actualModel)
+		contextWindowTokens = resolveContextWindowTokens(actualModel, req.ContextWindow, req.MaxInputTokens)
 	}
 	req.Model = actualModel
 	h.prepareClaudeNativeEffort(&req, thinking)
