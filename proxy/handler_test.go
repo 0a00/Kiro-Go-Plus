@@ -89,6 +89,28 @@ func TestConfigureClaudeToolStreamingModes(t *testing.T) {
 	}
 }
 
+func TestTransparentClaudeHighRiskStreamingUsesConfiguredSafetyBoundary(t *testing.T) {
+	req := &ClaudeRequest{
+		Stream:          true,
+		ClientUserAgent: "Go-http-client/1.1",
+		Tools:           []ClaudeTool{{Name: "Write"}},
+	}
+	for _, mode := range []string{config.ToolStreamModeSafe, config.ToolStreamModeBalanced, config.ToolStreamModeAdaptive} {
+		t.Run(mode, func(t *testing.T) {
+			payload := &KiroPayload{transparentClaudeCode: true}
+			configureClaudeToolStreaming(payload, req, false, claudeThinkingResponseOptions{}, config.ThinkingConfig{ToolStreamMode: mode})
+			if !payload.deferTextUntilComplete || payload.streamToolUseDeltas {
+				t.Fatalf("high-risk transparent stream was not buffered in %s: %+v", mode, payload)
+			}
+		})
+	}
+	payload := &KiroPayload{transparentClaudeCode: true}
+	configureClaudeToolStreaming(payload, req, false, claudeThinkingResponseOptions{}, config.ThinkingConfig{ToolStreamMode: config.ToolStreamModeLive})
+	if payload.deferTextUntilComplete || !payload.streamToolUseDeltas {
+		t.Fatalf("live transparent stream was unexpectedly buffered: %+v", payload)
+	}
+}
+
 func TestClaudeCodeUserAgentVariants(t *testing.T) {
 	for _, tc := range []struct {
 		name string

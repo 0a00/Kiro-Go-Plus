@@ -2125,15 +2125,17 @@ func configureClaudeToolStreaming(payload *KiroPayload, req *ClaudeRequest, thin
 	}
 	payload.clientUserAgent = req.ClientUserAgent
 	if payload.transparentClaudeCode {
-		// Claude Code compatibility mode mirrors kiro.rs: forward semantic text,
-		// thinking, and tool frames immediately. The EventStream parser still
-		// validates frame/JSON integrity, but no inferred tool gate or whole-turn
-		// buffering is applied.
+		// Preserve transparent history and low-risk live events, but keep the
+		// configured safety boundary for high-risk workspace tools. A partial
+		// Write/Edit JSON cannot be replayed after reaching Claude Code.
+		highRiskTools := hasHighRiskToolNames(claudeToolNames(req.Tools))
+		streamMode := thinkingCfg.ToolStreamMode
+		bufferHighRisk := highRiskTools && streamMode != config.ToolStreamModeLive
 		payload.requireActionableOutput = false
 		payload.requireToolUse = false
-		payload.deferTextUntilComplete = false
+		payload.deferTextUntilComplete = req.Stream && bufferHighRisk
 		payload.streamThinkingPrecommit = false
-		payload.streamToolUseDeltas = req.Stream && len(req.Tools) > 0
+		payload.streamToolUseDeltas = req.Stream && len(req.Tools) > 0 && !bufferHighRisk
 		return
 	}
 	safeMode := thinkingCfg.ToolStreamMode == config.ToolStreamModeSafe

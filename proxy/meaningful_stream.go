@@ -261,7 +261,12 @@ func (g *meaningfulStreamCallback) handleEvent(event pendingStreamEvent) {
 	}
 	g.appendPendingLocked(event)
 
-	commit := event.kind == pendingToolUse || event.kind == pendingToolUseStart || event.kind == pendingToolUseDelta
+	// When a high-risk tool turn is buffered, start/delta frames stay pending
+	// until the parser produces a complete tool_use event. Live tool mode keeps
+	// the previous immediate-frame behavior.
+	bufferToolFrames := g.deferTextUntilComplete && !g.streamToolFrames
+	commit := event.kind == pendingToolUse ||
+		(!bufferToolFrames && (event.kind == pendingToolUseStart || event.kind == pendingToolUseDelta))
 	if event.kind == pendingText && !event.isThinking {
 		if g.visibleProbe.Len() < maxActionableProbeBytes {
 			remaining := maxActionableProbeBytes - g.visibleProbe.Len()

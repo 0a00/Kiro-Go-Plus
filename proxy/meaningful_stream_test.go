@@ -169,6 +169,31 @@ func TestMeaningfulStreamLiveToolFramesCommitImmediately(t *testing.T) {
 	}
 }
 
+func TestDeferredMeaningfulStreamBuffersIncompleteToolFrames(t *testing.T) {
+	var received []string
+	wrapper, gate := wrapMeaningfulStreamCallback(&KiroStreamCallback{
+		OnToolUse: func(toolUse KiroToolUse) {
+			received = append(received, "tool:"+toolUse.Name)
+		},
+	}, nil, true, false, true, false)
+
+	wrapper.OnToolUseStart("toolu_write", "Write")
+	wrapper.OnToolUseDelta("toolu_write", `{"content":"partial`)
+	wrapper.OnToolUseStop("toolu_write")
+	if gate.hasActionableOutput() || len(received) != 0 {
+		t.Fatalf("incomplete buffered tool leaked before complete tool_use: actionable=%v received=%#v", gate.hasActionableOutput(), received)
+	}
+
+	wrapper.OnToolUse(KiroToolUse{
+		ToolUseID: "toolu_write",
+		Name:      "Write",
+		Input:     map[string]interface{}{"content": "complete"},
+	})
+	if !gate.hasActionableOutput() || !reflect.DeepEqual(received, []string{"tool:Write"}) {
+		t.Fatalf("complete buffered tool was not committed: actionable=%v received=%#v", gate.hasActionableOutput(), received)
+	}
+}
+
 func TestMeaningfulStreamFlagsMalformedToolAfterLiveCommit(t *testing.T) {
 	toolCalls := 0
 	wrapper, gate := wrapMeaningfulStreamCallback(&KiroStreamCallback{

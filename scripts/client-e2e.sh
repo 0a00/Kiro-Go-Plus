@@ -489,7 +489,7 @@ run_case() {
 case_text_stream() {
   local output="$TMP_DIR/text-stream.jsonl"
   run_cli "$CLIENT_TIMEOUT" "$MODEL" "$WORKSPACE" "$output" \
-    'Reply exactly CLIENT_TEXT_STREAM_OK.' --tools ""
+    'Reply exactly CLIENT_TEXT_STREAM_OK.'
   assert_client_result "$output" CLIENT_TEXT_STREAM_OK || {
     CASE_DETAIL="stream result or marker missing"
     return 1

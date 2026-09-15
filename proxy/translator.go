@@ -304,9 +304,10 @@ func claudeToKiro(req *ClaudeRequest, thinking bool, options claudeTranslationOp
 		}
 		systemPrompt += buildClaudeAgentToolPolicy(req)
 	}
-	if !options.transparent {
-		systemPrompt = appendLongToolPolicy(systemPrompt, modelID, claudeToolNames(req.Tools))
-	}
+	// Keep the long-tool guard in both paths. Transparent mode preserves the
+	// caller's history and tool names, while this bounded instruction addresses
+	// an upstream transport limit rather than changing conversation semantics.
+	systemPrompt = appendLongToolPolicy(systemPrompt, modelID, claudeToolNames(req.Tools))
 
 	// 构建历史消息
 	history := make([]KiroHistoryMessage, 0)
@@ -382,7 +383,11 @@ func claudeToKiro(req *ClaudeRequest, thinking bool, options claudeTranslationOp
 	// the last history assistant must carry matching structured toolUses. If not
 	// (orphaned tool results, e.g. after context compaction), flatten them into
 	// the current message text so the upstream does not reject the request.
-	kiroTools, toolInputPolicies := convertClaudeToolsWithRegistry(req.Tools, toolNames, req.AgentToolSteering)
+	toolsForKiro := req.Tools
+	if options.transparent {
+		toolsForKiro = cloneClaudeToolsWithLongToolGuidance(req.Tools, modelID)
+	}
+	kiroTools, toolInputPolicies := convertClaudeToolsWithRegistry(toolsForKiro, toolNames, req.AgentToolSteering)
 	orderedToolResults, keepCurrentToolResults := orderToolResultsForLastAssistant(history, currentToolResults)
 	// Kiro requires tool definitions even for an already completed tool turn.
 	// Without them, preserve results as text and remove structured history too.
@@ -1096,6 +1101,17 @@ func convertClaudeTools(tools []ClaudeTool) ([]KiroToolWrapper, map[string]strin
 	registry := newToolNameRegistry(sanitizeToolName)
 	result, _ := convertClaudeToolsWithRegistry(tools, registry, false)
 	return result, registry.restoreMap()
+}
+
+func cloneClaudeToolsWithLongToolGuidance(tools []ClaudeTool, model string) []ClaudeTool {
+	if len(tools) == 0 || !config.GetLongToolConfig().Enabled || !hasHighRiskToolNames(claudeToolNames(tools)) {
+		return tools
+	}
+	cloned := append([]ClaudeTool(nil), tools...)
+	for i := range cloned {
+		cloned[i].Description = appendLongToolDescriptionPolicy(cloned[i].Description, cloned[i].Name, model)
+	}
+	return cloned
 }
 
 func convertClaudeToolsWithRegistry(tools []ClaudeTool, registry *toolNameRegistry, steer bool) ([]KiroToolWrapper, map[string]toolInputPolicy) {

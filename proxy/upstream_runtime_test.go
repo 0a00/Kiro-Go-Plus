@@ -687,6 +687,97 @@ func TestCallKiroAPIRecoversToolAssemblyTimeoutWithRebuiltPayload(t *testing.T) 
 	}
 }
 
+func TestCallKiroAPIRecoversTransparentTruncatedToolBeforeClientCommit(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	retry := config.GetRetryConfig()
+	retry.MaxAccountAttempts = 1
+	retry.MaxUpstreamAttempts = 4
+	retry.MaxRetryDurationSeconds = 5
+	retry.FirstTokenTimeoutSeconds = 5
+	retry.StreamIdleTimeoutSeconds = 5
+	retry.ToolAssemblyTimeoutSeconds = 2
+	if err := config.UpdateRetryConfig(retry); err != nil {
+		t.Fatalf("update retry config: %v", err)
+	}
+	longTool := config.GetLongToolConfig()
+	longTool.TruncationRetries = 1
+	if err := config.UpdateLongToolConfig(longTool); err != nil {
+		t.Fatalf("update long-tool config: %v", err)
+	}
+	_ = config.UpdatePreferredEndpoint("auto")
+	_ = config.UpdateEndpointFallback(true)
+	sharedAccountEndpointRoutes.reset()
+	t.Cleanup(sharedAccountEndpointRoutes.reset)
+
+	var requests atomic.Int32
+	var sawRecoveryHint atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempt := requests.Add(1)
+		body, _ := io.ReadAll(r.Body)
+		if attempt > 1 && strings.Contains(string(body), "tool_truncation_recovery") {
+			sawRecoveryHint.Store(true)
+		}
+		w.WriteHeader(http.StatusOK)
+		if attempt == 1 {
+			_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{
+				"content": "I will update the file.",
+			}))
+			_, _ = w.Write(awsEventStreamFrame(t, "toolUseEvent", map[string]interface{}{
+				"toolUseId": "toolu_partial",
+				"name":      "Write",
+				"input":     `{"content":"unfinished`,
+			}))
+			return
+		}
+		_, _ = w.Write(awsEventStreamFrame(t, "toolUseEvent", map[string]interface{}{
+			"toolUseId": "toolu_recovered_transparent",
+			"name":      "Write",
+			"input":     `{"content":"complete"}`,
+			"stop":      true,
+		}))
+		_, _ = w.Write(awsEventStreamFrame(t, "metadataEvent", map[string]interface{}{"stopReason": "tool_use"}))
+	}))
+	defer server.Close()
+	oldEndpoints := kiroEndpoints
+	kiroEndpoints = []kiroEndpoint{
+		{Key: "runtime", URL: server.URL, Name: "Kiro Runtime"},
+		{Key: "kiro", URL: server.URL, Name: "Kiro IDE"},
+	}
+	t.Cleanup(func() { kiroEndpoints = oldEndpoints })
+
+	payload := &KiroPayload{
+		transparentClaudeCode:  true,
+		deferTextUntilComplete: true,
+		streamToolUseDeltas:    false,
+	}
+	payload.ConversationState.CurrentMessage.UserInputMessage.ModelID = "claude-sonnet-5"
+	payload.ConversationState.CurrentMessage.UserInputMessage.Content = "Create the file."
+	var tool KiroToolWrapper
+	tool.ToolSpecification.Name = "Write"
+	payload.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext = &UserInputMessageContext{Tools: []KiroToolWrapper{tool}}
+
+	var textOutput strings.Builder
+	var toolUses []KiroToolUse
+	err := CallKiroAPI(&config.Account{ID: "transparent-truncation-account", AccessToken: "token"}, payload, &KiroStreamCallback{
+		OnText:    func(text string, _ bool) { textOutput.WriteString(text) },
+		OnToolUse: func(toolUse KiroToolUse) { toolUses = append(toolUses, toolUse) },
+	})
+	if err != nil {
+		t.Fatalf("expected transparent truncation recovery, got %v", err)
+	}
+	if requests.Load() != 2 || !sawRecoveryHint.Load() {
+		t.Fatalf("expected one rebuilt transparent retry, requests=%d hint=%v", requests.Load(), sawRecoveryHint.Load())
+	}
+	if strings.Contains(textOutput.String(), "unfinished") || strings.Count(textOutput.String(), "I will update the file.") > 1 {
+		t.Fatalf("partial/replayed text leaked: %q", textOutput.String())
+	}
+	if len(toolUses) != 1 || toolUses[0].ToolUseID != "toolu_recovered_transparent" || toolUses[0].Input["content"] != "complete" {
+		t.Fatalf("partial tool leaked or recovered tool missing: %+v", toolUses)
+	}
+}
+
 func TestCallKiroAPIAllowsToolAssemblyThatKeepsReceivingFragments(t *testing.T) {
 	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatalf("init config: %v", err)

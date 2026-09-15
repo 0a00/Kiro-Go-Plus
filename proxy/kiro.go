@@ -1234,6 +1234,8 @@ endpointLoop:
 			}
 			attemptCallback.streamDiagnostics = attemptDiagnostics
 			transparentClaudeCode := payload != nil && payload.transparentClaudeCode
+			deferToolTurn := payload != nil && payload.deferTextUntilComplete
+			strictStream := payload != nil && ((payload.requireActionableOutput && !transparentClaudeCode) || deferToolTurn)
 			wrappedCallback, meaningfulGate := wrapMeaningfulStreamCallback(attemptCallback, func() {
 				if firstTokenTimer != nil {
 					firstTokenTimer.Stop()
@@ -1241,7 +1243,7 @@ endpointLoop:
 				if payload != nil {
 					payload.recordUpstreamActivity()
 				}
-			}, payload != nil && payload.requireActionableOutput && !transparentClaudeCode, payload != nil && payload.requireToolUse && !transparentClaudeCode, payload != nil && payload.deferTextUntilComplete && !transparentClaudeCode, payload != nil && payload.streamThinkingPrecommit)
+			}, strictStream, payload != nil && payload.requireToolUse && !transparentClaudeCode, deferToolTurn, payload != nil && payload.streamThinkingPrecommit)
 			// Inferred workspace turns may legitimately finish with a text answer
 			// when Kiro declines to call a tool. Explicit tool_choice requests remain
 			// strict and still require a structured tool call.

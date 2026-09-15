@@ -1,5 +1,5 @@
 {
-  "version": "1.2.84",
-  "changelog": "Recognize Claude Code beta headers and inherit long-tool timeouts through gateways.\n识别 Claude Code beta 请求头，并让经网关转发的长工具请求继承长超时。",
+  "version": "1.2.85",
+  "changelog": "Buffer high-risk transparent tool calls and recover truncated Write/Edit streams.\n透明模式缓冲高风险工具调用，并恢复被截断的 Write/Edit 流。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }

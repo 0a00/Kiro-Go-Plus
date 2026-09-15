@@ -36,6 +36,31 @@ func TestAppendLongToolPolicyOnlyForHighRiskTools(t *testing.T) {
 	}
 }
 
+func TestClaudeTransparentToolsCarryLongToolGuidance(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	req := &ClaudeRequest{
+		Model:    "claude-sonnet-5",
+		Messages: []ClaudeMessage{{Role: "user", Content: "Create the page."}},
+		Tools: []ClaudeTool{
+			{Name: "Write", Description: "Write a file."},
+			{Name: "WebSearch", Description: "Search the web."},
+		},
+	}
+	payload := ClaudeToKiroTransparent(req, false)
+	context := payload.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext
+	if context == nil || len(context.Tools) != 2 {
+		t.Fatalf("unexpected transparent tools: %+v", context)
+	}
+	if !strings.Contains(context.Tools[0].ToolSpecification.Description, longToolDescriptionPolicyMarker) {
+		t.Fatalf("Write tool did not receive chunking guidance: %q", context.Tools[0].ToolSpecification.Description)
+	}
+	if strings.Contains(context.Tools[1].ToolSpecification.Description, longToolDescriptionPolicyMarker) {
+		t.Fatal("low-risk WebSearch tool received file chunking guidance")
+	}
+}
+
 func TestMaybeLongToolFallbackIsOptionalAndModelAware(t *testing.T) {
 	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatalf("config.Init: %v", err)

@@ -11,8 +11,9 @@ import (
 )
 
 const (
-	longToolPolicyMarker   = "<long_tool_policy>"
-	toolRecoveryHintMarker = "<tool_truncation_recovery>"
+	longToolPolicyMarker            = "<long_tool_policy>"
+	longToolDescriptionPolicyMarker = "<long_tool_description_policy>"
+	toolRecoveryHintMarker          = "<tool_truncation_recovery>"
 )
 
 var resolveLongToolActionableOutputTimeout = configuredLongToolActionableOutputTimeout
@@ -137,6 +138,29 @@ Kiro can truncate oversized tool-call arguments even when the advertised model o
 		return policy
 	}
 	return base + "\n\n" + policy
+}
+
+// appendLongToolDescriptionPolicy gives the model the same chunking guidance
+// when Claude Code transparent mode intentionally avoids changing the system
+// prompt. Tool descriptions are part of the client-owned tool contract and
+// are therefore a narrower compatibility hint than injecting a new system
+// instruction.
+func appendLongToolDescriptionPolicy(description, name, model string) string {
+	settings := config.GetLongToolConfig()
+	if !settings.Enabled || !isHighRiskToolName(name) || strings.Contains(description, longToolDescriptionPolicyMarker) {
+		return description
+	}
+	limit := resolveModelMaxToolTokens(model)
+	if limit <= 0 {
+		limit = settings.DefaultMaxToolTokens
+	}
+	guidance := fmt.Sprintf(`%s
+Keep each individual file-changing tool call below approximately %d output tokens. For content larger than about 50 lines, write a small valid skeleton first and continue with smaller Write/Edit or patch calls. Never send one oversized Write, Edit, shell, or heredoc payload.
+</long_tool_description_policy>`, longToolDescriptionPolicyMarker, limit)
+	if strings.TrimSpace(description) == "" {
+		return guidance
+	}
+	return description + "\n" + guidance
 }
 
 func maybeLongToolFallback(model string, maxTokens int, toolNames []string) (string, bool) {
