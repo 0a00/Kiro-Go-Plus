@@ -463,6 +463,29 @@ func TestDeferredHighRiskStreamRejectsExecutionPreamble(t *testing.T) {
 	}
 }
 
+func TestDeferredHighRiskStreamRejectsContinuationPreambles(t *testing.T) {
+	for _, text := range []string{
+		"继续添加更多内容部分。",
+		"继续添加更多模型卡片和功能区块。",
+		"继续添加更多详细的模型卡片和内容区块。",
+		"继续构建这个页面。",
+		"Continue adding more sections.",
+	} {
+		t.Run(text, func(t *testing.T) {
+			var received strings.Builder
+			wrapper, gate := wrapMeaningfulStreamCallback(&KiroStreamCallback{
+				OnText: func(value string, _ bool) { received.WriteString(value) },
+			}, nil, true, true, true, false)
+			gate.setAllowCompletedTextFallback(true)
+			wrapper.OnText(text, false)
+			wrapper.OnComplete(10, 10)
+			if gate.hasActionableOutput() || received.Len() != 0 {
+				t.Fatalf("continuation preamble was accepted: %q", received.String())
+			}
+		})
+	}
+}
+
 func TestInferredToolStreamRejectsChineseReadThenEditPreamble(t *testing.T) {
 	var received strings.Builder
 	wrapper, gate := wrapMeaningfulStreamCallback(&KiroStreamCallback{

@@ -131,3 +131,66 @@ func TestClaudeToKiroKeepsActiveToolTurnStructured(t *testing.T) {
 		t.Fatalf("expected current tool result to answer t9, got %q", cur.UserInputMessageContext.ToolResults[0].ToolUseID)
 	}
 }
+
+func TestClaudeToKiroTransparentPreservesCompletedToolHistory(t *testing.T) {
+	req := &ClaudeRequest{
+		Model:    "claude-sonnet-4.6",
+		Metadata: &ClaudeRequestMetadata{UserID: "user_test__session_123e4567-e89b-12d3-a456-426614174000"},
+		Tools: []ClaudeTool{{Name: "Write", Description: "write a file", InputSchema: map[string]interface{}{
+			"type": "object", "properties": map[string]interface{}{},
+		}}},
+		Messages: []ClaudeMessage{
+			{Role: "user", Content: "Create the file."},
+			{Role: "assistant", Content: []interface{}{
+				map[string]interface{}{"type": "tool_use", "id": "tool-1", "name": "Write", "input": map[string]interface{}{"file_path": "index.html"}},
+			}},
+			{Role: "user", Content: []interface{}{
+				map[string]interface{}{"type": "tool_result", "tool_use_id": "tool-1", "content": "created"},
+			}},
+			{Role: "user", Content: "continue"},
+		},
+	}
+
+	payload := ClaudeToKiroTransparent(req, false)
+	if payload.ConversationState.ConversationID != "123e4567-e89b-12d3-a456-426614174000" {
+		t.Fatalf("metadata session id was not preserved: %q", payload.ConversationState.ConversationID)
+	}
+	var foundUse, foundResult bool
+	for _, entry := range payload.ConversationState.History {
+		if assistant := entry.AssistantResponseMessage; assistant != nil {
+			for _, use := range assistant.ToolUses {
+				if use.ToolUseID == "tool-1" {
+					foundUse = true
+				}
+			}
+		}
+		if user := entry.UserInputMessage; user != nil && user.UserInputMessageContext != nil {
+			for _, result := range user.UserInputMessageContext.ToolResults {
+				if result.ToolUseID == "tool-1" {
+					foundResult = true
+				}
+			}
+		}
+	}
+	if !foundUse || !foundResult {
+		t.Fatalf("transparent history lost a completed tool pair: use=%v result=%v history=%#v", foundUse, foundResult, payload.ConversationState.History)
+	}
+	current := payload.ConversationState.CurrentMessage.UserInputMessage
+	if current.Content != "continue" {
+		t.Fatalf("unexpected transparent continuation content: %q", current.Content)
+	}
+}
+
+func TestClaudeToKiroTransparentDoesNotInjectRequiredToolMarker(t *testing.T) {
+	req := &ClaudeRequest{
+		Model:          "claude-sonnet-4.6",
+		Tools:          []ClaudeTool{{Name: "Write", Description: "write a file", InputSchema: map[string]interface{}{"type": "object"}}},
+		Messages:       []ClaudeMessage{{Role: "user", Content: "continue"}},
+		RequireToolUse: true,
+		ToolUsePolicy:  toolUsePolicyInferred,
+	}
+	payload := ClaudeToKiroTransparent(req, false)
+	if strings.Contains(payload.ConversationState.CurrentMessage.UserInputMessage.Content, agentRequiredToolActionMarker) {
+		t.Fatalf("transparent mode injected inferred tool marker: %q", payload.ConversationState.CurrentMessage.UserInputMessage.Content)
+	}
+}

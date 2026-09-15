@@ -304,7 +304,12 @@ type KiroPayload struct {
 	// clientUserAgent is request-local metadata used to apply safe streaming
 	// accommodations for Claude Code without changing behavior for other clients.
 	clientUserAgent string
-	attemptBudget   *upstreamAttemptBudget
+	// transparentClaudeCode preserves the upstream-compatible Claude Code path:
+	// structured history, direct semantic events, and no inferred tool gate.
+	// It is request-local and never serialized to Kiro.
+	transparentClaudeCode          bool
+	transparentHistoryFallbackUsed bool
+	attemptBudget                  *upstreamAttemptBudget
 	// allowCoolingEndpointRetry is enabled only while replaying a soft stream
 	// integrity failure on the same account. It is internal request state and is
 	// intentionally not serialized to the upstream payload.
@@ -1228,6 +1233,7 @@ endpointLoop:
 				}
 			}
 			attemptCallback.streamDiagnostics = attemptDiagnostics
+			transparentClaudeCode := payload != nil && payload.transparentClaudeCode
 			wrappedCallback, meaningfulGate := wrapMeaningfulStreamCallback(attemptCallback, func() {
 				if firstTokenTimer != nil {
 					firstTokenTimer.Stop()
@@ -1235,11 +1241,11 @@ endpointLoop:
 				if payload != nil {
 					payload.recordUpstreamActivity()
 				}
-			}, payload != nil && payload.requireActionableOutput, payload != nil && payload.requireToolUse, payload != nil && payload.deferTextUntilComplete, payload != nil && payload.streamThinkingPrecommit)
+			}, payload != nil && payload.requireActionableOutput && !transparentClaudeCode, payload != nil && payload.requireToolUse && !transparentClaudeCode, payload != nil && payload.deferTextUntilComplete && !transparentClaudeCode, payload != nil && payload.streamThinkingPrecommit)
 			// Inferred workspace turns may legitimately finish with a text answer
 			// when Kiro declines to call a tool. Explicit tool_choice requests remain
 			// strict and still require a structured tool call.
-			meaningfulGate.setAllowCompletedTextFallback(payload != nil && payload.toolUsePolicy == toolUsePolicyInferred)
+			meaningfulGate.setAllowCompletedTextFallback(!transparentClaudeCode && payload != nil && payload.toolUsePolicy == toolUsePolicyInferred)
 			wrappedCallback.streamDiagnostics = attemptDiagnostics
 			toolArgumentIdleTimeout := toolArgumentIdleTimeoutForRequest(retryConfig, payload)
 			wrappedCallback, toolMonitor := wrapToolAssemblyMonitor(wrappedCallback, toolArgumentIdleTimeout, func(toolAssemblySnapshot) {
@@ -1356,6 +1362,12 @@ endpointLoop:
 					} else {
 						return classifyRefreshFailure(ep.Name, refreshErr)
 					}
+				}
+				if shouldFallbackTransparentHistory(payload, lastErr) {
+					payload.transparentHistoryFallbackUsed = true
+					payload.ConversationState.History = sanitizeKiroHistory(payload.ConversationState.History, nil)
+					logger.Warnf("[ClaudeCodeTransparent] structured history rejected by %s; retrying once with compatibility sanitization", ep.Name)
+					return callKiroAPISingleModel(account, payload, callback)
 				}
 				logger.Warnf("[KiroAPI] Endpoint %s error: %v", ep.Name, lastErr)
 				if shouldRetryAcrossEndpoints(lastErr) {
@@ -1550,6 +1562,18 @@ func isRetryablePreOutputStreamError(err error, gate *meaningfulStreamCallback) 
 	return ok && (upstreamErr.Kind == UpstreamErrorTransient ||
 		upstreamErr.Kind == UpstreamErrorStreamTruncated ||
 		upstreamErr.Kind == UpstreamErrorEmptyResponse) && upstreamErr.RetryAcrossEndpoints
+}
+
+func shouldFallbackTransparentHistory(payload *KiroPayload, err error) bool {
+	if payload == nil || !payload.transparentClaudeCode || payload.transparentHistoryFallbackUsed || err == nil {
+		return false
+	}
+	upstreamErr, ok := asUpstreamError(err)
+	if !ok || upstreamErr.Kind != UpstreamErrorClientRequest || upstreamErr.StatusCode != http.StatusBadRequest {
+		return false
+	}
+	message := strings.ToLower(upstreamErr.Error())
+	return strings.Contains(message, "tool_use") || strings.Contains(message, "tool_result") || strings.Contains(message, "improperly formed")
 }
 
 func waitForPreOutputStreamRetry(ctx context.Context, delay time.Duration) error {
@@ -1828,7 +1852,7 @@ func parseEventStreamWithOptions(body io.Reader, callback *KiroStreamCallback, o
 	}
 
 	legacyTelemetryCompletion := lastFrameWasTelemetry && !sawExplicitCompletion
-	if sawOutput && !sawExplicitCompletion && !legacyTelemetryCompletion && !recoveredToolUse && !sawToolUse && options.allowInferredTextEOF {
+	if sawOutput && !sawExplicitCompletion && !legacyTelemetryCompletion && !recoveredToolUse && !sawToolUse && (options.allowInferredTextEOF || options.allowTransparentTextEOF) {
 		// Some Kiro data planes close a valid inferred workspace text turn at a
 		// frame boundary without sending a terminal metadata event. The stream
 		// had no pending tool and no decoder error, so expose a synthetic normal

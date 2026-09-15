@@ -30,7 +30,8 @@ func prepareClaudeToolPolicy(req *ClaudeRequest, enforceWorkspaceActions bool) e
 	// Tool enforcement and prompt steering are separate controls. The former
 	// decides whether an inferred workspace request should use a tool; the
 	// latter is an explicit operator opt-in for injecting extra instructions.
-	req.AgentToolSteering = config.GetAgentToolSteering()
+	transparentClaudeCode := isClaudeCodeTransparentRequest(req)
+	req.AgentToolSteering = config.GetAgentToolSteering() && !transparentClaudeCode
 
 	mode, name, err := parseClaudeToolChoice(req.ToolChoice)
 	if err != nil {
@@ -56,7 +57,7 @@ func prepareClaudeToolPolicy(req *ClaudeRequest, enforceWorkspaceActions bool) e
 		req.ToolUsePolicy = toolUsePolicyExplicit
 	}
 
-	if enforceWorkspaceActions && !req.RequireToolUse && shouldRequireWorkspaceTool(req) {
+	if enforceWorkspaceActions && !transparentClaudeCode && !req.RequireToolUse && shouldRequireWorkspaceTool(req) {
 		req.RequireToolUse = true
 		req.ToolUsePolicy = toolUsePolicyInferred
 	}
@@ -65,6 +66,10 @@ func prepareClaudeToolPolicy(req *ClaudeRequest, enforceWorkspaceActions bool) e
 	}
 	req.System = appendClaudeSystemText(req.System, buildClaudeAgentToolPolicy(req))
 	return nil
+}
+
+func isClaudeCodeTransparentRequest(req *ClaudeRequest) bool {
+	return req != nil && isClaudeCodeUserAgent(req.ClientUserAgent) && config.GetClaudeCodeTransparentMode()
 }
 
 func requiresStrictClaudeToolUse(req *ClaudeRequest) bool {
@@ -132,6 +137,17 @@ func shouldRequireWorkspaceTool(req *ClaudeRequest) bool {
 	if text == "" {
 		return false
 	}
+	if isWorkspaceContinuationText(text) {
+		return hasPriorWorkspaceActivity(req.Messages)
+	}
+	return textRequestsWorkspaceAction(text)
+}
+
+func textRequestsWorkspaceAction(text string) bool {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return false
+	}
 	lower := strings.ToLower(text)
 	if containsAny(text, "创建", "新建", "写入", "修改", "编辑", "删除", "实现", "修复", "运行", "执行", "安装", "构建", "测试", "读取", "检查") &&
 		containsAny(lower, "文件", "代码", "项目", "页面", "网站", "命令", "脚本", "目录", "html", "css", "javascript", "仓库") &&
@@ -140,6 +156,49 @@ func shouldRequireWorkspaceTool(req *ClaudeRequest) bool {
 	}
 	return englishWorkspaceAction.MatchString(text) && englishWorkspaceObject.MatchString(text) &&
 		(englishImperative.MatchString(text) || strings.Contains(lower, "please ") || strings.Contains(lower, "task:"))
+}
+
+func isWorkspaceContinuationText(text string) bool {
+	text = strings.TrimSpace(strings.ToLower(text))
+	if text == "" || len([]rune(text)) > 120 {
+		return false
+	}
+	if containsAny(text, "解释", "说明", "总结", "回答", "介绍", "explain", "summarize", "describe") {
+		return false
+	}
+	for _, marker := range []string{
+		"继续", "接着", "下一步", "再来", "往下",
+		"continue", "keep going", "go on", "proceed", "resume", "carry on",
+	} {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasPriorWorkspaceActivity(messages []ClaudeMessage) bool {
+	if len(messages) < 2 {
+		return false
+	}
+	for i := 0; i < len(messages)-1; i++ {
+		message := messages[i]
+		switch message.Role {
+		case "assistant":
+			_, toolUses := extractClaudeAssistantContent(message.Content)
+			for _, toolUse := range toolUses {
+				if hasWorkspaceMutationTool([]ClaudeTool{{Name: toolUse.Name}}) {
+					return true
+				}
+			}
+		case "user":
+			text, _, _ := extractClaudeUserContent(message.Content)
+			if textRequestsWorkspaceAction(text) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func hasWorkspaceMutationTool(tools []ClaudeTool) bool {

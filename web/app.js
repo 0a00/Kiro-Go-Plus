@@ -2549,6 +2549,7 @@
     $('toolStreamModeBalanced').checked = toolStreamMode === 'balanced';
     $('toolStreamModeLive').checked = toolStreamMode === 'live';
     $('enforceAgentToolUse').checked = d.enforceAgentToolUse !== false;
+    $('claudeCodeTransparentMode').checked = d.claudeCodeTransparentMode !== false;
   }
   async function saveThinkingConfig() {
     const defaultBudgetTokens = Math.round(Number($('thinkingDefaultBudget').value) || 0);
@@ -2576,7 +2577,8 @@
         defaultContextWindowTokens,
         toolStreamMode,
         bufferToolStreams: toolStreamMode !== 'live',
-        enforceAgentToolUse: $('enforceAgentToolUse').checked
+        enforceAgentToolUse: $('enforceAgentToolUse').checked,
+        claudeCodeTransparentMode: $('claudeCodeTransparentMode').checked
       })
     });
     const d = await res.json();

@@ -223,6 +223,22 @@ func TestParseEventStreamDoesNotAllowCleanEOFTextForGenericClient(t *testing.T) 
 	assertEventStreamErrorKind(t, err, EventStreamIncompleteResponse)
 }
 
+func TestParseEventStreamAllowsTransparentClaudeCodeTextOnCleanEOF(t *testing.T) {
+	stream := bytes.NewReader(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{
+		"content": "transparent response",
+	}))
+	payload := &KiroPayload{transparentClaudeCode: true}
+	var output strings.Builder
+	if err := parseEventStreamWithOptions(stream, &KiroStreamCallback{
+		OnText: func(text string, _ bool) { output.WriteString(text) },
+	}, eventStreamParseOptionsForPayload(payload)); err != nil {
+		t.Fatalf("transparent clean EOF was rejected: %v", err)
+	}
+	if output.String() != "transparent response" {
+		t.Fatalf("unexpected transparent output: %q", output.String())
+	}
+}
+
 func TestParseEventStreamDoesNotAllowCleanEOFWithPendingTool(t *testing.T) {
 	stream := bytes.NewReader(bytes.Join([][]byte{
 		awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "I will update the file."}),

@@ -314,7 +314,10 @@ func isToolExecutionPreamble(text string) bool {
 		"first i'll ", "first, i'll ", "let me first ", "i'll first ",
 		"现在让我", "让我先", "我先", "我将", "我来", "接下来我", "下面我",
 		"先读取", "先查看", "先检查", "先打开", "读取现有", "查看当前", "打开当前",
-		"继续修改", "继续扩展", "开始修改", "然后修改", "然后扩展", "再修改", "再扩展",
+		"继续修改", "继续扩展", "继续添加", "继续构建", "继续生成", "继续完善", "继续补充",
+		"添加更多", "增加更多", "补充更多", "构建更多", "生成更多", "扩展更多", "完善更多",
+		"开始修改", "然后修改", "然后扩展", "再修改", "再扩展", "内容部分", "功能区块", "模型卡片",
+		"continue adding", "continue building", "continue generating", "keep adding", "append more", "add more",
 	} {
 		if strings.Contains(text, marker) {
 			return true

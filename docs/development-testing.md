@@ -65,6 +65,11 @@ Claude Code harness:
 bash scripts/dev-test.sh client-e2e
 ```
 
+Claude Code requests use the transparent compatibility path by default. It
+preserves paired historical `tool_use`/`tool_result` blocks and direct stream
+events; the Web setting `claudeCodeTransparentMode` can disable it for legacy
+regression comparisons.
+
 It builds `cmd/mcpfixture`, creates disposable Skills, MCP fixtures, git
 repositories, and workspaces, then runs bounded cases for plain and thinking
 streams, file edits, Skills, MCP zero-argument/repeated/large/error calls,

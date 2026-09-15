@@ -2124,6 +2124,18 @@ func configureClaudeToolStreaming(payload *KiroPayload, req *ClaudeRequest, thin
 		return
 	}
 	payload.clientUserAgent = req.ClientUserAgent
+	if payload.transparentClaudeCode {
+		// Claude Code compatibility mode mirrors kiro.rs: forward semantic text,
+		// thinking, and tool frames immediately. The EventStream parser still
+		// validates frame/JSON integrity, but no inferred tool gate or whole-turn
+		// buffering is applied.
+		payload.requireActionableOutput = false
+		payload.requireToolUse = false
+		payload.deferTextUntilComplete = false
+		payload.streamThinkingPrecommit = false
+		payload.streamToolUseDeltas = req.Stream && len(req.Tools) > 0
+		return
+	}
 	safeMode := thinkingCfg.ToolStreamMode == config.ToolStreamModeSafe
 	liveMode := thinkingCfg.ToolStreamMode == config.ToolStreamModeLive
 	adaptiveMode := thinkingCfg.ToolStreamMode == config.ToolStreamModeAdaptive
@@ -2190,6 +2202,7 @@ func (h *Handler) handleClaudeMessages(w http.ResponseWriter, r *http.Request) {
 		h.finalizeUnrecordedRequestDetail(r.Context(), detailStatus, startedAt, protocol, req.Model)
 	}()
 	thinkingCfg := config.GetThinkingConfig()
+	transparentClaudeCode := isClaudeCodeTransparentRequest(&req)
 	contextWindowTokens := applyClaudeTokenBudgetDefaults(&req)
 	if adjusted, normalizeErr := normalizeClaudeThinkingBudget(&req); normalizeErr != nil {
 		h.sendClaudeError(w, http.StatusBadRequest, "invalid_request_error", normalizeErr.Error())
@@ -2211,21 +2224,25 @@ func (h *Handler) handleClaudeMessages(w http.ResponseWriter, r *http.Request) {
 	apiKeyID := apiKeyIDFromContext(r.Context())
 	requestedModel := req.Model
 	var fallbackDecision modelFallbackDecision
-	if routedModel, decision, changed := h.resolveRequestModelRoute(req.Model, actualModel, apiKeyID); changed {
-		actualModel = routedModel
-		fallbackDecision = decision
-		markModelRoute(r.Context(), actualModel)
-		contextWindowTokens = resolveContextWindowTokens(actualModel, req.ContextWindow, req.MaxInputTokens)
-		logger.Warnf("[ModelFallback] routing %s to %s before dispatch (rule=%s)", requestedModel, actualModel, decision.Rule.ID)
+	if !transparentClaudeCode {
+		if routedModel, decision, changed := h.resolveRequestModelRoute(req.Model, actualModel, apiKeyID); changed {
+			actualModel = routedModel
+			fallbackDecision = decision
+			markModelRoute(r.Context(), actualModel)
+			contextWindowTokens = resolveContextWindowTokens(actualModel, req.ContextWindow, req.MaxInputTokens)
+			logger.Warnf("[ModelFallback] routing %s to %s before dispatch (rule=%s)", requestedModel, actualModel, decision.Rule.ID)
+		}
 	}
-	if !h.requestedModelAvailable(req.Model, actualModel) {
+	if !transparentClaudeCode && !h.requestedModelAvailable(req.Model, actualModel) {
 		h.sendClaudeError(w, http.StatusBadRequest, "invalid_request_error", "The requested model is not available")
 		return
 	}
-	if fallbackModel, changed := maybeLongToolFallback(actualModel, req.MaxTokens, claudeToolNames(req.Tools)); changed {
-		actualModel = fallbackModel
-		markModelRoute(r.Context(), actualModel)
-		contextWindowTokens = resolveContextWindowTokens(actualModel, req.ContextWindow, req.MaxInputTokens)
+	if !transparentClaudeCode {
+		if fallbackModel, changed := maybeLongToolFallback(actualModel, req.MaxTokens, claudeToolNames(req.Tools)); changed {
+			actualModel = fallbackModel
+			markModelRoute(r.Context(), actualModel)
+			contextWindowTokens = resolveContextWindowTokens(actualModel, req.ContextWindow, req.MaxInputTokens)
+		}
 	}
 	req.Model = actualModel
 	h.prepareClaudeNativeEffort(&req, thinking)
@@ -2255,6 +2272,9 @@ func (h *Handler) handleClaudeMessages(w http.ResponseWriter, r *http.Request) {
 
 	// 转换请求
 	kiroPayload := ClaudeToKiro(&req, thinking)
+	if transparentClaudeCode {
+		kiroPayload = ClaudeToKiroTransparent(&req, thinking)
+	}
 	kiroPayload.requestContext = r.Context()
 	kiroPayload.contextWindowTokens = contextWindowTokens
 	kiroPayload.clientOutputTokenLimit = req.MaxTokens
@@ -8014,6 +8034,7 @@ func (h *Handler) apiGetThinkingConfig(w http.ResponseWriter, r *http.Request) {
 		"toolStreamMode":             cfg.ToolStreamMode,
 		"bufferToolStreams":          cfg.BufferToolStreams,
 		"enforceAgentToolUse":        cfg.EnforceAgentToolUse,
+		"claudeCodeTransparentMode":  cfg.ClaudeCodeTransparentMode,
 		"agentToolSteering":          config.GetAgentToolSteering(),
 	})
 }
@@ -8031,6 +8052,7 @@ func (h *Handler) apiUpdateThinkingConfig(w http.ResponseWriter, r *http.Request
 		ToolStreamMode             *string `json:"toolStreamMode"`
 		BufferToolStreams          *bool   `json:"bufferToolStreams"`
 		EnforceAgentToolUse        *bool   `json:"enforceAgentToolUse"`
+		ClaudeCodeTransparentMode  *bool   `json:"claudeCodeTransparentMode"`
 		AgentToolSteering          *bool   `json:"agentToolSteering"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -8121,6 +8143,13 @@ func (h *Handler) apiUpdateThinkingConfig(w http.ResponseWriter, r *http.Request
 	}
 	if req.AgentToolSteering != nil {
 		if err := config.UpdateAgentToolSteering(*req.AgentToolSteering); err != nil {
+			w.WriteHeader(500)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+	}
+	if req.ClaudeCodeTransparentMode != nil {
+		if err := config.UpdateClaudeCodeTransparentMode(*req.ClaudeCodeTransparentMode); err != nil {
 			w.WriteHeader(500)
 			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 			return

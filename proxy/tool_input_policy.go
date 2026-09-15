@@ -8,8 +8,9 @@ import (
 // eventStreamParseOptions carries request-scoped facts that cannot be inferred
 // from an upstream event stream alone.
 type eventStreamParseOptions struct {
-	toolInputPolicies    map[string]toolInputPolicy
-	allowInferredTextEOF bool
+	toolInputPolicies       map[string]toolInputPolicy
+	allowInferredTextEOF    bool
+	allowTransparentTextEOF bool
 }
 
 type toolInputPolicy uint8
@@ -32,6 +33,7 @@ func eventStreamParseOptionsForPayload(payload *KiroPayload) eventStreamParseOpt
 	options.allowInferredTextEOF = payload.toolUsePolicy == toolUsePolicyInferred &&
 		payload.requireToolUse && payload.deferTextUntilComplete &&
 		isClaudeCodeUserAgent(payload.clientUserAgent)
+	options.allowTransparentTextEOF = payload.transparentClaudeCode
 	if len(payload.toolInputPolicies) == 0 {
 		return options
 	}

@@ -114,6 +114,68 @@ func TestClaudeNonStreamRetriesTruncatedResponseOnSameAccount(t *testing.T) {
 	}
 }
 
+func TestClaudeCodeTransparentModePreservesToolHistoryOnContinuation(t *testing.T) {
+	var checked atomic.Bool
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload KiroPayload
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("decode transparent payload: %v", err)
+		} else {
+			foundUse, foundResult := false, false
+			for _, message := range payload.ConversationState.History {
+				if assistant := message.AssistantResponseMessage; assistant != nil {
+					for _, use := range assistant.ToolUses {
+						if use.ToolUseID == "tool-continue" {
+							foundUse = true
+						}
+					}
+				}
+				if user := message.UserInputMessage; user != nil && user.UserInputMessageContext != nil {
+					for _, result := range user.UserInputMessageContext.ToolResults {
+						if result.ToolUseID == "tool-continue" {
+							foundResult = true
+						}
+					}
+				}
+			}
+			current := payload.ConversationState.CurrentMessage.UserInputMessage
+			if !foundUse || !foundResult || current.Content != "continue" {
+				t.Errorf("transparent payload lost continuation state: use=%v result=%v current=%q history=%#v", foundUse, foundResult, current.Content, payload.ConversationState.History)
+			}
+			if strings.Contains(current.Content, agentRequiredToolActionMarker) {
+				t.Errorf("transparent payload contains inferred tool marker: %q", current.Content)
+			}
+			checked.Store(true)
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "continued"}))
+		_, _ = w.Write(awsEventStreamFrame(t, "metadataEvent", map[string]interface{}{"stopReason": "end_turn"}))
+	}))
+	defer upstream.Close()
+	h := setupStreamIntegrityPathTest(t, upstream)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{
+		"model":"claude-sonnet-4.6",
+		"max_tokens":256,
+		"messages":[
+			{"role":"user","content":"Create and edit the HTML file in the workspace."},
+			{"role":"assistant","content":[{"type":"tool_use","id":"tool-continue","name":"Write","input":{"file_path":"index.html"}}]},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-continue","content":"created"}]},
+			{"role":"user","content":"continue"}
+		],
+		"tools":[{"name":"Write","description":"write a file","input_schema":{"type":"object","properties":{"file_path":{"type":"string"}}}}]
+	}`))
+	req.Header.Set("User-Agent", "claude-code/2.1.270")
+	h.handleClaudeMessages(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "continued") {
+		t.Fatalf("transparent continuation failed: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if !checked.Load() {
+		t.Fatal("upstream payload was not checked")
+	}
+}
+
 func TestOpenAIAndResponsesNonStreamDiscardTruncatedAttempt(t *testing.T) {
 	for _, tc := range []struct {
 		name string

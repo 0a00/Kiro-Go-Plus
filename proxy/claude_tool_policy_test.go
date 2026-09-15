@@ -48,6 +48,45 @@ func TestPrepareClaudeToolPolicyDoesNotForceExplanatoryQuestion(t *testing.T) {
 	}
 }
 
+func TestPrepareClaudeToolPolicyRequiresToolForWorkspaceContinuation(t *testing.T) {
+	req := &ClaudeRequest{
+		Messages: []ClaudeMessage{
+			{Role: "user", Content: "Create and edit the HTML file in the workspace."},
+			{Role: "assistant", Content: []interface{}{
+				map[string]interface{}{"type": "tool_use", "id": "tool-1", "name": "Edit", "input": map[string]interface{}{"file_path": "index.html"}},
+			}},
+			{Role: "user", Content: []interface{}{
+				map[string]interface{}{"type": "tool_result", "tool_use_id": "tool-1", "content": "edited"},
+			}},
+			{Role: "user", Content: "继续"},
+		},
+		Tools: []ClaudeTool{{Name: "Edit", Description: "Edit a file"}},
+	}
+	if err := prepareClaudeToolPolicy(req, true); err != nil {
+		t.Fatalf("prepare continuation policy: %v", err)
+	}
+	if !req.RequireToolUse || req.ToolUsePolicy != toolUsePolicyInferred {
+		t.Fatalf("workspace continuation was not inferred: require=%v policy=%q", req.RequireToolUse, req.ToolUsePolicy)
+	}
+}
+
+func TestPrepareClaudeToolPolicyDoesNotForcePlainContinuation(t *testing.T) {
+	req := &ClaudeRequest{
+		Messages: []ClaudeMessage{
+			{Role: "user", Content: "Explain the design."},
+			{Role: "assistant", Content: "The design is complete."},
+			{Role: "user", Content: "继续解释"},
+		},
+		Tools: []ClaudeTool{{Name: "Edit", Description: "Edit a file"}},
+	}
+	if err := prepareClaudeToolPolicy(req, true); err != nil {
+		t.Fatalf("prepare explanatory continuation policy: %v", err)
+	}
+	if req.RequireToolUse {
+		t.Fatal("plain explanatory continuation unexpectedly required a workspace tool")
+	}
+}
+
 func TestPrepareClaudeToolPolicyDisabledLeavesAutoRequestUnmodified(t *testing.T) {
 	req := &ClaudeRequest{
 		Messages: []ClaudeMessage{{Role: "user", Content: "Please read the file."}},

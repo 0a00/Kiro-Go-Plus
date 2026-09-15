@@ -27,6 +27,7 @@ Kiro-Go Plus 保留原 Kiro-Go 的接口兼容性和部署方式，重点增强�
 - 扩展能力：Claude Opus 5 与 Sonnet 5 元数据、GPT-5.6 别名、动态模型能力与 effort 发现、可选安全格式未列出模型透传、文本/思考/工具能力自检、多轮 Web Search、外部 Token 计数和 Responses 历史存储
 - 运维能力：账号库存诊断（延迟/错误 EWMA 与粘性命中率）、持久化请求元数据、有界长期 JSONL 日志归档、账号选择/排队与首 SSE/思考/文本/工具输出耗时、有效上游事件间隔、工具分片和组装等待、可选完整日志（脱敏请求/输出、重试和流时间线）、诊断事件、Webhook 告警、`/health`、`/ready`
 - Token 与 Agent 稳定性：支持 Kiro 原生 reasoning effort，可配置默认思考、最大输出和上下文预算；客户端显式值优先；Claude 工具流支持安全、自适应、平衡和实时四档策略
+- Claude Code 兼容：透明兼容模式默认开启，保留结构化工具历史、会话 ID 和原始流语义；可在 Web 的 Thinking 设置中关闭并回退到旧版策略
 - 出站网络：全局和账号级 HTTP / SOCKS5 代理；可选代理池健康检查与账号固定/轮询分配
 
 Prompt Cache 统计不会缓存模型响应正文或减少 Kiro 请求。`official_actual` 只透传上游真实字段，`matched_prefix` 保留旧版估算，`aggregator_target` 在有效预热命中后按总输入目标区间重分配字段且不改变总 Token。旧配置升级后保留 `matched_prefix`，接入 New API/Sub2API 时需在 Web 设置中选择 `aggregator_target`。持久化仅保存版本化提示词指纹和元数据，文件权限为 `0600`。

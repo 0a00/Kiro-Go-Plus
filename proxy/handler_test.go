@@ -290,14 +290,15 @@ func TestThinkingConfigAPIUpdatesTokenDefaults(t *testing.T) {
 		"defaultContextWindowTokens":1000000,
 		"toolStreamMode":"balanced",
 		"bufferToolStreams":true,
-		"enforceAgentToolUse":true
+		"enforceAgentToolUse":true,
+		"claudeCodeTransparentMode":false
 	}`))
 	(&Handler{}).apiUpdateThinkingConfig(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
 	}
 	got := config.GetThinkingConfig()
-	if got.DefaultMaxOutputTokens != 64000 || got.DefaultContextWindowTokens != 1000000 || got.ToolStreamMode != config.ToolStreamModeBalanced || !got.BufferToolStreams {
+	if got.DefaultMaxOutputTokens != 64000 || got.DefaultContextWindowTokens != 1000000 || got.ToolStreamMode != config.ToolStreamModeBalanced || !got.BufferToolStreams || got.ClaudeCodeTransparentMode {
 		t.Fatalf("unexpected persisted token defaults: %+v", got)
 	}
 
@@ -306,11 +307,12 @@ func TestThinkingConfigAPIUpdatesTokenDefaults(t *testing.T) {
 	var response struct {
 		ToolStreamMode    string `json:"toolStreamMode"`
 		BufferToolStreams bool   `json:"bufferToolStreams"`
+		Transparent       bool   `json:"claudeCodeTransparentMode"`
 	}
 	if err := json.Unmarshal(getRec.Body.Bytes(), &response); err != nil {
 		t.Fatalf("decode thinking config response: %v", err)
 	}
-	if response.ToolStreamMode != config.ToolStreamModeBalanced || !response.BufferToolStreams {
+	if response.ToolStreamMode != config.ToolStreamModeBalanced || !response.BufferToolStreams || response.Transparent {
 		t.Fatalf("unexpected thinking config response: %+v", response)
 	}
 

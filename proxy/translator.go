@@ -157,20 +157,21 @@ func MapModel(model string) string {
 // ==================== Claude API 类型 ====================
 
 type ClaudeRequest struct {
-	Model           string                `json:"model"`
-	Messages        []ClaudeMessage       `json:"messages"`
-	MaxTokens       int                   `json:"max_tokens"`
-	MaxOutputTokens int                   `json:"max_output_tokens,omitempty"`
-	ContextWindow   int                   `json:"context_window,omitempty"`
-	MaxInputTokens  int                   `json:"max_input_tokens,omitempty"`
-	Temperature     float64               `json:"temperature,omitempty"`
-	TopP            float64               `json:"top_p,omitempty"`
-	Stream          bool                  `json:"stream,omitempty"`
-	System          interface{}           `json:"system,omitempty"` // string or []SystemBlock
-	Thinking        *ClaudeThinkingConfig `json:"thinking,omitempty"`
-	OutputConfig    *ClaudeOutputConfig   `json:"output_config,omitempty"`
-	Tools           []ClaudeTool          `json:"tools,omitempty"`
-	ToolChoice      interface{}           `json:"tool_choice,omitempty"`
+	Model           string                 `json:"model"`
+	Messages        []ClaudeMessage        `json:"messages"`
+	MaxTokens       int                    `json:"max_tokens"`
+	MaxOutputTokens int                    `json:"max_output_tokens,omitempty"`
+	ContextWindow   int                    `json:"context_window,omitempty"`
+	MaxInputTokens  int                    `json:"max_input_tokens,omitempty"`
+	Temperature     float64                `json:"temperature,omitempty"`
+	TopP            float64                `json:"top_p,omitempty"`
+	Stream          bool                   `json:"stream,omitempty"`
+	System          interface{}            `json:"system,omitempty"` // string or []SystemBlock
+	Thinking        *ClaudeThinkingConfig  `json:"thinking,omitempty"`
+	OutputConfig    *ClaudeOutputConfig    `json:"output_config,omitempty"`
+	Tools           []ClaudeTool           `json:"tools,omitempty"`
+	ToolChoice      interface{}            `json:"tool_choice,omitempty"`
+	Metadata        *ClaudeRequestMetadata `json:"metadata,omitempty"`
 
 	RequireToolUse    bool   `json:"-"`
 	RequiredToolName  string `json:"-"`
@@ -179,6 +180,10 @@ type ClaudeRequest struct {
 	NativeEffort      string `json:"-"`
 	NativeEffortPath  string `json:"-"`
 	ClientUserAgent   string `json:"-"`
+}
+
+type ClaudeRequestMetadata struct {
+	UserID string `json:"user_id,omitempty"`
 }
 
 type ClaudeThinkingConfig struct {
@@ -258,21 +263,46 @@ type ClaudeUsage struct {
 
 const maxToolDescLen = 10237
 
+type claudeTranslationOptions struct {
+	transparent bool
+}
+
 func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
+	return claudeToKiro(req, thinking, claudeTranslationOptions{})
+}
+
+func ClaudeToKiroTransparent(req *ClaudeRequest, thinking bool) *KiroPayload {
+	return claudeToKiro(req, thinking, claudeTranslationOptions{transparent: true})
+}
+
+func claudeToKiro(req *ClaudeRequest, thinking bool, options claudeTranslationOptions) *KiroPayload {
 	modelID := MapModel(req.Model)
 	origin := "AI_EDITOR"
-	toolNames := newToolNameRegistry(sanitizeToolName)
-	toolSteeringEnabled := config.GetAgentToolSteering()
+	toolNormalizer := sanitizeToolName
+	if options.transparent {
+		// kiro.rs preserves valid Claude/MCP names and only shortens names that
+		// exceed Kiro's length limit. Normalizing every underscore/dash changes
+		// the tool namespace seen by Claude Code and is not transparent.
+		toolNormalizer = func(name string) string { return strings.TrimSpace(name) }
+	}
+	toolNames := newToolNameRegistry(toolNormalizer)
+	toolSteeringEnabled := config.GetAgentToolSteering() && !options.transparent
 
 	// 提取系统提示
-	systemPrompt := buildClaudeSystemPrompt(req.System, claudeThinkingPrompt(req, thinking))
+	thinkingPrompt := claudeThinkingPrompt(req, thinking)
+	systemPrompt := buildClaudeSystemPrompt(req.System, thinkingPrompt)
+	if options.transparent {
+		systemPrompt = buildClaudeSystemPromptTransparent(req.System, thinkingPrompt)
+	}
 	if toolSteeringEnabled && req.AgentToolSteering && len(req.Tools) > 0 && !strings.Contains(systemPrompt, agentToolPolicyMarker) {
 		if systemPrompt != "" {
 			systemPrompt += "\n\n"
 		}
 		systemPrompt += buildClaudeAgentToolPolicy(req)
 	}
-	systemPrompt = appendLongToolPolicy(systemPrompt, modelID, claudeToolNames(req.Tools))
+	if !options.transparent {
+		systemPrompt = appendLongToolPolicy(systemPrompt, modelID, claudeToolNames(req.Tools))
+	}
 
 	// 构建历史消息
 	history := make([]KiroHistoryMessage, 0)
@@ -340,6 +370,9 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 		}
 		history = append(priming, history...)
 	}
+	if options.transparent {
+		history = mergeClaudeHistoryTurns(history)
+	}
 
 	// Decide whether the current tool results form a valid "active" tool turn:
 	// the last history assistant must carry matching structured toolUses. If not
@@ -351,15 +384,19 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 	// Without them, preserve results as text and remove structured history too.
 	keepCurrentToolResults = keepCurrentToolResults && len(kiroTools) > 0
 
-	// Flatten structured tool calls/results that live in history; upstream only
-	// accepts a single active tool turn (last assistant toolUses ⟺ current toolResults).
-	if keepCurrentToolResults {
-		currentToolResults = orderedToolResults
-		history = sanitizeKiroHistory(history, currentToolResults)
+	if options.transparent {
+		currentToolResults, history, kiroTools = preserveStructuredClaudeHistory(history, currentToolResults, orderedToolResults, keepCurrentToolResults, kiroTools, toolNames)
 	} else {
-		history = sanitizeKiroHistory(history, nil)
+		// Flatten structured tool calls/results that live in history; upstream only
+		// accepts a single active tool turn (last assistant toolUses ⟺ current toolResults).
+		if keepCurrentToolResults {
+			currentToolResults = orderedToolResults
+			history = sanitizeKiroHistory(history, currentToolResults)
+		} else {
+			history = sanitizeKiroHistory(history, nil)
+		}
+		mapStructuredHistoryToolNames(history, toolNames)
 	}
-	mapStructuredHistoryToolNames(history, toolNames)
 
 	// 构建最终内容
 	finalContent := ""
@@ -378,10 +415,13 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 			finalContent = strings.TrimSpace(finalContent + "\n\n" + continuation)
 		}
 	}
-	finalContent = appendClaudeRequiredToolAction(finalContent, req)
+	if !options.transparent {
+		finalContent = appendClaudeRequiredToolAction(finalContent, req)
+	}
 
 	// 构建 payload
 	payload := &KiroPayload{}
+	payload.transparentClaudeCode = options.transparent
 	payload.hasSystemPriming = systemPrompt != ""
 	payload.promptCacheTTL = promptCacheTTLFromClaudeRequest(req)
 	payload.ToolNameMap = toolNames.restoreMap()
@@ -389,7 +429,13 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 	payload.ConversationState.ChatTriggerType = "MANUAL"
 	payload.ConversationState.AgentTaskType = "vibe"
 	payload.ConversationState.AgentContinuationId = uuid.New().String()
-	payload.ConversationState.ConversationID = buildConversationID(modelID, systemPrompt, firstClaudeConversationAnchor(req.Messages))
+	conversationID := buildConversationID(modelID, systemPrompt, firstClaudeConversationAnchor(req.Messages))
+	if options.transparent {
+		if sessionID := claudeSessionIDFromMetadata(req.Metadata); sessionID != "" {
+			conversationID = sessionID
+		}
+	}
+	payload.ConversationState.ConversationID = conversationID
 	payload.ConversationState.CurrentMessage.UserInputMessage = KiroUserInputMessage{
 		Content: finalContent,
 		ModelID: modelID,
@@ -436,9 +482,82 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 	return payload
 }
 
+func mergeClaudeHistoryTurns(history []KiroHistoryMessage) []KiroHistoryMessage {
+	if len(history) < 2 {
+		return history
+	}
+	merged := make([]KiroHistoryMessage, 0, len(history))
+	for _, entry := range history {
+		if len(merged) == 0 {
+			merged = append(merged, entry)
+			continue
+		}
+		last := &merged[len(merged)-1]
+		switch {
+		case last.UserInputMessage != nil && entry.UserInputMessage != nil:
+			mergeKiroHistoryUsers(last.UserInputMessage, entry.UserInputMessage)
+		case last.AssistantResponseMessage != nil && entry.AssistantResponseMessage != nil:
+			mergeKiroHistoryAssistants(last.AssistantResponseMessage, entry.AssistantResponseMessage)
+		default:
+			merged = append(merged, entry)
+		}
+	}
+	if last := merged[len(merged)-1]; last.UserInputMessage != nil {
+		merged = append(merged, KiroHistoryMessage{AssistantResponseMessage: &KiroAssistantResponseMessage{Content: "OK"}})
+	}
+	return trimLeadingAssistantHistory(merged)
+}
+
+func mergeKiroHistoryUsers(dst, src *KiroUserInputMessage) {
+	if dst == nil || src == nil {
+		return
+	}
+	if strings.TrimSpace(src.Content) != "" {
+		if strings.TrimSpace(dst.Content) == "" {
+			dst.Content = src.Content
+		} else {
+			dst.Content += "\n" + src.Content
+		}
+	}
+	dst.Images = append(dst.Images, src.Images...)
+	if src.UserInputMessageContext == nil {
+		return
+	}
+	if dst.UserInputMessageContext == nil {
+		dst.UserInputMessageContext = &UserInputMessageContext{}
+	}
+	dst.UserInputMessageContext.Tools = append(dst.UserInputMessageContext.Tools, src.UserInputMessageContext.Tools...)
+	dst.UserInputMessageContext.ToolResults = append(dst.UserInputMessageContext.ToolResults, src.UserInputMessageContext.ToolResults...)
+}
+
+func mergeKiroHistoryAssistants(dst, src *KiroAssistantResponseMessage) {
+	if dst == nil || src == nil {
+		return
+	}
+	if strings.TrimSpace(src.Content) != "" {
+		if strings.TrimSpace(dst.Content) == "" {
+			dst.Content = src.Content
+		} else {
+			dst.Content += "\n" + src.Content
+		}
+	}
+	dst.ToolUses = append(dst.ToolUses, src.ToolUses...)
+}
+
 func buildClaudeSystemPrompt(system interface{}, thinkingPrompt string) string {
 	systemPrompt := extractSystemPrompt(system)
 	systemPrompt = applyPromptFilters(systemPrompt)
+	if thinkingPrompt == "" || hasThinkingModeTags(systemPrompt) {
+		return systemPrompt
+	}
+	if systemPrompt == "" {
+		return thinkingPrompt
+	}
+	return thinkingPrompt + "\n\n" + systemPrompt
+}
+
+func buildClaudeSystemPromptTransparent(system interface{}, thinkingPrompt string) string {
+	systemPrompt := extractSystemPrompt(system)
 	if thinkingPrompt == "" || hasThinkingModeTags(systemPrompt) {
 		return systemPrompt
 	}
@@ -2224,6 +2343,118 @@ func sanitizeKiroHistory(history []KiroHistoryMessage, currentToolResults []Kiro
 	return trimLeadingAssistantHistory(cleaned)
 }
 
+// preserveStructuredClaudeHistory is the compatibility path used for Claude
+// Code. The upstream Kiro protocol accepts completed tool_use/tool_result
+// pairs in history; flattening every completed turn into prose changes the
+// model's conversation semantics and makes later "continue" turns unreliable.
+// Only orphaned pairs are removed here. The legacy sanitizer remains the
+// default for generic clients because it protects older payloads that contain
+// malformed or incomplete tool history.
+func preserveStructuredClaudeHistory(
+	history []KiroHistoryMessage,
+	currentResults []KiroToolResult,
+	orderedCurrentResults []KiroToolResult,
+	keepCurrentResults bool,
+	tools []KiroToolWrapper,
+	registry *toolNameRegistry,
+) ([]KiroToolResult, []KiroHistoryMessage, []KiroToolWrapper) {
+	if registry == nil {
+		registry = newToolNameRegistry(sanitizeToolName)
+	}
+	mapStructuredHistoryToolNames(history, registry)
+
+	toolIDs := make(map[string]struct{})
+	resultIDs := make(map[string]struct{})
+	for _, message := range history {
+		if assistant := message.AssistantResponseMessage; assistant != nil {
+			for _, toolUse := range assistant.ToolUses {
+				if strings.TrimSpace(toolUse.ToolUseID) != "" {
+					toolIDs[toolUse.ToolUseID] = struct{}{}
+				}
+			}
+		}
+		if user := message.UserInputMessage; user != nil && user.UserInputMessageContext != nil {
+			for _, result := range user.UserInputMessageContext.ToolResults {
+				if strings.TrimSpace(result.ToolUseID) != "" {
+					resultIDs[result.ToolUseID] = struct{}{}
+				}
+			}
+		}
+	}
+	for _, result := range currentResults {
+		if strings.TrimSpace(result.ToolUseID) != "" {
+			resultIDs[result.ToolUseID] = struct{}{}
+		}
+	}
+
+	// Keep only complete structured history pairs. A missing counterpart is
+	// unsafe to forward and is handled by the ordinary text-preserving fallback.
+	for i := range history {
+		if assistant := history[i].AssistantResponseMessage; assistant != nil {
+			kept := assistant.ToolUses[:0]
+			for _, toolUse := range assistant.ToolUses {
+				if _, ok := resultIDs[toolUse.ToolUseID]; ok {
+					if strings.TrimSpace(assistant.Content) == "" {
+						assistant.Content = " "
+					}
+					kept = append(kept, toolUse)
+				}
+			}
+			assistant.ToolUses = kept
+		}
+		if user := history[i].UserInputMessage; user != nil && user.UserInputMessageContext != nil {
+			ctx := user.UserInputMessageContext
+			kept := ctx.ToolResults[:0]
+			for _, result := range ctx.ToolResults {
+				if _, ok := toolIDs[result.ToolUseID]; ok {
+					kept = append(kept, result)
+				}
+			}
+			ctx.ToolResults = kept
+			if len(ctx.Tools) == 0 && len(ctx.ToolResults) == 0 {
+				user.UserInputMessageContext = nil
+			}
+		}
+	}
+
+	// Kiro requires every historical tool name to have a current definition.
+	// Claude Code can change its tool list after compaction, so add harmless
+	// placeholders for valid historical calls that are no longer declared.
+	existing := make(map[string]bool, len(tools))
+	for _, tool := range tools {
+		existing[strings.ToLower(strings.TrimSpace(tool.ToolSpecification.Name))] = true
+	}
+	for _, message := range history {
+		assistant := message.AssistantResponseMessage
+		if assistant == nil {
+			continue
+		}
+		for _, toolUse := range assistant.ToolUses {
+			name := registry.upstreamName(toolUse.Name)
+			key := strings.ToLower(strings.TrimSpace(name))
+			if key == "" || existing[key] {
+				continue
+			}
+			placeholder := KiroToolWrapper{}
+			placeholder.ToolSpecification.Name = name
+			placeholder.ToolSpecification.Description = "Tool used in conversation history"
+			placeholder.ToolSpecification.InputSchema = InputSchema{JSON: map[string]interface{}{
+				"type":                 "object",
+				"properties":           map[string]interface{}{},
+				"required":             []interface{}{},
+				"additionalProperties": true,
+			}}
+			tools = append(tools, placeholder)
+			existing[key] = true
+		}
+	}
+
+	if keepCurrentResults {
+		return orderedCurrentResults, history, tools
+	}
+	return currentResults, history, tools
+}
+
 // stripTextualThinkingBlocks removes proxy-style reasoning tags replayed as
 // ordinary assistant text. In particular, an interrupted response can leave an
 // unclosed <thinking> tail in client history; forwarding that tail upstream can
@@ -2440,6 +2671,10 @@ func repairKiroPayloadToolResults(payload *KiroPayload) {
 		return
 	}
 	payload.recordToolSchemaRepairs(sanitizeKiroPayloadToolSchemas(payload))
+	if payload.transparentClaudeCode && !payload.transparentHistoryFallbackUsed {
+		repairStructuredKiroPayloadToolResults(payload)
+		return
+	}
 
 	current := &payload.ConversationState.CurrentMessage.UserInputMessage
 	currentResults := []KiroToolResult(nil)
@@ -2476,6 +2711,89 @@ func repairKiroPayloadToolResults(payload *KiroPayload) {
 			context.ToolResults = ordered
 		} else {
 			repaired = detachOrphanedToolResults(payload) || repaired
+		}
+	}
+	if repaired {
+		payload.recordToolResultRepair()
+	}
+}
+
+// repairStructuredKiroPayloadToolResults validates the transparent path
+// without flattening valid completed turns. It is intentionally separate from
+// repairKiroPayloadToolResults because the legacy sanitizer changes the model's
+// view of a Claude Code conversation by removing every historical tool call.
+func repairStructuredKiroPayloadToolResults(payload *KiroPayload) {
+	if payload == nil {
+		return
+	}
+	current := &payload.ConversationState.CurrentMessage.UserInputMessage
+	context := current.UserInputMessageContext
+	currentResults := []KiroToolResult(nil)
+	repaired := false
+	if context != nil && len(context.ToolResults) > 0 {
+		if ordered, ok := orderToolResultsForLastAssistant(payload.ConversationState.History, context.ToolResults); ok {
+			repaired = !sameToolResultOrder(context.ToolResults, ordered)
+			context.ToolResults = ordered
+			currentResults = ordered
+		} else {
+			repaired = detachOrphanedToolResults(payload)
+		}
+	}
+
+	toolIDs := make(map[string]struct{})
+	resultIDs := make(map[string]struct{})
+	for _, message := range payload.ConversationState.History {
+		if assistant := message.AssistantResponseMessage; assistant != nil {
+			for _, toolUse := range assistant.ToolUses {
+				if strings.TrimSpace(toolUse.ToolUseID) != "" {
+					toolIDs[toolUse.ToolUseID] = struct{}{}
+				}
+			}
+		}
+		if user := message.UserInputMessage; user != nil && user.UserInputMessageContext != nil {
+			for _, result := range user.UserInputMessageContext.ToolResults {
+				if strings.TrimSpace(result.ToolUseID) != "" {
+					resultIDs[result.ToolUseID] = struct{}{}
+				}
+			}
+		}
+	}
+	for _, result := range currentResults {
+		if strings.TrimSpace(result.ToolUseID) != "" {
+			resultIDs[result.ToolUseID] = struct{}{}
+		}
+	}
+
+	for i := range payload.ConversationState.History {
+		message := &payload.ConversationState.History[i]
+		if assistant := message.AssistantResponseMessage; assistant != nil {
+			kept := assistant.ToolUses[:0]
+			for _, toolUse := range assistant.ToolUses {
+				if _, ok := resultIDs[toolUse.ToolUseID]; ok {
+					if strings.TrimSpace(assistant.Content) == "" {
+						assistant.Content = " "
+					}
+					kept = append(kept, toolUse)
+				} else {
+					repaired = true
+				}
+			}
+			assistant.ToolUses = kept
+		}
+		if user := message.UserInputMessage; user != nil && user.UserInputMessageContext != nil {
+			ctx := user.UserInputMessageContext
+			kept := ctx.ToolResults[:0]
+			for _, result := range ctx.ToolResults {
+				if _, ok := toolIDs[result.ToolUseID]; ok {
+					kept = append(kept, result)
+				} else {
+					repaired = true
+				}
+			}
+			ctx.ToolResults = kept
+			if len(ctx.Tools) == 0 && len(ctx.ToolResults) == 0 {
+				user.UserInputMessageContext = nil
+			}
 		}
 	}
 	if repaired {
@@ -2695,6 +3013,30 @@ func firstClaudeConversationAnchor(messages []ClaudeMessage) string {
 		}
 	}
 
+	return ""
+}
+
+func claudeSessionIDFromMetadata(metadata *ClaudeRequestMetadata) string {
+	if metadata == nil {
+		return ""
+	}
+	value := strings.TrimSpace(metadata.UserID)
+	if value == "" {
+		return ""
+	}
+	// Claude Code has used both a raw UUID and a user_xxx__session_UUID form.
+	if parsed, err := uuid.Parse(value); err == nil {
+		return parsed.String()
+	}
+	const marker = "session_"
+	if index := strings.Index(strings.ToLower(value), marker); index >= 0 {
+		candidate := value[index+len(marker):]
+		if len(candidate) >= 36 {
+			if parsed, err := uuid.Parse(candidate[:36]); err == nil {
+				return parsed.String()
+			}
+		}
+	}
 	return ""
 }
 

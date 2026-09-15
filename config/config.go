@@ -495,6 +495,7 @@ type Config struct {
 	BufferToolStreams           *bool  `json:"bufferToolStreams,omitempty"`           // Deprecated compatibility field: true maps to buffered/safe, false maps to live
 	EnforceAgentToolUse         *bool  `json:"enforceAgentToolUse,omitempty"`         // Require tools for detected workspace mutation/execution requests
 	AgentToolSteering           bool   `json:"agentToolSteering,omitempty"`           // Inject extra tool-execution guidance into prompts
+	ClaudeCodeTransparentMode   *bool  `json:"claudeCodeTransparentMode,omitempty"`   // Use the compatibility path for Claude Code requests
 
 	// Endpoint configuration: "auto", "kiro", "codewhisperer", or "amazonq"
 	PreferredEndpoint string `json:"preferredEndpoint,omitempty"`
@@ -649,7 +650,7 @@ const (
 )
 
 // Version current version
-const Version = "1.2.80"
+const Version = "1.2.81"
 
 var (
 	cfg           *Config
@@ -3637,6 +3638,7 @@ type ThinkingConfig struct {
 	ToolStreamMode             string `json:"toolStreamMode"`             // Claude tool stream mode: safe, adaptive, balanced, or live
 	BufferToolStreams          bool   `json:"bufferToolStreams"`          // Deprecated compatibility mirror; false only for live mode
 	EnforceAgentToolUse        bool   `json:"enforceAgentToolUse"`        // Require tools for workspace actions
+	ClaudeCodeTransparentMode  bool   `json:"claudeCodeTransparentMode"`  // Preserve Claude Code protocol semantics
 }
 
 // NormalizeToolStreamMode validates and canonicalizes a Claude tool stream mode.
@@ -3682,6 +3684,7 @@ func GetThinkingConfig() ThinkingConfig {
 			ToolStreamMode:             ToolStreamModeSafe,
 			BufferToolStreams:          true,
 			EnforceAgentToolUse:        true,
+			ClaudeCodeTransparentMode:  true,
 		}
 	}
 
@@ -3712,6 +3715,10 @@ func GetThinkingConfig() ThinkingConfig {
 	if cfg.EnforceAgentToolUse != nil {
 		enforceAgentToolUse = *cfg.EnforceAgentToolUse
 	}
+	transparentMode := true
+	if cfg.ClaudeCodeTransparentMode != nil {
+		transparentMode = *cfg.ClaudeCodeTransparentMode
+	}
 
 	return ThinkingConfig{
 		Suffix:                     suffix,
@@ -3724,7 +3731,30 @@ func GetThinkingConfig() ThinkingConfig {
 		ToolStreamMode:             toolStreamMode,
 		BufferToolStreams:          toolStreamMode != ToolStreamModeLive,
 		EnforceAgentToolUse:        enforceAgentToolUse,
+		ClaudeCodeTransparentMode:  transparentMode,
 	}
+}
+
+// GetClaudeCodeTransparentMode controls the Claude Code compatibility path.
+// It defaults on so a fresh installation follows the upstream-compatible
+// request and stream semantics; operators can disable it for legacy behavior.
+func GetClaudeCodeTransparentMode() bool {
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	if cfg == nil || cfg.ClaudeCodeTransparentMode == nil {
+		return true
+	}
+	return *cfg.ClaudeCodeTransparentMode
+}
+
+func UpdateClaudeCodeTransparentMode(enabled bool) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	if cfg == nil {
+		return fmt.Errorf("configuration is not initialized")
+	}
+	cfg.ClaudeCodeTransparentMode = &enabled
+	return Save()
 }
 
 // GetAgentToolSteering reports whether undisclosed tool-execution guidance may

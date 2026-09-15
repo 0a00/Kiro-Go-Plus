@@ -312,7 +312,7 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 }
 
 func callKiroAPIWithModelFallback(account *config.Account, payload *KiroPayload, callback *KiroStreamCallback) error {
-	if payload == nil || payload.modelFallbackInProgress {
+	if payload == nil || payload.modelFallbackInProgress || payload.transparentClaudeCode {
 		return callKiroAPISingleModel(account, payload, callback)
 	}
 
