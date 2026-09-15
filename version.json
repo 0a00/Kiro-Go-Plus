@@ -1,5 +1,5 @@
 {
-  "version": "1.2.83",
-  "changelog": "Recognize Claude Code requests forwarded through generic gateway User-Agents.\n识别经其他网关转发、使用通用 User-Agent 的 Claude Code 请求。",
+  "version": "1.2.84",
+  "changelog": "Recognize Claude Code beta headers and inherit long-tool timeouts through gateways.\n识别 Claude Code beta 请求头，并让经网关转发的长工具请求继承长超时。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }

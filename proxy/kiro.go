@@ -920,7 +920,7 @@ func toolArgumentIdleTimeoutForRequest(retry config.RetryConfig, payload *KiroPa
 	if argumentTimeout <= 0 {
 		argumentTimeout = assemblyTimeout
 	}
-	if payload != nil && isClaudeCodeUserAgent(payload.clientUserAgent) {
+	if payload != nil && (payload.transparentClaudeCode || isClaudeCodeUserAgent(payload.clientUserAgent)) {
 		// Claude Code needs the larger configured assembly window as a grace
 		// period for long workspace tools; the upstream attempt budget still
 		// bounds the total request duration.
@@ -936,8 +936,8 @@ func toolArgumentIdleTimeoutForRequest(retry config.RetryConfig, payload *KiroPa
 
 func streamIdleTimeoutForRequest(retry config.RetryConfig, payload *KiroPayload) time.Duration {
 	idleTimeout := time.Duration(retry.StreamIdleTimeoutSeconds) * time.Second
-	if payload != nil && isClaudeCodeUserAgent(payload.clientUserAgent) &&
-		(payload.deferTextUntilComplete || payload.requireToolUse || payload.requireActionableOutput) {
+	if payload != nil && (payload.transparentClaudeCode || isClaudeCodeUserAgent(payload.clientUserAgent)) &&
+		(payload.transparentClaudeCode || payload.deferTextUntilComplete || payload.requireToolUse || payload.requireActionableOutput) {
 		if toolTimeout := toolArgumentIdleTimeoutForRequest(retry, payload); toolTimeout > idleTimeout {
 			idleTimeout = toolTimeout
 		}

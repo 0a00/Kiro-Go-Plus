@@ -180,6 +180,10 @@ type ClaudeRequest struct {
 	NativeEffort      string `json:"-"`
 	NativeEffortPath  string `json:"-"`
 	ClientUserAgent   string `json:"-"`
+	// ClientClaudeCodeBeta is set from the Anthropic-Beta request header. A
+	// gateway in front of us may replace Claude Code's User-Agent, while this
+	// protocol marker survives and is a reliable request-local signal.
+	ClientClaudeCodeBeta bool `json:"-"`
 }
 
 type ClaudeRequestMetadata struct {

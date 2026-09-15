@@ -80,7 +80,7 @@ func looksLikeClaudeCodeRequest(req *ClaudeRequest) bool {
 	if req == nil {
 		return false
 	}
-	if isClaudeCodeUserAgent(req.ClientUserAgent) || isClaudeCodeSystemPrompt(extractSystemPrompt(req.System)) {
+	if req.ClientClaudeCodeBeta || isClaudeCodeUserAgent(req.ClientUserAgent) || isClaudeCodeSystemPrompt(extractSystemPrompt(req.System)) {
 		return true
 	}
 	hasToolSearch, hasAgentTool, hasMutation := false, false, false
@@ -98,6 +98,11 @@ func looksLikeClaudeCodeRequest(req *ClaudeRequest) bool {
 		}
 	}
 	return hasToolSearch && hasAgentTool && hasMutation
+}
+
+func hasClaudeCodeBetaHeader(value string) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
+	return value != "" && strings.Contains(value, "claude-code-")
 }
 
 func requiresStrictClaudeToolUse(req *ClaudeRequest) bool {

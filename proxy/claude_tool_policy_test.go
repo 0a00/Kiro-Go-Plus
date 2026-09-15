@@ -107,6 +107,35 @@ func TestClaudeCodeTransparentModeRecognizesGatewayForwardedClient(t *testing.T)
 	}
 }
 
+func TestClaudeCodeBetaHeaderRecognizesGenericForwardedClient(t *testing.T) {
+	req := &ClaudeRequest{
+		ClientUserAgent:      "Go-http-client/1.1",
+		ClientClaudeCodeBeta: true,
+	}
+	if !looksLikeClaudeCodeRequest(req) {
+		t.Fatal("Claude Code beta header was not recognized for a generic forwarded client")
+	}
+}
+
+func TestClaudeCodeBetaHeaderMatcher(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		header string
+		want   bool
+	}{
+		{name: "current beta", header: "claude-code-20250219,interleaved-thinking-2025-05-14", want: true},
+		{name: "mixed case", header: "Prompt-Caching,CLAUDE-CODE-20250219", want: true},
+		{name: "unrelated beta", header: "prompt-caching-2024-07-31", want: false},
+		{name: "empty", header: "", want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := hasClaudeCodeBetaHeader(tc.header); got != tc.want {
+				t.Fatalf("hasClaudeCodeBetaHeader(%q) = %v, want %v", tc.header, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestPrepareClaudeToolPolicyDisabledLeavesAutoRequestUnmodified(t *testing.T) {
 	req := &ClaudeRequest{
 		Messages: []ClaudeMessage{{Role: "user", Content: "Please read the file."}},

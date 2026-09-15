@@ -2191,6 +2191,7 @@ func (h *Handler) handleClaudeMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.ClientUserAgent = r.UserAgent()
+	req.ClientClaudeCodeBeta = hasClaudeCodeBetaHeader(r.Header.Get("Anthropic-Beta"))
 	r = h.attachRequestDetailTrace(r, "claude.messages", body)
 	r = r.WithContext(withRequestedModel(r.Context(), req.Model))
 	w, detailStatus := wrapRequestDetailResponseWriter(w, r.Context())
