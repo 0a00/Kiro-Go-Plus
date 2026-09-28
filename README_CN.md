@@ -103,6 +103,12 @@ Token 预算优先级为：请求显式参数、模型专属配置、Web 全局�
 
 部分 Builder ID、Social 等普通账号可以正常生成，但上游不开放 `ListAvailableModels` 或 Runtime MCP。后台为这类账号加载模型时会返回带明确提示的兼容候选列表，真实生成失败后仍由账号-模型负缓存自动学习，不会把控制面缺少权限误判为账号失效。Web Search 对无 Profile ARN 的账号会使用兼容的 Q MCP 通道，并独立缓存账号的搜索能力；生成端点固定为 Runtime 时也不会阻断这个兼容通道。
 
+原生 Web Search 兼容 Kiro MCP 的 JSON/SSE、结构化结果和旧文本结果。
+已知但不支持的 Anthropic 服务端工具（如 `code_execution_*`、`web_fetch_*`）
+会明确返回本地 400，避免被误当成客户端函数转发；客户端执行的 Bash、编辑器、
+Computer 和 MCP 工具保留现有流程。在后台关闭搜索后，原生搜索请求也会明确报错。
+同步来源和取舍见[上游检查记录](docs/upstream-sync-2026-09-29.md)。
+
 ## 快速部署
 
 ### 1. 克隆并准备配置

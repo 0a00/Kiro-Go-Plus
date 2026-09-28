@@ -63,9 +63,12 @@ func parseRetryAfter(value string, now time.Time) time.Duration {
 	if value == "" {
 		return 0
 	}
-	if seconds, err := strconv.Atoi(value); err == nil {
+	if seconds, err := strconv.ParseInt(value, 10, 64); err == nil {
 		if seconds <= 0 {
 			return 0
+		}
+		if seconds > int64((24*time.Hour)/time.Second) {
+			return 24 * time.Hour
 		}
 		return time.Duration(seconds) * time.Second
 	}
@@ -73,6 +76,25 @@ func parseRetryAfter(value string, now time.Time) time.Duration {
 		return when.Sub(now)
 	}
 	return 0
+}
+
+// Kiro's rate-limit hint is milliseconds; HTTP Retry-After is seconds or a date.
+// Keep it structured so every caller can reuse the existing cooldown policy.
+func classifyKiroHTTPResponseError(resp *http.Response, endpoint string, body []byte) *UpstreamError {
+	err := classifyUpstreamHTTPError(resp.StatusCode, endpoint, body)
+	err.RetryAfter = parseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
+	if resp.StatusCode == http.StatusTooManyRequests {
+		value := strings.TrimSpace(resp.Header.Get("x-amzn-kiro-ratelimit-retry-after"))
+		if millis, parseErr := strconv.ParseUint(value, 10, 64); parseErr == nil && millis > 0 {
+			if maximum := uint64((5 * time.Minute) / time.Millisecond); millis > maximum {
+				millis = maximum
+			}
+			if delay := time.Duration(millis) * time.Millisecond; delay > err.RetryAfter {
+				err.RetryAfter = delay
+			}
+		}
+	}
+	return err
 }
 
 func (e *UpstreamError) Error() string {

@@ -1,5 +1,5 @@
 {
-  "version": "1.2.85",
-  "changelog": "Buffer high-risk transparent tool calls and recover truncated Write/Edit streams.\n透明模式缓冲高风险工具调用，并恢复被截断的 Write/Edit 流。",
+  "version": "1.2.86",
+  "changelog": "Sync Kiro rate-limit hints, MCP search response compatibility, server-tool validation, and generation profile headers.\n同步 Kiro 限流等待头、MCP 搜索响应兼容、服务端工具校验与生成请求 Profile 头。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }

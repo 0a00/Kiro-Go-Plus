@@ -530,7 +530,7 @@ func getUsageLimitsForRegion(ctx context.Context, account *config.Account, regio
 
 	body, readErr := httpbody.ReadAll(resp.Body, httpbody.DefaultLimit)
 	if resp.StatusCode != 200 {
-		return nil, classifyUpstreamHTTPError(resp.StatusCode, "GetUsageLimits", body)
+		return nil, classifyKiroHTTPResponseError(resp, "GetUsageLimits", body)
 	}
 	if readErr != nil {
 		return nil, readErr
@@ -595,7 +595,7 @@ func getUserInfoForRegion(ctx context.Context, account *config.Account, region s
 
 	body, readErr := httpbody.ReadAll(resp.Body, httpbody.DefaultLimit)
 	if resp.StatusCode != 200 {
-		return nil, classifyUpstreamHTTPError(resp.StatusCode, "GetUserInfo", body)
+		return nil, classifyKiroHTTPResponseError(resp, "GetUserInfo", body)
 	}
 	if readErr != nil {
 		return nil, readErr
@@ -915,7 +915,7 @@ func listAvailableModelsManagementRegionContext(ctx context.Context, client *htt
 		body, readErr := httpbody.ReadAll(resp.Body, httpbody.DefaultLimit)
 		resp.Body.Close()
 		if resp.StatusCode != http.StatusOK {
-			return nil, classifyUpstreamHTTPError(resp.StatusCode, "Kiro Management Models", body)
+			return nil, classifyKiroHTTPResponseError(resp, "Kiro Management Models", body)
 		}
 		if readErr != nil {
 			return nil, readErr
@@ -975,7 +975,7 @@ func listAvailableModelsLegacyContext(ctx context.Context, account *config.Accou
 		body, readErr := httpbody.ReadAll(resp.Body, httpbody.DefaultLimit)
 		resp.Body.Close()
 		if resp.StatusCode != http.StatusOK {
-			return nil, classifyUpstreamHTTPError(resp.StatusCode, "ListAvailableModels", body)
+			return nil, classifyKiroHTTPResponseError(resp, "ListAvailableModels", body)
 		}
 		if readErr != nil {
 			return nil, readErr
@@ -1297,7 +1297,7 @@ func listProfileArnsInRegionContext(ctx context.Context, account *config.Account
 		body, readErr := httpbody.ReadAll(resp.Body, httpbody.DefaultLimit)
 		resp.Body.Close()
 		if resp.StatusCode != http.StatusOK {
-			return nil, classifyUpstreamHTTPError(resp.StatusCode, "ListAvailableProfiles", body)
+			return nil, classifyKiroHTTPResponseError(resp, "ListAvailableProfiles", body)
 		}
 		if readErr != nil {
 			return nil, readErr

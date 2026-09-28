@@ -175,6 +175,7 @@ func TestWebSearchRegionCandidatesRejectInjectedProfileRegion(t *testing.T) {
 
 func TestMCPWebSearchClassifiesRateLimit(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("x-amzn-kiro-ratelimit-retry-after", "1250")
 		w.WriteHeader(http.StatusTooManyRequests)
 		_, _ = w.Write([]byte(`{"message":"rate limit"}`))
 	}))
@@ -182,7 +183,7 @@ func TestMCPWebSearchClassifiesRateLimit(t *testing.T) {
 
 	_, err := callMCPWebSearchURL(context.Background(), &config.Account{AccessToken: "token"}, server.URL, []byte(`{}`), "query")
 	upstreamErr, ok := asUpstreamError(err)
-	if !ok || upstreamErr.Kind != UpstreamErrorRateLimit {
+	if !ok || upstreamErr.Kind != UpstreamErrorRateLimit || upstreamErr.RetryAfter != 1250*time.Millisecond {
 		t.Fatalf("expected structured rate-limit error, got %#v", err)
 	}
 }

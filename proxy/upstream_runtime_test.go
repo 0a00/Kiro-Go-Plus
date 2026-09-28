@@ -95,7 +95,7 @@ func TestRuntimeEndpointUsesRegionContentTypeTargetAndProfile(t *testing.T) {
 		t.Fatalf("set fallback: %v", err)
 	}
 
-	var contentType, target, profileArn, modelID string
+	var contentType, target, profileArn, profileHeader, modelID string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		contentType = r.Header.Get("Content-Type")
 		target = r.Header.Get("X-Amz-Target")
@@ -103,6 +103,7 @@ func TestRuntimeEndpointUsesRegionContentTypeTargetAndProfile(t *testing.T) {
 		var payload KiroPayload
 		_ = json.Unmarshal(body, &payload)
 		profileArn = payload.ProfileArn
+		profileHeader = r.Header.Get("x-amzn-kiro-profile-arn")
 		modelID = payload.ConversationState.CurrentMessage.UserInputMessage.ModelID
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "ok"}))
@@ -134,6 +135,9 @@ func TestRuntimeEndpointUsesRegionContentTypeTargetAndProfile(t *testing.T) {
 	}
 	if contentType != "application/x-amz-json-1.0" || target != "AmazonCodeWhispererStreamingService.GenerateAssistantResponse" {
 		t.Fatalf("unexpected runtime headers: content-type=%q target=%q", contentType, target)
+	}
+	if profileHeader != profileArn {
+		t.Fatalf("profile header %q differs from payload %q", profileHeader, profileArn)
 	}
 	if profileArn != account.ProfileArn || modelID != "claude-sonnet-4.6" {
 		t.Fatalf("unexpected runtime payload: profile=%q model=%q", profileArn, modelID)

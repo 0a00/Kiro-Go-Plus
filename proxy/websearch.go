@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"kiro-go/config"
 	"kiro-go/internal/awsregion"
@@ -21,6 +22,8 @@ const webSearchToolName = "web_search"
 
 const webSearchEndpointRouteModel = "__websearch__"
 
+var errMCPWebSearchPayload = errors.New("MCP web_search payload error")
+
 var webSearchRouteEndpoints = []kiroEndpoint{
 	{Key: "runtime-mcp", URL: "https://runtime.us-east-1.kiro.dev/mcp", Name: "Kiro Runtime MCP", RequiresProfileArn: true},
 	{Key: "q-mcp", URL: "https://q.us-east-1.amazonaws.com/mcp", Name: "Kiro Q MCP"},
@@ -34,8 +37,9 @@ type mcpRequest struct {
 }
 
 type mcpResponse struct {
-	Error  *mcpError  `json:"error,omitempty"`
-	Result *mcpResult `json:"result,omitempty"`
+	ID     json.RawMessage `json:"id,omitempty"`
+	Error  *mcpError       `json:"error,omitempty"`
+	Result *mcpResult      `json:"result,omitempty"`
 }
 
 type mcpError struct {
@@ -44,8 +48,9 @@ type mcpError struct {
 }
 
 type mcpResult struct {
-	Content []mcpContent `json:"content,omitempty"`
-	IsError bool         `json:"isError,omitempty"`
+	StructuredContent json.RawMessage `json:"structuredContent,omitempty"`
+	Content           []mcpContent    `json:"content,omitempty"`
+	IsError           bool            `json:"isError,omitempty"`
 }
 
 type mcpContent struct {
@@ -80,6 +85,22 @@ func hasMixedWebSearchTools(req *ClaudeRequest) bool {
 	}
 	for _, tool := range req.Tools {
 		if isNativeWebSearchTool(tool) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasForcedNativeWebSearchTool(req *ClaudeRequest) bool {
+	if req == nil {
+		return false
+	}
+	mode, name, err := parseClaudeToolChoice(req.ToolChoice)
+	if err != nil || mode != "tool" {
+		return false
+	}
+	for _, tool := range req.Tools {
+		if tool.Name == name && isNativeWebSearchTool(tool) {
 			return true
 		}
 	}
@@ -205,6 +226,10 @@ func normalizeWebSearchQuery(text string) string {
 	const prefix = "Perform a web search for the query: "
 	if strings.HasPrefix(strings.ToLower(text), strings.ToLower(prefix)) {
 		text = strings.TrimSpace(text[len(prefix):])
+	}
+	// Kiro's remote search schema limits queries to 200 Unicode characters.
+	if runes := []rune(text); len(runes) > 200 {
+		text = string(runes[:200])
 	}
 	return text
 }
@@ -398,6 +423,10 @@ func callMCPWebSearchContext(ctx context.Context, account *config.Account, query
 	if account == nil {
 		return nil, fmt.Errorf("account is nil")
 	}
+	query = normalizeWebSearchQuery(query)
+	if query == "" {
+		return nil, fmt.Errorf("web_search query must not be empty")
+	}
 	if !isKiroAPIKeyAccount(account) {
 		if err := ensureRestProfileArnContext(ctx, account); err != nil {
 			// Q MCP does not require a Kiro profile ARN. Builder ID accounts
@@ -505,6 +534,7 @@ func callMCPWebSearchURL(ctx context.Context, account *config.Account, rawURL st
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
 	req.Header.Set("Connection", "close")
 	headerValues := buildStreamingHeaderValues(account, host)
 	if strings.HasPrefix(strings.ToLower(host), "runtime.") {
@@ -533,16 +563,25 @@ func callMCPWebSearchURL(ctx context.Context, account *config.Account, rawURL st
 	}
 	defer resp.Body.Close()
 	statusCode = resp.StatusCode
-	respBody, readErr := httpbody.ReadAll(resp.Body, httpbody.DefaultLimit)
-	if readErr != nil {
-		return nil, fmt.Errorf("web search response: %w", readErr)
-	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, classifyUpstreamHTTPError(resp.StatusCode, "Kiro MCP WebSearch", respBody)
+		respBody := httpbody.ReadAllTruncated(resp.Body, httpbody.DefaultLimit)
+		return nil, classifyKiroHTTPResponseError(resp, "Kiro MCP WebSearch", respBody)
 	}
-	var mcp mcpResponse
-	if err := json.Unmarshal(respBody, &mcp); err != nil {
-		return nil, err
+	var sent mcpRequest
+	_ = json.Unmarshal(body, &sent)
+	mcp, decodeErr := decodeMCPResponse(resp.Body, resp.Header.Get("Content-Type"), sent.ID)
+	if decodeErr != nil {
+		if ctx.Err() != nil {
+			return nil, classifyRequestCancellation("Kiro MCP WebSearch", ctx.Err())
+		}
+		return nil, fmt.Errorf("web search response: %w", decodeErr)
+	}
+	return parseMCPWebSearchResults(mcp, query)
+}
+
+func parseMCPWebSearchResults(mcp *mcpResponse, query string) (*webSearchResults, error) {
+	if mcp == nil {
+		return nil, fmt.Errorf("MCP web_search response is missing result")
 	}
 	if mcp.Error != nil {
 		return nil, fmt.Errorf("MCP error %d: %s", mcp.Error.Code, mcp.Error.Message)
@@ -553,27 +592,44 @@ func callMCPWebSearchURL(ctx context.Context, account *config.Account, rawURL st
 	if mcp.Result.IsError {
 		return nil, fmt.Errorf("MCP web_search tool returned an error result")
 	}
-	var parseErr error
-	for _, item := range mcp.Result.Content {
-		if item.Type != "text" || strings.TrimSpace(item.Text) == "" {
-			continue
-		}
+	parse := func(raw []byte) (*webSearchResults, error) {
 		var results webSearchResults
-		if err := json.Unmarshal([]byte(item.Text), &results); err != nil {
-			parseErr = err
-			continue
+		if err := json.Unmarshal(raw, &results); err != nil {
+			return nil, err
 		}
 		if strings.TrimSpace(results.Error) != "" {
-			return nil, fmt.Errorf("MCP web_search payload error: %s", strings.TrimSpace(results.Error))
+			return nil, fmt.Errorf("%w: %s", errMCPWebSearchPayload, strings.TrimSpace(results.Error))
 		}
 		if results.Results == nil {
-			parseErr = fmt.Errorf("search payload is missing results")
-			continue
+			return nil, fmt.Errorf("search payload is missing results")
 		}
 		if results.Query == "" {
 			results.Query = query
 		}
 		return &results, nil
+	}
+	var parseErr error
+	if raw := mcp.Result.StructuredContent; len(raw) > 0 && string(raw) != "null" {
+		if results, err := parse(raw); err == nil {
+			return results, nil
+		} else if errors.Is(err, errMCPWebSearchPayload) {
+			return nil, err
+		} else {
+			parseErr = err
+		}
+	}
+	for _, item := range mcp.Result.Content {
+		if item.Type != "text" || strings.TrimSpace(item.Text) == "" {
+			continue
+		}
+		results, err := parse([]byte(item.Text))
+		if err == nil {
+			return results, nil
+		}
+		if errors.Is(err, errMCPWebSearchPayload) {
+			return nil, err
+		}
+		parseErr = err
 	}
 	if parseErr != nil {
 		return nil, fmt.Errorf("MCP web_search returned an invalid payload: %w", parseErr)

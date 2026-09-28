@@ -2255,7 +2255,7 @@ func (h *Handler) handleClaudeMessages(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if config.GetWebSearchConfig().Enabled {
-		if hasPureWebSearchTool(&req) {
+		if hasPureWebSearchTool(&req) || hasForcedNativeWebSearchTool(&req) {
 			h.handleClaudeWebSearch(r.Context(), w, &req, estimatedInputTokens, apiKeyID)
 			return
 		}
@@ -7634,6 +7634,9 @@ func (h *Handler) testKiroGenerationEndpoint(account *config.Account, payload *K
 		req.Header.Set("X-Amz-Target", endpoint.AmzTarget)
 	}
 	applyKiroBaseHeaders(req, account, buildStreamingHeaderValues(account, host))
+	if strings.TrimSpace(payload.ProfileArn) != "" {
+		req.Header.Set("x-amzn-kiro-profile-arn", strings.TrimSpace(payload.ProfileArn))
+	}
 	req.Header.Set("x-amzn-kiro-agent-mode", "vibe")
 	req.Header.Set("x-amzn-codewhisperer-optout", "true")
 	req.Header.Set("Amz-Sdk-Request", "attempt=1; max=3")
@@ -7655,7 +7658,7 @@ func (h *Handler) testKiroGenerationEndpoint(account *config.Account, payload *K
 	check.StatusCode = resp.StatusCode
 	if resp.StatusCode != 200 {
 		body := httpbody.ReadAllTruncated(resp.Body, httpbody.DefaultLimit)
-		err = classifyUpstreamHTTPError(resp.StatusCode, endpoint.Name, body)
+		err = classifyKiroHTTPResponseError(resp, endpoint.Name, body)
 		check.Error = truncateDiagnosticText(err.Error(), 800)
 		return check, err
 	}

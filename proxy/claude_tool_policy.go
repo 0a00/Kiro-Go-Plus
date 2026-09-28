@@ -56,6 +56,9 @@ func prepareClaudeToolPolicy(req *ClaudeRequest, enforceWorkspaceActions bool) e
 		req.RequiredToolName = name
 		req.ToolUsePolicy = toolUsePolicyExplicit
 	}
+	if err := validateClaudeServerTools(req.Tools); err != nil {
+		return err
+	}
 
 	if enforceWorkspaceActions && !transparentClaudeCode && !req.RequireToolUse && shouldRequireWorkspaceTool(req) {
 		req.RequireToolUse = true

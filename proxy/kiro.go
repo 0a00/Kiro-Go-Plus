@@ -1195,6 +1195,9 @@ endpointLoop:
 				req.Header.Set("X-Amz-Target", ep.AmzTarget)
 			}
 			applyKiroBaseHeaders(req, account, headerValues)
+			if payload != nil && strings.TrimSpace(payload.ProfileArn) != "" {
+				req.Header.Set("x-amzn-kiro-profile-arn", strings.TrimSpace(payload.ProfileArn))
+			}
 			if requestID := requestIDFromContext(requestContext); requestID != "" {
 				req.Header.Set("X-Request-Id", requestID)
 			}
@@ -1335,8 +1338,7 @@ endpointLoop:
 					actionableOutputWatchdog.Stop()
 				}
 				cancelRequest()
-				classifiedErr := classifyUpstreamHTTPError(resp.StatusCode, ep.Name, errBody)
-				classifiedErr.RetryAfter = parseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
+				classifiedErr := classifyKiroHTTPResponseError(resp, ep.Name, errBody)
 				lastErr = classifiedErr
 				detailTrace.recordAttempt(accountID, accountEmail, ep.Name, endpointHost, attemptStartedAt, resp.StatusCode, "http_error", lastErr, requestDetailRetryReason(lastErr))
 				if payload != nil {

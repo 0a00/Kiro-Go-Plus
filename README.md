@@ -103,6 +103,13 @@ Unlisted-model pass-through is disabled by default. Enable it only when Kiro has
 
 Some ordinary Builder ID and Social accounts can generate normally while the upstream does not expose `ListAvailableModels` or Runtime MCP. The admin panel shows a clearly labeled compatibility candidate list for those accounts; real generation failures still feed the account-model negative cache, so missing control-plane permission is not treated as a dead account. Web Search uses the compatible Q MCP route for accounts without a Profile ARN and tracks search capability independently from generation routing, including when the generation endpoint is fixed to Runtime.
 
+Native Web Search accepts Kiro MCP JSON/SSE and structured or legacy text results.
+Known unsupported Anthropic server tools (for example `code_execution_*` and
+`web_fetch_*`) return a local 400 instead of being sent as client functions;
+client-executed Bash, editors, Computer and MCP tools retain their existing path.
+Native search also returns a clear error when disabled in Web settings.
+See the [upstream review](docs/upstream-sync-2026-09-29.md) for sources and scope.
+
 ## Quick Start
 
 ### 1. Clone and configure
