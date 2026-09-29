@@ -1,0 +1,165 @@
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const { spawnSync } = require('node:child_process');
+const { test } = require('node:test');
+
+const evidencePath = path.join(__dirname, 'client-e2e-evidence.jq');
+const init = (tools = ['Read', 'Edit']) => ({ type: 'system', subtype: 'init', tools });
+const done = (result = 'OK', subtype = 'success') => ({ type: 'result', subtype, is_error: subtype !== 'success', result });
+const call = (id, name, file = '/workspace/workflow.sh') => ({ type: 'assistant', message: {
+  content: [{ type: 'tool_use', id, name, input: { file_path: file } }],
+} });
+const reply = (id, content = 'completed', is_error = false) => ({ type: 'user', message: {
+  content: [{ type: 'tool_result', tool_use_id: id, content, is_error }],
+} });
+function evidence(records) {
+  const result = spawnSync('jq', ['-s', '-f', evidencePath], { input: records.map(r => JSON.stringify(r)).join('\n'), encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  return JSON.parse(result.stdout);
+}
+
+test('Edit-based creation proves the complete file workflow without Write', () => {
+  const rows = [init(), call('create', 'Edit'), reply('create'), call('r1', 'Read'), reply('r1', '1\tFILE_WRITE_OK'),
+    call('edit', 'Edit'), reply('edit'), call('r2', 'Read'), reply('r2', '1\tFILE_EDIT_OK'), done('FILE_TOOLS_OK')];
+  const result = evidence(rows);
+  assert.equal(result.fileRoundtrip, true);
+  assert.equal(result.paired, true);
+  assert.equal(result.terminalSuccess, true);
+  assert.equal(evidence([init(), done('FILE_WRITE_OK FILE_EDIT_OK FILE_TOOLS_OK')]).fileRoundtrip, false);
+  const wrongFile = structuredClone(rows);
+  wrongFile[7].message.content[0].input.file_path = '/workspace/other.txt';
+  assert.equal(evidence(wrongFile).fileRoundtrip, false);
+});
+
+test('only a later successful retry on the same file counts as recovered', () => {
+  const rows = [init(), call('bad', 'Edit'), reply('bad', 'Read first', true),
+    call('read', 'Read'), reply('read'), call('good', 'Edit'), reply('good'), done()];
+  assert.equal(evidence(rows).recoveredErrors, 1);
+  assert.equal(evidence(rows).unrecoveredErrors, 0);
+  const unrelated = structuredClone(rows);
+  unrelated[5].message.content[0].input.file_path = '/workspace/other.sh';
+  assert.equal(evidence(unrelated).unrecoveredErrors, 1);
+  assert.equal(evidence([init(), call('good', 'Edit'), reply('good'), call('bad', 'Edit'), reply('bad', 'failed', true), done()]).unrecoveredErrors, 1);
+  const bashError = call('bad', 'Bash');
+  bashError.message.content[0].input = { command: 'missing-command' };
+  const unrelatedCommand = call('good', 'Bash');
+  unrelatedCommand.message.content[0].input = { command: 'pwd' };
+  assert.equal(evidence([bashError, reply('bad', 'failed', true), unrelatedCommand, reply('good'), done()]).unrecoveredErrors, 1);
+});
+
+test('tool pairing rejects missing, duplicate, orphan and early results', () => {
+  for (const records of [
+    [call('a', 'Edit')],
+    [call('a', 'Edit'), reply('other')],
+    [call('a', 'Edit'), call('a', 'Edit'), reply('a'), reply('a')],
+    [reply('a'), call('a', 'Edit')],
+  ]) assert.equal(evidence(records).paired, false);
+  assert.equal(evidence([call('a', 'Edit'), reply('a'), { type: 'stream_event', event: { type: 'content_block_start' } }]).paired, true);
+});
+
+test('search needs a real successful tool result with a source, not prose or a marker', () => {
+  const rows = [init(['WebSearch']), call('s', 'WebSearch'), reply('s', 'Links: https://example.invalid/docs'), done('CLAUDE_WEB_SEARCH_OK')];
+  assert.equal(evidence(rows).searched, true);
+  assert.equal(evidence([init(), done('<search_web>https://example.invalid/docs</search_web> CLAUDE_WEB_SEARCH_OK')]).searched, false);
+  rows[2] = reply('s', 'Search failed; see https://example.invalid/error', true);
+  assert.equal(evidence(rows).searched, false);
+  rows[2] = reply('s', 'No results');
+  assert.equal(evidence(rows).searched, false);
+});
+
+test('budget failures and stream errors are not successful task completion', () => {
+  assert.equal(evidence([done('OK', 'error_max_budget_usd')]).terminalSuccess, false);
+  assert.equal(evidence([init(), { type: 'stream_event', event: { type: 'error' } }, done()]).protocolError, true);
+});
+
+// The fake CLI never contacts the network. It exercises launcher options,
+// scenario exit codes, real file assertions and skip policy through the shell.
+const fakeCLI = `#!/usr/bin/env node
+const fs = require('node:fs'), path = require('node:path');
+const args = process.argv.slice(2), mode = process.env.KIRO_E2E_FIXTURE;
+const emit = r => process.stdout.write(JSON.stringify(r)+'\\n');
+const call = (id,name,file) => emit({type:'assistant',message:{content:[{type:'tool_use',id,name,input:{file_path:file}}]}});
+const reply = (id,content) => emit({type:'user',message:{content:[{type:'tool_result',tool_use_id:id,content}]}});
+if (process.env.ANTHROPIC_AUTH_TOKEN) process.exit(43);
+const last = args.at(-1);
+if (args.at(-2)!=='--') process.exit(44);
+if (last.includes('claude-file-e2e.txt')) {
+  if (!args.includes('--bare')) process.exit(45);
+  emit({type:'system',subtype:'init',tools:['Read','Edit']});
+  const file = path.join(process.cwd(),'claude-file-e2e.txt');
+  fs.writeFileSync(file,mode==='file-wrong'?'WRONG':'FILE_EDIT_OK');
+  call('create','Edit',file);reply('create','created');
+  call('r1','Read',file);reply('r1','FILE_WRITE_OK');
+  call('edit','Edit',file);reply('edit','edited');
+  call('r2','Read',file);reply('r2','FILE_EDIT_OK');
+  emit({type:'result',subtype:'success',is_error:false,result:'FILE_TOOLS_OK'});
+} else if (last.includes('workflow.sh')) {
+  const file=path.join(process.cwd(),'workflow.sh');
+  emit({type:'system',subtype:'init',tools:['Read','Edit'],session_id:'fixture-session'});
+  if (!args.includes('--resume')) {
+    fs.writeFileSync(file,'#!/bin/sh\\necho MULTITURN_OK\\n');
+    call('create','Edit',file);reply('create','created');
+    emit({type:'result',subtype:'success',is_error:false,result:'MULTITURN_CREATED_OK',session_id:'fixture-session'});
+  } else {
+    call('bad','Edit',file);
+    emit({type:'user',message:{content:[{type:'tool_result',tool_use_id:'bad',content:'Read first',is_error:true}]}});
+    call('read','Read',file);reply('read','script');
+    call('retry','Edit',mode==='multi-unresolved'?file+'.other':file);reply('retry','edited');
+    if(mode!=='multi-unchanged')fs.appendFileSync(file,'# expanded\\n# more content\\n');
+    emit({type:'result',subtype:mode==='multi-budget'?'error_max_budget_usd':'success',is_error:mode==='multi-budget',result:'MULTITURN_EDITED_OK'});
+  }
+} else if (last.includes('WebSearch')) {
+  if (args.includes('--bare') || process.env.CLAUDE_CODE_SIMPLE || !args.includes('--strict-mcp-config') || args[args.indexOf('--setting-sources')+1] !== '') process.exit(46);
+  emit({type:'system',subtype:'init',tools:mode==='search-missing'||mode==='search-auth'?[]:['WebSearch']});
+  if(mode==='search-auth'){emit({type:'result',subtype:'error_during_execution',is_error:true});process.exit(1);}
+  if(mode==='search-ok'){call('search','WebSearch');reply('search','Links: https://example.invalid/docs');}
+  emit({type:'result',subtype:'success',is_error:false,result:'<search_web>fake</search_web> CLAUDE_WEB_SEARCH_OK'});
+} else process.exit(47);
+`;
+function runFixture(mode, scenario, options = []) {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'kiro-client-script-test.'));
+  try {
+    fs.writeFileSync(path.join(tmp, 'claude'), fakeCLI, { mode: 0o700 });
+    const env = { ...process.env, PATH: `${tmp}:${process.env.PATH}`, KIRO_E2E_FIXTURE: mode,
+      KIRO_DEV_API_KEY: 'test-key', KIRO_DEV_BASE_URL: 'http://127.0.0.1:1',
+      ANTHROPIC_AUTH_TOKEN: 'inherited-test-token', CLAUDE_CODE_SIMPLE: '1', KIRO_DEV_CLIENT_FAIL_ON_WARNING: '0' };
+    delete env.KIRO_DEV_CLIENT_ARTIFACT_DIR;
+    return spawnSync('bash', [path.join(__dirname, 'client-e2e.sh'), '--scenarios', scenario, '--model', 'fixture-model', '--timeout', '5s', ...options],
+      { env, encoding: 'utf8', timeout: 60000 });
+  } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
+}
+test('file scenario passes with Edit creation but fails if the disk content is wrong', () => {
+  const ok = runFixture('file-ok', 'file-tools');
+  assert.equal(ok.status, 0, ok.stdout + ok.stderr);
+  assert.match(ok.stdout, /file-tools\s+PASS/);
+  const bad = runFixture('file-wrong', 'file-tools');
+  assert.equal(bad.status, 1, bad.stdout + bad.stderr);
+});
+test('native search launcher enables the real capability and rejects fake search output', () => {
+  const ok = runFixture('search-ok', 'web-search', ['--require-web-search']);
+  assert.equal(ok.status, 0, ok.stdout + ok.stderr);
+  const fake = runFixture('search-fake', 'web-search');
+  assert.equal(fake.status, 1, fake.stdout + fake.stderr);
+  const missing = runFixture('search-missing', 'web-search');
+  assert.equal(missing.status, 0, missing.stdout + missing.stderr);
+  assert.match(missing.stdout, /web-search\s+SKIP/);
+  const required = runFixture('search-missing', 'web-search', ['--require-web-search']);
+  assert.equal(required.status, 1, required.stdout + required.stderr);
+  const auth = runFixture('search-auth', 'web-search');
+  assert.equal(auth.status, 1, auth.stdout + auth.stderr);
+  assert.doesNotMatch(auth.stdout, /web-search\s+SKIP/);
+});
+
+test('resumed workflow requires disk changes, recovered errors and successful termination', () => {
+  const recovered = runFixture('multi-recovered', 'workspace-multiturn');
+  assert.equal(recovered.status, 0, recovered.stdout + recovered.stderr);
+  assert.match(recovered.stdout, /workspace-multiturn\s+PASS/);
+  assert.match(recovered.stdout, /1 recovered tool errors/);
+  for (const mode of ['multi-unresolved', 'multi-unchanged', 'multi-budget']) {
+    const failed = runFixture(mode, 'workspace-multiturn');
+    assert.equal(failed.status, 1, failed.stdout + failed.stderr);
+    assert.match(failed.stdout, /workspace-multiturn\s+FAIL/);
+  }
+});

@@ -23,6 +23,7 @@ Options:
   --artifact-dir DIR       Preserve private client outputs in DIR.
   --keep-artifacts         Preserve outputs in a temporary directory and print its path.
   --fail-on-warning        Return non-zero when a scenario reports a warning.
+  --require-web-search     Fail instead of skipping when CLI WebSearch is unavailable.
   -h, --help               Show this help.
 
 Scenario IDs:
@@ -60,6 +61,7 @@ CANCEL_AFTER="${KIRO_DEV_CLIENT_CANCEL_AFTER:-8s}"
 ARTIFACT_DIR="${KIRO_DEV_CLIENT_ARTIFACT_DIR:-}"
 KEEP_ARTIFACTS=0
 FAIL_ON_WARNING="${KIRO_DEV_CLIENT_FAIL_ON_WARNING:-0}"
+REQUIRE_WEB_SEARCH=0
 
 while (($# > 0)); do
   case "$1" in
@@ -161,6 +163,10 @@ while (($# > 0)); do
       ;;
     --fail-on-warning)
       FAIL_ON_WARNING=1
+      shift
+      ;;
+    --require-web-search)
+      REQUIRE_WEB_SEARCH=1
       shift
       ;;
     -h|--help)
@@ -337,6 +343,10 @@ run_cli_with_budget() {
   local prompt="$7"
   local timeout_signal="${CLI_TIMEOUT_SIGNAL:-TERM}"
   local -a persistence_args=()
+  local -a client_mode_args=(--bare --setting-sources project)
+  if [[ "${CLI_NATIVE_WEB_SEARCH:-0}" == 1 ]]; then
+    client_mode_args=(--setting-sources '' --strict-mcp-config --mcp-config '{"mcpServers":{}}')
+  fi
   if ((persist_session == 0)); then
     persistence_args+=(--no-session-persistence)
   fi
@@ -346,9 +356,13 @@ run_cli_with_budget() {
     export ANTHROPIC_BASE_URL="$BASE_URL"
     export ANTHROPIC_API_KEY="${KIRO_DEV_API_KEY}"
     export CLAUDE_CONFIG_DIR="$CLIENT_CONFIG_DIR"
+    unset ANTHROPIC_AUTH_TOKEN
+    if [[ "${CLI_NATIVE_WEB_SEARCH:-0}" == 1 ]]; then
+      unset CLAUDE_CODE_SIMPLE
+    fi
     timeout --foreground --signal="$timeout_signal" --kill-after=20s "$deadline" \
-      claude --bare --print --verbose --include-partial-messages \
-        --setting-sources project --add-dir "$workspace" --model "$model" \
+      claude "${client_mode_args[@]}" --print --verbose --include-partial-messages \
+        --add-dir "$workspace" --model "$model" \
         "${persistence_args[@]}" --max-budget-usd "$budget" \
         --output-format stream-json "$@" -- "$prompt"
   ) >"$output" 2>&1
@@ -376,11 +390,16 @@ run_cli_resume() {
     export ANTHROPIC_BASE_URL="$BASE_URL"
     export ANTHROPIC_API_KEY="${KIRO_DEV_API_KEY}"
     export CLAUDE_CONFIG_DIR="$CLIENT_CONFIG_DIR"
+    unset ANTHROPIC_AUTH_TOKEN
     timeout --foreground --signal="$timeout_signal" --kill-after=20s "$deadline" \
       claude --bare --print --verbose --include-partial-messages \
         --resume "$session_id" --model "$model" --max-budget-usd "$AGENT_MAX_BUDGET" \
         --output-format stream-json "$@" -- "$prompt"
   ) >"$output" 2>&1
+}
+
+client_evidence() {
+  jq -s -f "$SCRIPT_DIR/client-e2e-evidence.jq" "$1"
 }
 
 client_tool_use_count() {
@@ -552,7 +571,7 @@ case_file_tools() {
   rm -f -- "$file"
   set +e
   run_cli "$CLIENT_TIMEOUT" "$MODEL" "$FILE_WORKSPACE" "$output" \
-    "Use only Read, Write, and Edit. Create claude-file-e2e.txt with exactly FILE_WRITE_OK, read it, edit only FILE_WRITE_OK to FILE_EDIT_OK, read it again, then reply exactly FILE_TOOLS_OK." \
+    "Use only the available file tools. Create claude-file-e2e.txt with exactly FILE_WRITE_OK using Write or Edit (empty old_string for creation), read it, edit only FILE_WRITE_OK to FILE_EDIT_OK, read it again, then reply exactly FILE_TOOLS_OK." \
     --restricted --tools "Read,Write,Edit,Glob,Grep" \
     --allowedTools "Read,Write,Edit,Glob,Grep" --permission-mode acceptEdits
   status=$?
@@ -561,12 +580,17 @@ case_file_tools() {
     CASE_DETAIL="Claude Code did not emit an initialization record"
     return 1
   fi
-  if ! client_has_tool "$output" Write || ! client_has_tool "$output" Edit; then
+  if ((status != 0)) || ! has_client_success_result "$output"; then
+    CASE_DETAIL="file-tool client did not complete successfully (status ${status})"
+    return 1
+  fi
+  if ! client_has_tool "$output" Read || ! client_has_tool "$output" Edit; then
     CASE_STATUS_HINT=SKIP
-    CASE_DETAIL="Claude Code client did not expose the required Write/Edit capability"
+    CASE_DETAIL="Claude Code client did not expose Read/Edit; creation via Write or Edit is supported"
     return 0
   fi
-  if ((status != 0)) || ! assert_client_result "$output" FILE_TOOLS_OK || [[ ! -f "$file" ]]; then
+  if ((status != 0)) || ! assert_client_result "$output" FILE_TOOLS_OK || [[ ! -f "$file" || -L "$file" ]] ||
+    ! client_evidence "$output" | jq -e '.terminalSuccess and (.protocolError | not) and .paired and .fileRoundtrip and .unrecoveredErrors == 0' >/dev/null; then
     CASE_DETAIL="Claude Code file tool sequence did not create the test file"
     return 1
   fi
@@ -576,7 +600,7 @@ case_file_tools() {
     CASE_DETAIL="file tool sequence left unexpected content"
     return 1
   fi
-  CASE_DETAIL="Read/Write/Edit completed in an isolated workspace"
+  CASE_DETAIL="file creation, Read/Edit and readback verified against the final file"
 }
 
 case_thinking() {
@@ -718,17 +742,23 @@ case_workspace_multiturn() {
   local first="$TMP_DIR/workspace-multiturn-first.jsonl"
   local second="$TMP_DIR/workspace-multiturn-second.jsonl"
   local session_id second_status second_tools second_results second_errors subtype
+  local before_hash before_lines evidence
   mkdir -p "$workspace"
   set +e
   run_cli_session "$AGENT_TIMEOUT" "$MODEL" "$workspace" "$first" \
-    '写个shell脚本，随便写' \
-    --permission-mode acceptEdits
+    'Create workflow.sh, a self-contained POSIX shell script of 20-40 lines. Without arguments it prints MULTITURN_OK; --help prints usage. Use only Read, Write or Edit to create it; do not execute commands. Finish with MULTITURN_CREATED_OK.' \
+    --restricted --tools 'Read,Write,Edit' --allowedTools 'Read,Write,Edit' --permission-mode acceptEdits
   local first_status=$?
   set -e
-  if ((first_status != 0)) || ! has_client_success_result "$first"; then
+  if ((first_status != 0)) || ! assert_client_result "$first" MULTITURN_CREATED_OK ||
+    [[ ! -f "$workspace/workflow.sh" || -L "$workspace/workflow.sh" ]] ||
+    ! bash -n "$workspace/workflow.sh" ||
+    ! client_evidence "$first" | jq -e '.terminalSuccess and (.protocolError | not) and .paired and .workspaceEdit and .unrecoveredErrors == 0' >/dev/null; then
     CASE_DETAIL="initial Claude Code workspace turn failed (status ${first_status})"
     return 1
   fi
+  before_hash="$(sha256sum "$workspace/workflow.sh" | cut -d ' ' -f1)"
+  before_lines="$(wc -l < "$workspace/workflow.sh")"
   session_id="$(jq -r 'select(.session_id != null) | .session_id' "$first" | tail -n 1)"
   if [[ -z "$session_id" ]]; then
     CASE_DETAIL="initial turn did not expose a resumable Claude Code session"
@@ -736,33 +766,33 @@ case_workspace_multiturn() {
   fi
   set +e
   run_cli_resume "$AGENT_TIMEOUT" "$MODEL" "$workspace" "$second" "$session_id" \
-    '增加5倍代码量' --tools 'Read,Write,Edit,Bash' --allowedTools 'Read,Write,Edit,Bash' \
-    --permission-mode acceptEdits
+    '增加5倍代码量。Read workflow.sh first, then expand the same script with useful argument handling and helper functions. Preserve default MULTITURN_OK and --help. Use only file tools, do not execute commands. Finish with MULTITURN_EDITED_OK.' \
+    --restricted --tools 'Read,Write,Edit' --allowedTools 'Read,Write,Edit' --permission-mode acceptEdits
   second_status=$?
   set -e
   second_tools="$(client_tool_use_count "$second")"
   second_results="$(client_tool_result_count "$second")"
   second_errors="$(client_tool_error_count "$second")"
   subtype="$(client_result_subtype "$second")"
-  if ((second_tools < 1 || second_results < 1)); then
+  evidence="$(client_evidence "$second")" || { CASE_DETAIL="invalid client JSON records"; return 1; }
+  if ((second_tools < 1 || second_results < 1)) || ! jq -e '.paired' <<<"$evidence" >/dev/null; then
     CASE_DETAIL="multi-turn edit produced no structured tool/result pair (status ${second_status}, subtype ${subtype})"
     return 1
   fi
-  if ((second_status != 0)) && [[ "$subtype" != "error_max_budget_usd" ]]; then
+  if ((second_status != 0)) || [[ "$subtype" != "success" ]]; then
     CASE_DETAIL="multi-turn edit exited unexpectedly (status ${second_status}, subtype ${subtype})"
     return 1
   fi
-  if ((second_errors > 0)); then
-    CASE_STATUS_HINT=WARN
-    CASE_DETAIL="structured tools survived the resumed turn, but Claude Code reported ${second_errors} tool error(s)"
-    return 0
+  if [[ ! -f "$workspace/workflow.sh" || -L "$workspace/workflow.sh" ]] ||
+    [[ "$(sha256sum "$workspace/workflow.sh" | cut -d ' ' -f1)" == "$before_hash" ]] ||
+    (( $(wc -l < "$workspace/workflow.sh") <= before_lines )) ||
+    ! bash -n "$workspace/workflow.sh" || ! rg -q 'MULTITURN_OK' "$workspace/workflow.sh" ||
+    ! assert_client_result "$second" MULTITURN_EDITED_OK ||
+    ! jq -e '(.protocolError | not) and .workspaceEdit and .unrecoveredErrors == 0' <<<"$evidence" >/dev/null; then
+    CASE_DETAIL="resumed turn did not prove a valid file change or left an unrecovered tool error"
+    return 1
   fi
-  if [[ "$subtype" == "error_max_budget_usd" ]]; then
-    CASE_STATUS_HINT=WARN
-    CASE_DETAIL="structured tools survived the resumed turn before the Claude Code budget was exhausted (${second_tools} calls)"
-    return 0
-  fi
-  CASE_DETAIL="resumed Claude Code turn issued ${second_tools} structured tool calls"
+  CASE_DETAIL="resumed edit verified on disk (${second_tools} paired calls, ${second_errors} recovered tool errors)"
 }
 
 case_workspace_long_tools() {
@@ -996,7 +1026,7 @@ case_web_search() {
   local output="$TMP_DIR/web-search.jsonl"
   local tool_uses tool_results subtype status
   set +e
-  run_cli_session "$CLIENT_TIMEOUT" "$MODEL" "$WORKSPACE" "$output" \
+  CLI_NATIVE_WEB_SEARCH=1 run_cli_session "$CLIENT_TIMEOUT" "$MODEL" "$WORKSPACE" "$output" \
     'Use the native WebSearch tool to search for the official Anthropic Claude Code documentation. Read the returned result, summarize one source title, and finish with the exact marker CLAUDE_WEB_SEARCH_OK.' \
     --restricted --tools 'WebSearch' --allowedTools 'WebSearch' --permission-mode acceptEdits
   status=$?
@@ -1005,7 +1035,15 @@ case_web_search() {
     CASE_DETAIL="Claude Code did not emit an initialization record"
     return 1
   fi
+  if ((status != 0)) || ! has_client_success_result "$output"; then
+    CASE_DETAIL="Claude Code WebSearch client exited with status ${status}"
+    return 1
+  fi
   if ! client_has_tool "$output" WebSearch; then
+    if ((REQUIRE_WEB_SEARCH)); then
+      CASE_DETAIL="native WebSearch capability is required but unavailable in this CLI"
+      return 1
+    fi
     CASE_STATUS_HINT=SKIP
     CASE_DETAIL="Claude Code client did not expose the native WebSearch capability"
     return 0
@@ -1017,7 +1055,8 @@ case_web_search() {
     CASE_DETAIL="Claude Code WebSearch workflow did not finish (status ${status}, subtype ${subtype}, calls ${tool_uses})"
     return 1
   fi
-  if ((tool_uses < 1 || tool_results < tool_uses)); then
+  if ((tool_uses < 1 || tool_results < tool_uses)) ||
+    ! client_evidence "$output" | jq -e '.terminalSuccess and (.protocolError | not) and .paired and .searched and .unrecoveredErrors == 0' >/dev/null; then
     CASE_DETAIL="WebSearch completed without a structured tool/result pair (calls ${tool_uses}, results ${tool_results})"
     return 1
   fi

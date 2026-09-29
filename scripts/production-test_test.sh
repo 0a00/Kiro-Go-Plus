@@ -54,7 +54,7 @@ clean_env=(
 )
 
 "${clean_env[@]}" bash "$TEST_SCRIPT" --dry-run --skip-web-search --skip-matrix \
-  --skip-load --skip-client-e2e --staircase --soak --fail-on-warning >/dev/null
+  --skip-load --skip-client-e2e --staircase --soak --fail-on-warning --client-require-web-search >/dev/null
 [[ ! -e "$NETWORK_MARKER" ]] || fail "dry-run invoked curl"
 
 assert_fails "remote dry-run without opt-in" \

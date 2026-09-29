@@ -66,8 +66,9 @@ bash scripts/dev-test.sh client-e2e
 ```
 
 Claude Code requests use the transparent compatibility path by default. It
-preserves paired historical `tool_use`/`tool_result` blocks and direct stream
-events; the Web setting `claudeCodeTransparentMode` can disable it for legacy
+preserves paired historical `tool_use`/`tool_result` blocks. High-risk tools still
+honor the configured safe buffering mode; the Web setting
+`claudeCodeTransparentMode` can disable it for legacy
 regression comparisons.
 
 It builds `cmd/mcpfixture`, creates disposable Skills, MCP fixtures, git
@@ -80,6 +81,28 @@ structured tool/result pairing and concrete workspace effects where relevant;
 the expensive agent cases use `KIRO_DEV_AGENT_MAX_BUDGET_USD` (default `0.75`).
 Set `KIRO_DEV_ALLOW_REMOTE=1` explicitly for a non-loopback
 `KIRO_DEV_BASE_URL`.
+
+File tests accept creation through either `Write` or `Edit` and require a real
+read/edit/readback sequence plus the expected on-disk content. Resumed editing
+uses a named shell fixture: it must change and grow, pass a syntax check, and
+retain its expected output marker. Tool IDs must pair with subsequent results;
+a recoverable error counts as recovered only after a successful retry of the
+same tool on the same file. Unrecovered errors, unchanged files, protocol errors
+and budget-exhausted termination fail the case.
+
+Native WebSearch runs without `--bare`, which sets `CLAUDE_CODE_SIMPLE=1` and can
+hide that capability. The test uses a disposable `CLAUDE_CONFIG_DIR`, no settings
+sources, explicit tool permissions and an empty strict MCP configuration. It
+requires a structured WebSearch call/result with source URLs; a textual promise
+or completion marker is insufficient. Use `--require-web-search` to treat an
+unavailable CLI capability as failure, or `--client-require-web-search` through
+`production-test.sh`. An optional unavailable capability is explicitly skipped;
+authentication and execution failures are never treated as capability skips.
+
+Offline assertion/launcher regressions: `node --test scripts/client-e2e.test.js`.
+These fake-client tests use no live credentials or network and run in the quick
+quality gate. This test-only change requires no server configuration migration
+or container restart; update the test checkout before rerunning.
 
 Run only the new cases while iterating:
 

@@ -38,6 +38,7 @@ Options:
   --client-agent-max-budget-usd N
                               Budget for multi-turn/long-tool agent cases (default: 0.75).
   --client-cancel-after DURATION  Cancellation probe deadline (default: 8s).
+  --client-require-web-search  Fail if the CLI does not expose native WebSearch.
   --report-dir DIR            Private report directory (default: /tmp/kiro-production-test-*).
   --keep-artifacts             Keep raw Claude Code diagnostic streams (sensitive).
   --fail-on-warning            Return non-zero when a phase reports a warning.
@@ -102,6 +103,7 @@ LOAD_CONCURRENCY="${KIRO_PROD_LOAD_CONCURRENCY:-5}"
 LOAD_REQUESTS="${KIRO_PROD_LOAD_REQUESTS:-14}"
 LOAD_MAX_TOKENS="${KIRO_PROD_LOAD_MAX_TOKENS:-256}"
 CLIENT_SCENARIOS="${KIRO_PROD_CLIENT_SCENARIOS:-all}"
+CLIENT_REQUIRE_WEB_SEARCH=0
 CLIENT_CONCURRENCY="${KIRO_PROD_CLIENT_CONCURRENCY:-2}"
 CLIENT_MAX_BUDGET="${KIRO_PROD_CLIENT_MAX_BUDGET_USD:-${KIRO_DEV_MAX_BUDGET_USD:-0.10}}"
 CLIENT_AGENT_MAX_BUDGET="${KIRO_PROD_CLIENT_AGENT_MAX_BUDGET_USD:-${KIRO_DEV_AGENT_MAX_BUDGET_USD:-0.75}}"
@@ -211,6 +213,7 @@ while (($# > 0)); do
     --report-dir=*) REPORT_DIR="${1#*=}"; shift ;;
     --keep-artifacts) KEEP_ARTIFACTS=1; shift ;;
     --fail-on-warning) FAIL_ON_WARNING=1; shift ;;
+    --client-require-web-search) CLIENT_REQUIRE_WEB_SEARCH=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown option: $1" ;;
@@ -263,6 +266,7 @@ if ((DRY_RUN)); then
     "$([[ $RUN_STAIRCASE == 1 ]] && printf enabled || printf disabled)" \
     "$([[ $RUN_SOAK == 1 ]] && printf enabled || printf disabled)"
   printf 'fail_on_warning: %s\n' "$([[ $FAIL_ON_WARNING == 1 ]] && printf enabled || printf disabled)"
+  printf 'client_require_web_search: %s\n' "$CLIENT_REQUIRE_WEB_SEARCH"
   printf 'No network request or credential access was performed.\n'
   exit 0
 fi
@@ -712,6 +716,9 @@ else
     fi
     if ((FAIL_ON_WARNING)); then
       CLIENT_ARGS+=(--fail-on-warning)
+    fi
+    if ((CLIENT_REQUIRE_WEB_SEARCH)); then
+      CLIENT_ARGS+=(--require-web-search)
     fi
     if ((KEEP_ARTIFACTS)); then
       CLIENT_ARGS+=(--artifact-dir "$REPORT_DIR/claude-code")
