@@ -2860,6 +2860,14 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 			callback.OnToolUseStart = startToolUse
 			callback.OnToolUseDelta = sendToolUseDelta
 			callback.OnToolUseStop = stopToolUse
+		} else if payload.streamTextWithBufferedTools {
+			callback.onBufferedToolStart = func() {
+				// Claude Code may not render an open text block after thinking.
+				// Upstream has moved on to tool input; finish existing text now,
+				// while leaving tool arguments buffered and the message open.
+				processClaudeText("", false, true)
+				closeActiveBlock()
+			}
 		}
 
 		resetAttempt := func() {

@@ -650,7 +650,7 @@ const (
 )
 
 // Version current version
-const Version = "1.2.89"
+const Version = "1.2.90"
 
 var (
 	cfg           *Config

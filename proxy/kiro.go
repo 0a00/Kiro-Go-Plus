@@ -758,6 +758,9 @@ type KiroStreamCallback struct {
 	OnCredits         func(credits float64)
 	OnContextUsage    func(percentage float64)
 	OnStopReason      func(reason string)
+	// End only already-delivered text/thinking when upstream starts assembling
+	// a buffered tool. This must not expose tool frames or commit a silent turn.
+	onBufferedToolStart func()
 	// Internal observability hooks. They are invoked for semantic upstream
 	// events and tool fragments before any response buffering/translation.
 	onMeaningfulEvent      func()

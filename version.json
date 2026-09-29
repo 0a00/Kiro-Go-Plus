@@ -1,5 +1,5 @@
 {
-  "version": "1.2.89",
-  "changelog": "Isolate shared endpoint circuits and preserve real failures; stop failed load escalation; recognize recovered tool errors; expose initial upstream timing and slow-model warnings.\n隔离端点熔断并保留真实错误，压力测试失败后停止升档，修复工具恢复误报，补充上游首响应时序与慢模型警告。",
+  "version": "1.2.90",
+  "changelog": "Close delivered text blocks when buffered tool assembly starts so Claude Code can render the preamble before the tool completes. Preserve tool validation and replay boundaries.\n平衡模式在工具开始组装时及时结束已发送正文块，修复 Claude Code 只显示圆点、完成后集中出现正文的问题，保留工具校验与重试边界。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }
