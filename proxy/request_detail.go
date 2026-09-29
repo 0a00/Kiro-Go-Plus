@@ -78,38 +78,41 @@ func (w *requestDetailFlushingWriter) Flush() {
 }
 
 type requestDetail struct {
-	Version                int                    `json:"version"`
-	RequestID              string                 `json:"requestId"`
-	Timestamp              int64                  `json:"timestamp"`
-	Protocol               string                 `json:"protocol"`
-	Model                  string                 `json:"model,omitempty"`
-	APIKeyID               string                 `json:"apiKeyId,omitempty"`
-	APIKeyName             string                 `json:"apiKeyName,omitempty"`
-	AccountID              string                 `json:"accountId,omitempty"`
-	AccountEmail           string                 `json:"accountEmail,omitempty"`
-	Endpoint               string                 `json:"endpoint,omitempty"`
-	AccountSelectionMs     int64                  `json:"accountSelectionMs,omitempty"`
-	AccountAttempts        int                    `json:"accountAttempts,omitempty"`
-	AccountQueueWaitMs     int64                  `json:"accountQueueWaitMs,omitempty"`
-	AccountQueueWaitCount  int                    `json:"accountQueueWaitCount,omitempty"`
-	RouteAffinityHit       bool                   `json:"routeAffinityHit,omitempty"`
-	Status                 string                 `json:"status"`
-	StatusCode             int                    `json:"statusCode"`
-	DurationMs             int64                  `json:"durationMs"`
-	FirstMeaningfulEventMs *int64                 `json:"firstMeaningfulEventMs,omitempty"`
-	LastMeaningfulEventMs  *int64                 `json:"lastMeaningfulEventMs,omitempty"`
-	MaxMeaningfulGapMs     *int64                 `json:"maxMeaningfulGapMs,omitempty"`
-	FirstToolFragmentMs    *int64                 `json:"firstToolFragmentMs,omitempty"`
-	LastToolFragmentMs     *int64                 `json:"lastToolFragmentMs,omitempty"`
-	ToolAssemblyMs         *int64                 `json:"toolAssemblyMs,omitempty"`
-	ToolResultRepairs      int                    `json:"toolResultRepairs,omitempty"`
-	ToolSchemaRepairs      int                    `json:"toolSchemaRepairs,omitempty"`
-	Request                requestDetailRequest   `json:"request"`
-	Response               requestDetailResponse  `json:"response"`
-	Attempts               []requestDetailAttempt `json:"attempts,omitempty"`
-	Timeline               []requestDetailEvent   `json:"timeline,omitempty"`
-	DroppedEvents          int                    `json:"droppedEvents,omitempty"`
-	TruncatedFields        []string               `json:"truncatedFields,omitempty"`
+	Version                  int                    `json:"version"`
+	RequestID                string                 `json:"requestId"`
+	Timestamp                int64                  `json:"timestamp"`
+	Protocol                 string                 `json:"protocol"`
+	Model                    string                 `json:"model,omitempty"`
+	APIKeyID                 string                 `json:"apiKeyId,omitempty"`
+	APIKeyName               string                 `json:"apiKeyName,omitempty"`
+	AccountID                string                 `json:"accountId,omitempty"`
+	AccountEmail             string                 `json:"accountEmail,omitempty"`
+	Endpoint                 string                 `json:"endpoint,omitempty"`
+	AccountSelectionMs       int64                  `json:"accountSelectionMs,omitempty"`
+	AccountAttempts          int                    `json:"accountAttempts,omitempty"`
+	AccountQueueWaitMs       int64                  `json:"accountQueueWaitMs,omitempty"`
+	AccountQueueWaitCount    int                    `json:"accountQueueWaitCount,omitempty"`
+	RouteAffinityHit         bool                   `json:"routeAffinityHit,omitempty"`
+	Status                   string                 `json:"status"`
+	StatusCode               int                    `json:"statusCode"`
+	DurationMs               int64                  `json:"durationMs"`
+	FirstMeaningfulEventMs   *int64                 `json:"firstMeaningfulEventMs,omitempty"`
+	LastMeaningfulEventMs    *int64                 `json:"lastMeaningfulEventMs,omitempty"`
+	MaxMeaningfulGapMs       *int64                 `json:"maxMeaningfulGapMs,omitempty"`
+	MaxUpstreamReadGapMs     *int64                 `json:"maxUpstreamReadGapMs,omitempty"`
+	MaxUpstreamFrameGapMs    *int64                 `json:"maxUpstreamFrameGapMs,omitempty"`
+	FirstToolDispatchDelayMs *int64                 `json:"firstToolDispatchDelayMs,omitempty"`
+	FirstToolFragmentMs      *int64                 `json:"firstToolFragmentMs,omitempty"`
+	LastToolFragmentMs       *int64                 `json:"lastToolFragmentMs,omitempty"`
+	ToolAssemblyMs           *int64                 `json:"toolAssemblyMs,omitempty"`
+	ToolResultRepairs        int                    `json:"toolResultRepairs,omitempty"`
+	ToolSchemaRepairs        int                    `json:"toolSchemaRepairs,omitempty"`
+	Request                  requestDetailRequest   `json:"request"`
+	Response                 requestDetailResponse  `json:"response"`
+	Attempts                 []requestDetailAttempt `json:"attempts,omitempty"`
+	Timeline                 []requestDetailEvent   `json:"timeline,omitempty"`
+	DroppedEvents            int                    `json:"droppedEvents,omitempty"`
+	TruncatedFields          []string               `json:"truncatedFields,omitempty"`
 }
 
 type requestDetailRequest struct {
@@ -235,6 +238,7 @@ type requestDetailTrace struct {
 	toolOrder      []string
 	attempts       []requestDetailAttempt
 	timeline       []requestDetailEvent
+	eventSequence  int
 	droppedEvents  int
 	lastEventAt    time.Time
 	lastProgressAt time.Time
@@ -968,11 +972,7 @@ func (t *requestDetailTrace) toolStateLocked(toolUseID, name string) *requestDet
 
 func (t *requestDetailTrace) recordEventLocked(kind string, size int) {
 	now := time.Now()
-	if len(t.timeline) >= t.maxEvents {
-		t.droppedEvents++
-		t.lastEventAt = now
-		return
-	}
+	t.eventSequence++
 	idleGap := now.Sub(t.startedAt).Milliseconds()
 	if !t.lastEventAt.IsZero() {
 		idleGap = now.Sub(t.lastEventAt).Milliseconds()
@@ -980,14 +980,49 @@ func (t *requestDetailTrace) recordEventLocked(kind string, size int) {
 	if idleGap < 0 {
 		idleGap = 0
 	}
-	t.timeline = append(t.timeline, requestDetailEvent{
-		Sequence:  len(t.timeline) + 1,
+	event := requestDetailEvent{
+		Sequence:  t.eventSequence,
 		Type:      kind,
 		ElapsedMs: t.elapsedMsLocked(now),
 		IdleGapMs: idleGap,
 		Bytes:     size,
-	})
+	}
+	if len(t.timeline) >= t.maxEvents {
+		t.droppedEvents++
+		if t.maxEvents <= 0 {
+			t.lastEventAt = now
+			return
+		}
+		// Preserve a startup prefix and a recent tail; evict low-value middle
+		// fragments first so long gaps and terminal errors survive large tools.
+		drop := len(t.timeline) / 4
+		end := max(drop+1, len(t.timeline)*3/4)
+		for i := drop + 1; i < end; i++ {
+			if requestDetailEventPriority(t.timeline[i]) < requestDetailEventPriority(t.timeline[drop]) {
+				drop = i
+			}
+		}
+		copy(t.timeline[drop:], t.timeline[drop+1:])
+		t.timeline[len(t.timeline)-1] = event
+	} else {
+		t.timeline = append(t.timeline, event)
+	}
 	t.lastEventAt = now
+}
+
+func requestDetailEventPriority(event requestDetailEvent) int {
+	switch event.Type {
+	case "error", "truncated", "upstream_attempt", "complete":
+		return 4
+	}
+	if event.IdleGapMs >= 1000 {
+		return 3
+	}
+	switch event.Type {
+	case "tool_start", "tool_stop", "tool_use":
+		return 2
+	}
+	return 1
 }
 
 func (t *requestDetailTrace) elapsedMsLocked(at time.Time) int64 {
@@ -1059,36 +1094,39 @@ func (t *requestDetailTrace) finalize(entry requestLogEntry) (requestDetail, boo
 		usage.CacheCreationInputTokens = entry.CacheCreationInputTokens
 	}
 	detail := requestDetail{
-		Version:                requestDetailStateVersion,
-		RequestID:              requestID,
-		Timestamp:              t.startedAt.Unix(),
-		Protocol:               protocol,
-		Model:                  entry.Model,
-		APIKeyID:               entry.APIKeyID,
-		APIKeyName:             entry.APIKeyName,
-		AccountID:              entry.AccountID,
-		AccountEmail:           redactRequestDetailText(entry.AccountEmail),
-		Endpoint:               entry.Endpoint,
-		AccountSelectionMs:     entry.AccountSelectionMs,
-		AccountAttempts:        entry.AccountAttempts,
-		AccountQueueWaitMs:     entry.AccountQueueWaitMs,
-		AccountQueueWaitCount:  entry.AccountQueueWaitCount,
-		RouteAffinityHit:       entry.RouteAffinityHit,
-		Status:                 entry.Status,
-		StatusCode:             entry.StatusCode,
-		DurationMs:             entry.DurationMs,
-		FirstMeaningfulEventMs: entry.FirstMeaningfulEventMs,
-		LastMeaningfulEventMs:  entry.LastMeaningfulEventMs,
-		MaxMeaningfulGapMs:     entry.MaxMeaningfulGapMs,
-		FirstToolFragmentMs:    entry.FirstToolFragmentMs,
-		LastToolFragmentMs:     entry.LastToolFragmentMs,
-		ToolAssemblyMs:         entry.ToolAssemblyMs,
-		ToolResultRepairs:      entry.ToolResultRepairs,
-		ToolSchemaRepairs:      entry.ToolSchemaRepairs,
-		Request:                t.request,
-		Attempts:               append([]requestDetailAttempt(nil), t.attempts...),
-		Timeline:               append([]requestDetailEvent(nil), t.timeline...),
-		DroppedEvents:          t.droppedEvents,
+		Version:                  requestDetailStateVersion,
+		RequestID:                requestID,
+		Timestamp:                t.startedAt.Unix(),
+		Protocol:                 protocol,
+		Model:                    entry.Model,
+		APIKeyID:                 entry.APIKeyID,
+		APIKeyName:               entry.APIKeyName,
+		AccountID:                entry.AccountID,
+		AccountEmail:             redactRequestDetailText(entry.AccountEmail),
+		Endpoint:                 entry.Endpoint,
+		AccountSelectionMs:       entry.AccountSelectionMs,
+		AccountAttempts:          entry.AccountAttempts,
+		AccountQueueWaitMs:       entry.AccountQueueWaitMs,
+		AccountQueueWaitCount:    entry.AccountQueueWaitCount,
+		RouteAffinityHit:         entry.RouteAffinityHit,
+		Status:                   entry.Status,
+		StatusCode:               entry.StatusCode,
+		DurationMs:               entry.DurationMs,
+		FirstMeaningfulEventMs:   entry.FirstMeaningfulEventMs,
+		LastMeaningfulEventMs:    entry.LastMeaningfulEventMs,
+		MaxMeaningfulGapMs:       entry.MaxMeaningfulGapMs,
+		MaxUpstreamReadGapMs:     entry.MaxUpstreamReadGapMs,
+		MaxUpstreamFrameGapMs:    entry.MaxUpstreamFrameGapMs,
+		FirstToolDispatchDelayMs: entry.FirstToolDispatchDelayMs,
+		FirstToolFragmentMs:      entry.FirstToolFragmentMs,
+		LastToolFragmentMs:       entry.LastToolFragmentMs,
+		ToolAssemblyMs:           entry.ToolAssemblyMs,
+		ToolResultRepairs:        entry.ToolResultRepairs,
+		ToolSchemaRepairs:        entry.ToolSchemaRepairs,
+		Request:                  t.request,
+		Attempts:                 append([]requestDetailAttempt(nil), t.attempts...),
+		Timeline:                 append([]requestDetailEvent(nil), t.timeline...),
+		DroppedEvents:            t.droppedEvents,
 		Response: requestDetailResponse{
 			VisibleOutput:            t.visible.string(),
 			VisibleOutputBytes:       t.visible.total,

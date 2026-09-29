@@ -29,7 +29,7 @@ Options:
 Scenario IDs:
   text-stream, skill-mcp, mcp-zero-arg, mcp-multi-call, file-tools,
   thinking, long-stream, cancel-recover, concurrent-clients,
-  workspace-multiturn, workspace-long-tools, workspace-repo-loop,
+  workspace-multiturn, workspace-long-tools, workspace-large-write-progress, workspace-repo-loop,
   workspace-error-recovery, workspace-parallel-tools, permission-plan,
   structured-output, mcp-large-result, mcp-error-recovery, web-search,
   workspace-image
@@ -238,7 +238,7 @@ if [[ "$SCENARIOS_RAW" == "all" ]]; then
   SCENARIO_LIST=(
     text-stream skill-mcp mcp-zero-arg mcp-multi-call file-tools
     thinking long-stream cancel-recover concurrent-clients
-    workspace-multiturn workspace-long-tools workspace-repo-loop
+    workspace-multiturn workspace-long-tools workspace-large-write-progress workspace-repo-loop
     workspace-error-recovery workspace-parallel-tools permission-plan
     structured-output mcp-large-result mcp-error-recovery web-search
     workspace-image
@@ -249,7 +249,7 @@ else
     scenario="${scenario//[[:space:]]/}"
     [[ -n "$scenario" ]] || die "--scenarios contains an empty value"
     case "$scenario" in
-      text-stream|skill-mcp|mcp-zero-arg|mcp-multi-call|file-tools|thinking|long-stream|cancel-recover|concurrent-clients|workspace-multiturn|workspace-long-tools|workspace-repo-loop|workspace-error-recovery|workspace-parallel-tools|permission-plan|structured-output|mcp-large-result|mcp-error-recovery|web-search|workspace-image) ;;
+      text-stream|skill-mcp|mcp-zero-arg|mcp-multi-call|file-tools|thinking|long-stream|cancel-recover|concurrent-clients|workspace-multiturn|workspace-long-tools|workspace-large-write-progress|workspace-repo-loop|workspace-error-recovery|workspace-parallel-tools|permission-plan|structured-output|mcp-large-result|mcp-error-recovery|web-search|workspace-image) ;;
       *) die "unknown client scenario: $scenario" ;;
     esac
     if [[ -z "${SCENARIO_SEEN[$scenario]:-}" ]]; then
@@ -333,6 +333,14 @@ write_skill() {
   chmod 600 "$path"
 }
 
+capture_client_stream() {
+  if [[ -n "${CLI_TIMING_REPORT:-}" ]]; then
+    node "$SCRIPT_DIR/client-stream-timing.js" "$CLI_TIMING_REPORT"
+  else
+    cat
+  fi
+}
+
 run_cli_with_budget() {
   local budget="$1"
   local persist_session="$2"
@@ -364,7 +372,7 @@ run_cli_with_budget() {
       claude "${client_mode_args[@]}" --print --verbose --include-partial-messages \
         --add-dir "$workspace" --model "$model" \
         "${persistence_args[@]}" --max-budget-usd "$budget" \
-        --output-format stream-json "$@" -- "$prompt"
+        --output-format stream-json "$@" -- "$prompt" | capture_client_stream
   ) >"$output" 2>&1
 }
 
@@ -831,6 +839,43 @@ case_workspace_long_tools() {
   CASE_DETAIL="${tool_uses} structured tool calls and ${tool_results} results completed across ${file_count} files"
 }
 
+case_workspace_large_write_progress() {
+  command -v node >/dev/null 2>&1 || { CASE_DETAIL="Node.js is required for partial-message timing"; return 1; }
+  local workspace="$TMP_DIR/large-write" output="$TMP_DIR/workspace-large-write-progress.jsonl"
+  local timing="$TMP_DIR/large-write-timing.json" status evidence size spread gap
+  mkdir -p "$workspace"
+  set +e
+  CLI_TIMING_REPORT="$timing" run_cli_session "$AGENT_TIMEOUT" "$MODEL" "$workspace" "$output" \
+    'Create large-stream.txt in the current directory using exactly one Write tool call, then verify it using Read. The file must contain 420 numbered lines about ordinary software testing, each line at least 105 ASCII characters long. Target 45-60 KB. Do not use Bash, loops, shell scripts, generated shortcuts, or multiple writes. Output the entire file as the Write content parameter. Do not stop to ask permission. Finish with LARGE_WRITE_PROGRESS_OK.' \
+    --tools 'Read,Write' --allowedTools 'Read,Write' --permission-mode acceptEdits
+  status=$?
+  set -e
+  evidence="$(client_evidence "$output")"
+  size=0
+  [[ ! -f "$workspace/large-stream.txt" ]] || size="$(wc -c < "$workspace/large-stream.txt")"
+  if ((status != 0 || size < 40960)) || ! jq -e '.paired and .terminalSuccess and (.protocolError | not) and (.unrecoveredErrors == 0)' <<<"$evidence" >/dev/null || ! rg -q 'LARGE_WRITE_PROGRESS_OK' "$output"; then
+    CASE_DETAIL="large Write did not complete a paired, valid file workflow (status $status, bytes $size)"
+    return 1
+  fi
+  if ! jq -e '[.tools[] | select(.name == "Write" and .bytes >= 40960 and .stopMs != null)] | length == 1' "$timing" >/dev/null; then
+    CASE_DETAIL="missing large Write partial-message evidence"
+    return 1
+  fi
+  spread="$(jq '[.tools[] | select(.name == "Write" and .bytes >= 40960) | (.stopMs - .startMs)] | max' "$timing")"
+  gap="$(jq '[.tools[] | select(.name == "Write" and .bytes >= 40960) | .maxDeltaGapMs] | max // 0' "$timing")"
+  if ! jq -e '[.tools[] | select(.name == "Write" and .bytes >= 40960 and .deltaCount > 1 and (.stopMs - .firstDeltaMs) >= 1000)] | length == 1' "$timing" >/dev/null; then
+    CASE_STATUS_HINT=WARN
+    CASE_DETAIL="large file completed, but tool progress arrived buffered/bursty (bytes $size, start-to-stop ${spread}ms)"
+    return 0
+  fi
+  if ((gap > 30000)); then
+    CASE_STATUS_HINT=WARN
+    CASE_DETAIL="large file completed with early tool progress but a ${gap}ms argument gap; inspect upstream read/frame metrics"
+    return 0
+  fi
+  CASE_DETAIL="large Write completed with early partial messages (bytes $size, start-to-stop ${spread}ms, max argument gap ${gap}ms); terminal rendering is client-dependent"
+}
+
 case_workspace_repo_loop() {
   local workspace="$TMP_DIR/workspace-repo-loop"
   local output="$TMP_DIR/workspace-repo-loop.jsonl"
@@ -1110,6 +1155,7 @@ for scenario in "${SCENARIO_LIST[@]}"; do
     concurrent-clients) run_case "$scenario" case_concurrent_clients ;;
     workspace-multiturn) run_case "$scenario" case_workspace_multiturn ;;
     workspace-long-tools) run_case "$scenario" case_workspace_long_tools ;;
+    workspace-large-write-progress) run_case "$scenario" case_workspace_large_write_progress ;;
     workspace-repo-loop) run_case "$scenario" case_workspace_repo_loop ;;
     workspace-error-recovery) run_case "$scenario" case_workspace_error_recovery ;;
     workspace-parallel-tools) run_case "$scenario" case_workspace_parallel_tools ;;
@@ -1126,6 +1172,7 @@ if ((KEEP_ARTIFACTS)); then
   cp -- "$SUMMARY_PATH" "$ARTIFACT_DIR/client-summary.tsv"
   cp -- "$MCP_CONFIG" "$ARTIFACT_DIR/mcp.json"
   cp -- "$AUDIT_PATH" "$ARTIFACT_DIR/mcp-audit.log" 2>/dev/null || true
+  [[ ! -f "$TMP_DIR/large-write-timing.json" ]] || cp -- "$TMP_DIR/large-write-timing.json" "$ARTIFACT_DIR/"
   find "$TMP_DIR" -maxdepth 1 -type f -name '*.jsonl' -exec cp -- {} "$ARTIFACT_DIR/" \;
   find "$ARTIFACT_DIR" -type f -exec chmod 600 {} \;
 fi

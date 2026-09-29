@@ -58,6 +58,8 @@ Settings apply immediately unless the panel explicitly reports that a process re
 
 The recommended **Balanced** mode streams text and visible thinking immediately while buffering every tool's JSON until complete, including MCP tools. A truncated tool cannot be sent to the client, and a turn is retried only before content is committed. Once content is sent, failures terminate with an error rather than replaying the turn. **Safe/Adaptive** retain their compatibility buffering for high-risk tool lists; **Live** forwards tool fragments immediately. Existing saved modes are preserved: select Balanced after upgrading to 1.2.87 to enable the new behavior, or return to Safe to restore the previous buffering.
 
+For early tool activity during large code writes, try **Live** after upgrading to 1.2.88: tool completion now requires valid JSON. This does not shorten upstream generation time or guarantee that a client displays every fragment. Balanced still waits for complete arguments. See [live tool progress and wait diagnostics](docs/live-tool-progress.md).
+
 Upstream protection defaults to **adaptive** concurrency: legacy hard limits remain available, while work above the soft limits enters a bounded internal wait queue and is woken when a slot or account state changes. Queue overflow returns 429; clients are not given an artificial global request limit. Switch to **Strict hard limits** to apply the configured hard values exactly.
 
 Pre-output stream retry defaults to one same-endpoint retry after 700 ms. It applies only when an HTTP 200 stream fails before any text, thinking, or tool output reaches the client; cancellation and timeout failures are not replayed. Every retry consumes the shared upstream-attempt and duration budgets.

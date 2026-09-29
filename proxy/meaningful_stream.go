@@ -4,6 +4,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 	"unicode"
 	"unicode/utf8"
 )
@@ -64,6 +65,7 @@ type meaningfulStreamCallback struct {
 	preserveTextWhitespace  bool
 
 	mu           sync.Mutex
+	toolStarts   map[string]time.Time
 	committed    bool
 	visibleProbe strings.Builder
 	pending      []pendingStreamEvent
@@ -129,6 +131,14 @@ func wrapMeaningfulStreamCallback(target *KiroStreamCallback, onActivity func(),
 			gate.markActivity()
 		},
 		OnToolUseStart: func(toolUseID, name string) {
+			gate.mu.Lock()
+			if gate.toolStarts == nil {
+				gate.toolStarts = make(map[string]time.Time)
+			}
+			if _, exists := gate.toolStarts[toolUseID]; !exists {
+				gate.toolStarts[toolUseID] = time.Now()
+			}
+			gate.mu.Unlock()
 			if target.detailTrace != nil {
 				detailName := name
 				if original, ok := target.detailToolNameMap[detailName]; ok {
@@ -381,6 +391,16 @@ func (g *meaningfulStreamCallback) appendPendingLocked(event pendingStreamEvent)
 	g.pending = append(g.pending, event)
 }
 
+func (g *meaningfulStreamCallback) recordToolDispatch(id string) {
+	g.mu.Lock()
+	started, ok := g.toolStarts[id]
+	delete(g.toolStarts, id)
+	g.mu.Unlock()
+	if ok && g.target.upstreamTiming != nil {
+		g.target.upstreamTiming.firstToolDispatchDelayMs.CompareAndSwap(-1, max(int64(0), time.Since(started).Milliseconds()))
+	}
+}
+
 func (g *meaningfulStreamCallback) dispatch(event pendingStreamEvent) {
 	if g == nil || g.target == nil {
 		return
@@ -394,11 +414,13 @@ func (g *meaningfulStreamCallback) dispatch(event pendingStreamEvent) {
 		}
 	case pendingToolUse:
 		if g.target.OnToolUse != nil {
+			g.recordToolDispatch(event.toolUse.ToolUseID)
 			g.emitted.Store(true)
 			g.target.OnToolUse(event.toolUse)
 		}
 	case pendingToolUseStart:
 		if g.target.OnToolUseStart != nil {
+			g.recordToolDispatch(event.toolUseID)
 			g.emitted.Store(true)
 			g.target.OnToolUseStart(event.toolUseID, event.toolName)
 		}

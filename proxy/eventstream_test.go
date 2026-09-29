@@ -136,20 +136,21 @@ func TestParseEventStreamRejectsInvalidJSONPayload(t *testing.T) {
 	assertEventStreamErrorKind(t, parseEventStream(bytes.NewReader(frame), nil), EventStreamInvalidPayload)
 }
 
-func TestParseEventStreamPreservesInvalidCompletedToolJSON(t *testing.T) {
+func TestParseEventStreamRejectsInvalidCompletedToolJSON(t *testing.T) {
 	frame := awsEventStreamFrame(t, "toolUseEvent", map[string]interface{}{
 		"toolUseId": "toolu_bad",
 		"name":      "write_file",
 		"input":     `{"path":`,
 		"stop":      true,
 	})
-	var toolUse KiroToolUse
-	err := parseEventStream(bytes.NewReader(frame), &KiroStreamCallback{OnToolUse: func(value KiroToolUse) { toolUse = value }})
-	if err != nil {
-		t.Fatalf("expected invalid arguments to be preserved, got %v", err)
-	}
-	if toolUse.Input["_raw_arguments"] != `{"path":` {
-		t.Fatalf("unexpected preserved arguments: %+v", toolUse.Input)
+	var completed bool
+	err := parseEventStream(bytes.NewReader(frame), &KiroStreamCallback{
+		OnToolUseStop: func(string) { completed = true },
+		OnToolUse:     func(KiroToolUse) { completed = true },
+	})
+	assertEventStreamErrorKind(t, err, EventStreamInvalidPayload)
+	if completed {
+		t.Fatal("invalid tool was completed")
 	}
 }
 

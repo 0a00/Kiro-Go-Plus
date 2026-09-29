@@ -58,6 +58,9 @@ type requestLogEntry struct {
 	FirstMeaningfulEventMs   *int64   `json:"firstMeaningfulEventMs,omitempty"`
 	LastMeaningfulEventMs    *int64   `json:"lastMeaningfulEventMs,omitempty"`
 	MaxMeaningfulGapMs       *int64   `json:"maxMeaningfulGapMs,omitempty"`
+	MaxUpstreamReadGapMs     *int64   `json:"maxUpstreamReadGapMs,omitempty"`
+	MaxUpstreamFrameGapMs    *int64   `json:"maxUpstreamFrameGapMs,omitempty"`
+	FirstToolDispatchDelayMs *int64   `json:"firstToolDispatchDelayMs,omitempty"`
 	FirstToolFragmentMs      *int64   `json:"firstToolFragmentMs,omitempty"`
 	LastToolFragmentMs       *int64   `json:"lastToolFragmentMs,omitempty"`
 	HeartbeatCount           int      `json:"heartbeatCount,omitempty"`
@@ -498,21 +501,24 @@ func requestDurationMs(start time.Time) int64 {
 }
 
 type requestFirstContentTimer struct {
-	startedAt              time.Time
-	firstContentMs         atomic.Int64
-	firstSSEEventMs        atomic.Int64
-	firstThinkingMs        atomic.Int64
-	firstVisibleTextMs     atomic.Int64
-	firstToolOutputMs      atomic.Int64
-	lastSSEEventNanos      atomic.Int64
-	maxStreamGapMs         atomic.Int64
-	firstMeaningfulEventMs atomic.Int64
-	lastMeaningfulEventMs  atomic.Int64
-	lastMeaningfulNanos    atomic.Int64
-	maxMeaningfulGapMs     atomic.Int64
-	firstToolFragmentMs    atomic.Int64
-	lastToolFragmentMs     atomic.Int64
-	heartbeatCount         atomic.Int64
+	startedAt                time.Time
+	firstContentMs           atomic.Int64
+	firstSSEEventMs          atomic.Int64
+	firstThinkingMs          atomic.Int64
+	firstVisibleTextMs       atomic.Int64
+	firstToolOutputMs        atomic.Int64
+	lastSSEEventNanos        atomic.Int64
+	maxStreamGapMs           atomic.Int64
+	firstMeaningfulEventMs   atomic.Int64
+	lastMeaningfulEventMs    atomic.Int64
+	lastMeaningfulNanos      atomic.Int64
+	maxMeaningfulGapMs       atomic.Int64
+	maxUpstreamReadGapMs     atomic.Int64
+	maxUpstreamFrameGapMs    atomic.Int64
+	firstToolDispatchDelayMs atomic.Int64
+	firstToolFragmentMs      atomic.Int64
+	lastToolFragmentMs       atomic.Int64
+	heartbeatCount           atomic.Int64
 }
 
 func newRequestFirstContentTimer(startedAt time.Time) *requestFirstContentTimer {
@@ -528,6 +534,9 @@ func newRequestFirstContentTimer(startedAt time.Time) *requestFirstContentTimer 
 	timer.lastMeaningfulEventMs.Store(-1)
 	timer.lastMeaningfulNanos.Store(-1)
 	timer.maxMeaningfulGapMs.Store(-1)
+	timer.maxUpstreamReadGapMs.Store(-1)
+	timer.maxUpstreamFrameGapMs.Store(-1)
+	timer.firstToolDispatchDelayMs.Store(-1)
 	timer.firstToolFragmentMs.Store(-1)
 	timer.lastToolFragmentMs.Store(-1)
 	return timer
@@ -684,6 +693,9 @@ func (t *requestFirstContentTimer) Apply(entry *requestLogEntry) {
 	setRequestTimingValue(&entry.FirstMeaningfulEventMs, t.firstMeaningfulEventMs.Load())
 	setRequestTimingValue(&entry.LastMeaningfulEventMs, t.lastMeaningfulEventMs.Load())
 	setRequestTimingValue(&entry.MaxMeaningfulGapMs, t.maxMeaningfulGapMs.Load())
+	setRequestTimingValue(&entry.MaxUpstreamReadGapMs, t.maxUpstreamReadGapMs.Load())
+	setRequestTimingValue(&entry.MaxUpstreamFrameGapMs, t.maxUpstreamFrameGapMs.Load())
+	setRequestTimingValue(&entry.FirstToolDispatchDelayMs, t.firstToolDispatchDelayMs.Load())
 	setRequestTimingValue(&entry.FirstToolFragmentMs, t.firstToolFragmentMs.Load())
 	setRequestTimingValue(&entry.LastToolFragmentMs, t.lastToolFragmentMs.Load())
 	if entry.HeartbeatCount == 0 {

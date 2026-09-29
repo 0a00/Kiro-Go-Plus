@@ -4,6 +4,24 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const { test } = require('node:test');
+const { ToolTiming } = require('./client-stream-timing');
+
+test('large-tool timing separates early streaming from completed or bursty output', () => {
+  const t = new ToolTiming();
+  const event = (e, ms) => t.record({type: 'stream_event', event: e}, ms);
+  event({type:'content_block_start',index:0,content_block:{type:'tool_use',name:'Write'}}, 100);
+  event({type:'content_block_delta',index:0,delta:{type:'input_json_delta',partial_json:'{"content":"'}}, 150);
+  event({type:'content_block_delta',index:0,delta:{type:'input_json_delta',partial_json:'data"}'}}, 5000);
+  event({type:'content_block_stop',index:0}, 5100);
+  event({type:'message_start'}, 6000);
+  event({type:'content_block_start',index:0,content_block:{type:'tool_use',name:'Read'}}, 6100);
+  assert.equal(t.tools[0].firstDeltaMs, 150);
+  assert.equal(t.tools[0].stopMs, 5100);
+  assert.equal(t.tools[0].deltaCount, 2);
+  assert.equal(t.tools[0].maxDeltaGapMs, 4850);
+  assert.equal(t.tools[1].stopMs, null);
+  assert.equal(JSON.stringify(t.tools).includes('content'), false);
+});
 
 const evidencePath = path.join(__dirname, 'client-e2e-evidence.jq');
 const init = (tools = ['Read', 'Edit']) => ({ type: 'system', subtype: 'init', tools });

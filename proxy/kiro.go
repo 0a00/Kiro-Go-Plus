@@ -767,6 +767,7 @@ type KiroStreamCallback struct {
 	detailToolNameMap      map[string]string
 	streamDiagnostics      *eventStreamDiagnostics
 	onToolArgumentActivity func(toolUseID, input string)
+	upstreamTiming         *requestFirstContentTimer
 }
 
 // KiroTokenUsage preserves upstream cache accounting when the event stream
@@ -1221,6 +1222,7 @@ endpointLoop:
 				attemptCallback = &callbackCopy
 			}
 			if payload != nil {
+				attemptCallback.upstreamTiming = payload.requestTimingTracker()
 				previousMeaningfulHook := attemptCallback.onMeaningfulEvent
 				previousToolHook := attemptCallback.onToolFragment
 				attemptCallback.onMeaningfulEvent = func() {
@@ -1252,12 +1254,13 @@ endpointLoop:
 			// when Kiro declines to call a tool. Explicit tool_choice requests remain
 			// strict and still require a structured tool call.
 			meaningfulGate.setAllowCompletedTextFallback(!transparentClaudeCode && payload != nil && payload.toolUsePolicy == toolUsePolicyInferred)
-			meaningfulGate.preserveTextWhitespace = payload != nil && payload.streamTextWithBufferedTools
+			meaningfulGate.preserveTextWhitespace = payload != nil && (payload.streamTextWithBufferedTools || payload.streamToolUseDeltas)
 			wrappedCallback.streamDiagnostics = attemptDiagnostics
 			toolArgumentIdleTimeout := toolArgumentIdleTimeoutForRequest(retryConfig, payload)
 			wrappedCallback, toolMonitor := wrapToolAssemblyMonitor(wrappedCallback, toolArgumentIdleTimeout, func(toolAssemblySnapshot) {
 				cancelRequest()
 			})
+			wrappedCallback.upstreamTiming = payload.requestTimingTracker()
 			var actionableOutputTimedOut atomic.Bool
 			actionableOutputTimeout := resolveLongToolActionableOutputTimeout(payload)
 			var actionableOutputWatchdog *activityWatchdog
@@ -1963,6 +1966,18 @@ func parseAndCloseEventStreamWithOptions(body io.ReadCloser, idleTimeout time.Du
 	idleReader := newStreamIdleReader(body, idleTimeout, onIdle)
 	defer idleReader.Stop()
 	defer body.Close()
+	if callback != nil && callback.upstreamTiming != nil {
+		observed := newUpstreamObservedReader(idleReader, callback.upstreamTiming)
+		wrapped := *callback
+		wrapped.OnProgress = func() {
+			observed.frame(time.Now())
+			if callback.OnProgress != nil {
+				callback.OnProgress()
+			}
+		}
+		defer observed.finish()
+		return parseEventStreamWithOptions(observed, &wrapped, options)
+	}
 	return parseEventStreamWithOptions(idleReader, callback, options)
 }
 
@@ -3089,16 +3104,21 @@ func finishToolUse(state *toolUseState, callback *KiroStreamCallback) error {
 	if state.ToolUseID == "" {
 		state.ToolUseID = "toolu_" + uuid.New().String()
 	}
-	startToolUseStream(state, callback)
-	if callback != nil && callback.OnToolUseStop != nil {
-		callback.OnToolUseStop(state.ToolUseID)
-	}
 	input := make(map[string]interface{})
 	if state.InputBuffer.Len() > 0 {
 		rawArguments := state.InputBuffer.String()
-		if err := json.Unmarshal([]byte(rawArguments), &input); err != nil {
-			input = map[string]interface{}{"_raw_arguments": rawArguments}
+		if err := json.Unmarshal([]byte(rawArguments), &input); err != nil || input == nil {
+			return &EventStreamError{
+				Kind: EventStreamInvalidPayload, Message: "tool use arguments must be a complete JSON object",
+				ToolName: state.Name, ArgumentBytes: state.InputBuffer.Len(), FragmentCount: state.FragmentCount,
+			}
 		}
+	}
+	// A block stop can authorize client execution. Never send it for malformed
+	// arguments, even when live deltas have already reached the client.
+	startToolUseStream(state, callback)
+	if callback != nil && callback.OnToolUseStop != nil {
+		callback.OnToolUseStop(state.ToolUseID)
 	}
 	if callback != nil && callback.OnToolUse != nil {
 		callback.OnToolUse(KiroToolUse{

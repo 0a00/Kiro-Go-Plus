@@ -161,6 +161,9 @@ type customerRequestLogView struct {
 	FirstMeaningfulEventMs   *int64  `json:"firstMeaningfulEventMs,omitempty"`
 	LastMeaningfulEventMs    *int64  `json:"lastMeaningfulEventMs,omitempty"`
 	MaxMeaningfulGapMs       *int64  `json:"maxMeaningfulGapMs,omitempty"`
+	MaxUpstreamReadGapMs     *int64  `json:"maxUpstreamReadGapMs,omitempty"`
+	MaxUpstreamFrameGapMs    *int64  `json:"maxUpstreamFrameGapMs,omitempty"`
+	FirstToolDispatchDelayMs *int64  `json:"firstToolDispatchDelayMs,omitempty"`
 	FirstToolFragmentMs      *int64  `json:"firstToolFragmentMs,omitempty"`
 	LastToolFragmentMs       *int64  `json:"lastToolFragmentMs,omitempty"`
 	ToolAssemblyMs           *int64  `json:"toolAssemblyMs,omitempty"`
@@ -238,6 +241,9 @@ func customerRequestLog(entry requestLogEntry) customerRequestLogView {
 		FirstMeaningfulEventMs:   entry.FirstMeaningfulEventMs,
 		LastMeaningfulEventMs:    entry.LastMeaningfulEventMs,
 		MaxMeaningfulGapMs:       entry.MaxMeaningfulGapMs,
+		MaxUpstreamReadGapMs:     entry.MaxUpstreamReadGapMs,
+		MaxUpstreamFrameGapMs:    entry.MaxUpstreamFrameGapMs,
+		FirstToolDispatchDelayMs: entry.FirstToolDispatchDelayMs,
 		FirstToolFragmentMs:      entry.FirstToolFragmentMs,
 		LastToolFragmentMs:       entry.LastToolFragmentMs,
 		ToolAssemblyMs:           entry.ToolAssemblyMs,
