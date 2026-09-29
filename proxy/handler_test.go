@@ -51,10 +51,10 @@ func TestConfigureClaudeToolStreamingModes(t *testing.T) {
 		{name: "adaptive low risk", mode: config.ToolStreamModeAdaptive, policy: toolUsePolicyInferred, streamToolDeltas: true, toolName: "WebSearch"},
 		{name: "safe Claude Code high risk", mode: config.ToolStreamModeSafe, policy: toolUsePolicyInferred, requireActionable: true, deferText: true, streamThinking: true, claudeCode: true},
 		{name: "safe Claude Code low risk", mode: config.ToolStreamModeSafe, policy: toolUsePolicyInferred, streamToolDeltas: true, requireActionable: true, streamThinking: true, claudeCode: true, toolName: "WebSearch"},
-		{name: "balanced inferred", mode: config.ToolStreamModeBalanced, policy: toolUsePolicyInferred, requireActionable: true, deferText: true, streamThinking: true},
-		{name: "balanced Claude Code", mode: config.ToolStreamModeBalanced, policy: toolUsePolicyInferred, streamToolDeltas: true, requireActionable: true, deferText: true, streamThinking: true, claudeCode: true},
+		{name: "balanced inferred", mode: config.ToolStreamModeBalanced, policy: toolUsePolicyInferred},
+		{name: "balanced Claude Code", mode: config.ToolStreamModeBalanced, policy: toolUsePolicyInferred, claudeCode: true},
 		{name: "live inferred", mode: config.ToolStreamModeLive, policy: toolUsePolicyInferred, streamToolDeltas: true},
-		{name: "balanced explicit", mode: config.ToolStreamModeBalanced, policy: toolUsePolicyExplicit, requireActionable: true, deferText: true, streamThinking: true, requireExplicitTool: true},
+		{name: "balanced explicit", mode: config.ToolStreamModeBalanced, policy: toolUsePolicyExplicit, requireExplicitTool: true},
 		{name: "live explicit", mode: config.ToolStreamModeLive, policy: toolUsePolicyExplicit, requireActionable: true, streamThinking: true, streamToolDeltas: true, requireExplicitTool: true},
 	}
 
@@ -95,7 +95,7 @@ func TestTransparentClaudeHighRiskStreamingUsesConfiguredSafetyBoundary(t *testi
 		ClientUserAgent: "Go-http-client/1.1",
 		Tools:           []ClaudeTool{{Name: "Write"}},
 	}
-	for _, mode := range []string{config.ToolStreamModeSafe, config.ToolStreamModeBalanced, config.ToolStreamModeAdaptive} {
+	for _, mode := range []string{config.ToolStreamModeSafe, config.ToolStreamModeAdaptive} {
 		t.Run(mode, func(t *testing.T) {
 			payload := &KiroPayload{transparentClaudeCode: true}
 			configureClaudeToolStreaming(payload, req, false, claudeThinkingResponseOptions{}, config.ThinkingConfig{ToolStreamMode: mode})
@@ -1118,7 +1118,7 @@ func TestClaudeLiveModeCommitsInferredTextBeforeUpstreamCompletes(t *testing.T) 
 	}
 }
 
-func TestClaudeBalancedModeBuffersHighRiskOutputUntilCompletion(t *testing.T) {
+func TestClaudeBalancedModeStreamsTextBeforeCompleteTool(t *testing.T) {
 	t.Setenv("ALLOW_UNAUTHENTICATED_API", "true")
 	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatalf("config.Init: %v", err)
@@ -1197,15 +1197,15 @@ func TestClaudeBalancedModeBuffersHighRiskOutputUntilCompletion(t *testing.T) {
 
 	reader := bufio.NewReader(resp.Body)
 	var first strings.Builder
-	for !strings.Contains(first.String(), `"type":"message_start"`) {
+	for !strings.Contains(first.String(), "balanced-visible-text") {
 		line, readErr := reader.ReadString('\n')
 		if readErr != nil {
 			t.Fatalf("read balanced text: %v body=%s", readErr, first.String())
 		}
 		first.WriteString(line)
 	}
-	if strings.Contains(first.String(), "balanced-visible-text") || strings.Contains(first.String(), "first-balanced-fragment") {
-		t.Fatalf("balanced mode leaked high-risk output before completion: %s", first.String())
+	if strings.Contains(first.String(), "first-balanced-fragment") || strings.Contains(first.String(), `"type":"tool_use"`) {
+		t.Fatalf("balanced mode leaked unvalidated tool output: %s", first.String())
 	}
 
 	type readResult struct {
@@ -1235,8 +1235,8 @@ func TestClaudeBalancedModeBuffersHighRiskOutputUntilCompletion(t *testing.T) {
 		t.Fatalf("balanced mode should emit one complete tool argument delta: %s", full)
 	}
 	entries := h.requestLog.list(1)
-	if len(entries) != 1 || entries[0].FirstContentMs == nil || *entries[0].FirstContentMs < 35 {
-		t.Fatalf("balanced high-risk output was not held until completion: %+v", entries)
+	if len(entries) != 1 || entries[0].FirstContentMs == nil || entries[0].DurationMs-*entries[0].FirstContentMs < 35 {
+		t.Fatalf("balanced text was not streamed before tool completion: %+v", entries)
 	}
 }
 

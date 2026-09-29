@@ -316,36 +316,37 @@ type KiroPayload struct {
 	allowCoolingEndpointRetry bool
 	// Model fallback state is request-local and intentionally excluded from the
 	// upstream JSON payload.
-	modelFallbackInProgress  bool
-	modelFallbackApplied     bool
-	modelFallbackFrom        string
-	modelFallbackTo          string
-	modelFallbackRuleID      string
-	contextWindowTokens      int
-	hasSystemPriming         bool
-	requireActionableOutput  bool
-	requireToolUse           bool
-	deferTextUntilComplete   bool
-	streamThinkingPrecommit  bool
-	streamToolUseDeltas      bool
-	clientOutputTokenLimit   int
-	enforceClientOutputLimit bool
-	toolUsePolicy            string
-	tokenRefreshMu           sync.Mutex
-	tokenRefreshAttempts     map[string]int
-	apiKeyRegionAttempts     map[string]int
-	streamMetricsMu          sync.Mutex
-	streamMetricsEnabled     bool
-	streamMetricsStartedAt   time.Time
-	firstUpstreamActivityMs  int64
-	maxToolAssemblyMs        int64
-	maxToolArgumentBytes     int
-	maxToolFragmentCount     int
-	toolTruncationCount      int
-	toolRecoveryAttempts     int
-	toolResultRepairs        int
-	toolSchemaRepairs        int
-	toolRecoveryHintApplied  bool
+	modelFallbackInProgress     bool
+	modelFallbackApplied        bool
+	modelFallbackFrom           string
+	modelFallbackTo             string
+	modelFallbackRuleID         string
+	contextWindowTokens         int
+	hasSystemPriming            bool
+	requireActionableOutput     bool
+	requireToolUse              bool
+	deferTextUntilComplete      bool
+	streamThinkingPrecommit     bool
+	streamToolUseDeltas         bool
+	streamTextWithBufferedTools bool
+	clientOutputTokenLimit      int
+	enforceClientOutputLimit    bool
+	toolUsePolicy               string
+	tokenRefreshMu              sync.Mutex
+	tokenRefreshAttempts        map[string]int
+	apiKeyRegionAttempts        map[string]int
+	streamMetricsMu             sync.Mutex
+	streamMetricsEnabled        bool
+	streamMetricsStartedAt      time.Time
+	firstUpstreamActivityMs     int64
+	maxToolAssemblyMs           int64
+	maxToolArgumentBytes        int
+	maxToolFragmentCount        int
+	toolTruncationCount         int
+	toolRecoveryAttempts        int
+	toolResultRepairs           int
+	toolSchemaRepairs           int
+	toolRecoveryHintApplied     bool
 	// promptCacheTTL preserves an explicit Claude cache-control TTL across
 	// translation. It is intentionally not serialized to the Kiro API.
 	promptCacheTTL        time.Duration
@@ -1251,6 +1252,7 @@ endpointLoop:
 			// when Kiro declines to call a tool. Explicit tool_choice requests remain
 			// strict and still require a structured tool call.
 			meaningfulGate.setAllowCompletedTextFallback(!transparentClaudeCode && payload != nil && payload.toolUsePolicy == toolUsePolicyInferred)
+			meaningfulGate.preserveTextWhitespace = payload != nil && payload.streamTextWithBufferedTools
 			wrappedCallback.streamDiagnostics = attemptDiagnostics
 			toolArgumentIdleTimeout := toolArgumentIdleTimeoutForRequest(retryConfig, payload)
 			wrappedCallback, toolMonitor := wrapToolAssemblyMonitor(wrappedCallback, toolArgumentIdleTimeout, func(toolAssemblySnapshot) {
@@ -1403,6 +1405,15 @@ endpointLoop:
 				err = &EventStreamError{
 					Kind:    EventStreamInvalidPayload,
 					Message: "tool use arguments are not valid JSON",
+				}
+			}
+			if err == nil && payload != nil && payload.streamTextWithBufferedTools && payload.requireToolUse &&
+				!meaningfulGate.completedToolUse.Load() {
+				err = &UpstreamError{
+					Kind: UpstreamErrorEmptyResponse, Endpoint: ep.Name,
+					Message:              "upstream did not return the required complete tool call",
+					RetryAcrossEndpoints: !meaningfulGate.hasEmittedOutput(),
+					RetryAcrossAccounts:  !meaningfulGate.hasEmittedOutput(),
 				}
 			}
 			if err != nil {

@@ -56,7 +56,7 @@ Proxy-pool credentials are encrypted with `KIRO_MASTER_KEY` when configured. Hea
 
 Settings apply immediately unless the panel explicitly reports that a process restart is required.
 
-Tool stream modes trade retry coverage for latency: **Adaptive** keeps ordinary tools live but buffers high-risk `Write`/`Edit`/`Bash`-style arguments so an incomplete JSON tail can be retried; **Live** forwards every tool argument delta immediately; **Balanced** buffers all tool arguments; **Safe** protects tool arguments and incomplete tool calls while forwarding validated visible text immediately. Explicit `tool_choice` requests remain strictly validated in every mode.
+The recommended **Balanced** mode streams text and visible thinking immediately while buffering every tool's JSON until complete, including MCP tools. A truncated tool cannot be sent to the client, and a turn is retried only before content is committed. Once content is sent, failures terminate with an error rather than replaying the turn. **Safe/Adaptive** retain their compatibility buffering for high-risk tool lists; **Live** forwards tool fragments immediately. Existing saved modes are preserved: select Balanced after upgrading to 1.2.87 to enable the new behavior, or return to Safe to restore the previous buffering.
 
 Upstream protection defaults to **adaptive** concurrency: legacy hard limits remain available, while work above the soft limits enters a bounded internal wait queue and is woken when a slot or account state changes. Queue overflow returns 429; clients are not given an artificial global request limit. Switch to **Strict hard limits** to apply the configured hard values exactly.
 

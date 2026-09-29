@@ -60,6 +60,8 @@ type meaningfulStreamCallback struct {
 	actionable              atomic.Bool
 	emitted                 atomic.Bool
 	invalidCommittedTool    atomic.Bool
+	completedToolUse        atomic.Bool
+	preserveTextWhitespace  bool
 
 	mu           sync.Mutex
 	committed    bool
@@ -80,14 +82,32 @@ func wrapMeaningfulStreamCallback(target *KiroStreamCallback, onActivity func(),
 		streamThinkingPrecommit: streamThinkingPrecommit,
 		streamToolFrames:        target.OnToolUseStart != nil || target.OnToolUseDelta != nil || target.OnToolUseStop != nil,
 	}
+	var leadingWhitespace [2]strings.Builder
 	wrapper := &KiroStreamCallback{
 		OnResponseStart: target.OnResponseStart,
 		OnText: func(text string, isThinking bool) {
+			kind := 0
+			if isThinking {
+				kind = 1
+			}
 			if strings.TrimSpace(text) == "" {
 				// Whitespace is not meaningful first output, but it still proves
 				// that the upstream stream is active.
 				gate.touchLiveness()
+				if gate.preserveTextWhitespace && text != "" {
+					if gate.hasActivity() {
+						gate.handleEvent(pendingStreamEvent{kind: pendingText, text: text, isThinking: isThinking})
+					} else if leadingWhitespace[kind].Len()+len(text) <= maxActionableProbeBytes {
+						// Preserve indentation without committing a whitespace-only
+						// response or disabling the pre-output retry boundary.
+						leadingWhitespace[kind].WriteString(text)
+					}
+				}
 				return
+			}
+			if gate.preserveTextWhitespace && leadingWhitespace[kind].Len() > 0 {
+				text = leadingWhitespace[kind].String() + text
+				leadingWhitespace[kind].Reset()
 			}
 			gate.markActivity()
 			gate.handleEvent(pendingStreamEvent{kind: pendingText, text: text, isThinking: isThinking})
@@ -240,6 +260,9 @@ func (g *meaningfulStreamCallback) handleEvent(event pendingStreamEvent) {
 			g.invalidCommittedTool.Store(true)
 		}
 		return
+	}
+	if event.kind == pendingToolUse {
+		g.completedToolUse.Store(true)
 	}
 	if !g.strict {
 		if event.kind == pendingText || event.kind == pendingToolUse || event.kind == pendingToolUseStart || event.kind == pendingToolUseDelta {

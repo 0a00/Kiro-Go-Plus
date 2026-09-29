@@ -2124,6 +2124,18 @@ func configureClaudeToolStreaming(payload *KiroPayload, req *ClaudeRequest, thin
 		return
 	}
 	payload.clientUserAgent = req.ClientUserAgent
+	if req.Stream && thinkingCfg.ToolStreamMode == config.ToolStreamModeBalanced {
+		// Stream text without waiting for the tool selected by the model. Only
+		// complete, validated tool_use objects may cross the client boundary.
+		payload.streamTextWithBufferedTools = req.Stream
+		payload.requireActionableOutput = false
+		payload.requireToolUse = requiresStrictClaudeToolUse(req)
+		payload.toolUsePolicy = req.ToolUsePolicy
+		payload.deferTextUntilComplete = false
+		payload.streamThinkingPrecommit = false
+		payload.streamToolUseDeltas = false
+		return
+	}
 	if payload.transparentClaudeCode {
 		// Preserve transparent history and low-risk live events, but keep the
 		// configured safety boundary for high-risk workspace tools. A partial

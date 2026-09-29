@@ -1,5 +1,5 @@
 {
-  "version": "1.2.86",
-  "changelog": "Sync Kiro rate-limit hints, MCP search response compatibility, server-tool validation, and generation profile headers.\n同步 Kiro 限流等待头、MCP 搜索响应兼容、服务端工具校验与生成请求 Profile 头。",
+  "version": "1.2.87",
+  "changelog": "Balanced mode streams text immediately and commits tools only after complete JSON validation; preserve retry boundaries and safe mode rollback.\n平衡模式实时输出正文，完整校验工具 JSON 后提交，保留重试边界与安全模式回退。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }
