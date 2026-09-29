@@ -29,7 +29,7 @@ Options:
 Scenario IDs:
   text-stream, skill-mcp, mcp-zero-arg, mcp-multi-call, file-tools,
   thinking, long-stream, cancel-recover, concurrent-clients,
-  workspace-multiturn, workspace-long-tools, workspace-large-write-progress, workspace-repo-loop,
+  workspace-multiturn, workspace-long-tools, workspace-large-write-progress, workspace-chunked-edit-progress, workspace-repo-loop,
   workspace-error-recovery, workspace-parallel-tools, permission-plan,
   structured-output, mcp-large-result, mcp-error-recovery, web-search,
   workspace-image
@@ -238,7 +238,7 @@ if [[ "$SCENARIOS_RAW" == "all" ]]; then
   SCENARIO_LIST=(
     text-stream skill-mcp mcp-zero-arg mcp-multi-call file-tools
     thinking long-stream cancel-recover concurrent-clients
-    workspace-multiturn workspace-long-tools workspace-large-write-progress workspace-repo-loop
+    workspace-multiturn workspace-long-tools workspace-large-write-progress workspace-chunked-edit-progress workspace-repo-loop
     workspace-error-recovery workspace-parallel-tools permission-plan
     structured-output mcp-large-result mcp-error-recovery web-search
     workspace-image
@@ -249,7 +249,7 @@ else
     scenario="${scenario//[[:space:]]/}"
     [[ -n "$scenario" ]] || die "--scenarios contains an empty value"
     case "$scenario" in
-      text-stream|skill-mcp|mcp-zero-arg|mcp-multi-call|file-tools|thinking|long-stream|cancel-recover|concurrent-clients|workspace-multiturn|workspace-long-tools|workspace-large-write-progress|workspace-repo-loop|workspace-error-recovery|workspace-parallel-tools|permission-plan|structured-output|mcp-large-result|mcp-error-recovery|web-search|workspace-image) ;;
+      text-stream|skill-mcp|mcp-zero-arg|mcp-multi-call|file-tools|thinking|long-stream|cancel-recover|concurrent-clients|workspace-multiturn|workspace-long-tools|workspace-large-write-progress|workspace-chunked-edit-progress|workspace-repo-loop|workspace-error-recovery|workspace-parallel-tools|permission-plan|structured-output|mcp-large-result|mcp-error-recovery|web-search|workspace-image) ;;
       *) die "unknown client scenario: $scenario" ;;
     esac
     if [[ -z "${SCENARIO_SEEN[$scenario]:-}" ]]; then
@@ -839,33 +839,66 @@ case_workspace_long_tools() {
   CASE_DETAIL="${tool_uses} structured tool calls and ${tool_results} results completed across ${file_count} files"
 }
 
+probe_file_tools() {
+  local workspace="$1" output="$2" status
+  set +e
+  run_cli "$CLIENT_TIMEOUT" "$MODEL" "$workspace" "$output" \
+    'Do not call any tools or modify files. Reply exactly CLIENT_CAPABILITY_PROBE_OK.' \
+    --restricted --tools 'Read,Write,Edit' --allowedTools 'Read,Write,Edit' --permission-mode acceptEdits
+  status=$?
+  set -e
+  if ((status != 0)) || ! assert_client_result "$output" CLIENT_CAPABILITY_PROBE_OK ||
+    ! client_evidence "$output" | jq -e '.initialized and .terminalSuccess and (.protocolError | not)' >/dev/null; then
+    CASE_DETAIL="file capability probe failed (status $status); not a capability skip"
+    return 1
+  fi
+  FILE_WRITER=""
+  if client_has_tool "$output" Read; then
+    if client_has_tool "$output" Write; then FILE_WRITER=Write
+    elif client_has_tool "$output" Edit; then FILE_WRITER=Edit
+    fi
+  fi
+  if [[ -z "$FILE_WRITER" ]]; then
+    CASE_STATUS_HINT=SKIP
+    CASE_DETAIL="Claude Code does not expose Read and a file writer (Write/Edit); no large request sent"
+  fi
+}
+
 case_workspace_large_write_progress() {
   command -v node >/dev/null 2>&1 || { CASE_DETAIL="Node.js is required for partial-message timing"; return 1; }
   local workspace="$TMP_DIR/large-write" output="$TMP_DIR/workspace-large-write-progress.jsonl"
-  local timing="$TMP_DIR/large-write-timing.json" status evidence size spread gap
+  local timing="$TMP_DIR/large-write-timing.json" status evidence size spread gap instruction
   mkdir -p "$workspace"
+  probe_file_tools "$workspace" "$TMP_DIR/large-write-capabilities.jsonl" || return 1
+  [[ -n "$FILE_WRITER" ]] || return 0
+  instruction="Use exactly one $FILE_WRITER call to create the file."
+  if [[ "$FILE_WRITER" == Edit ]]; then instruction+=' Use old_string="" and put all file content in new_string.'; fi
   set +e
   CLI_TIMING_REPORT="$timing" run_cli_session "$AGENT_TIMEOUT" "$MODEL" "$workspace" "$output" \
-    'Create large-stream.txt in the current directory using exactly one Write tool call, then verify it using Read. The file must contain 420 numbered lines about ordinary software testing, each line at least 105 ASCII characters long. Target 45-60 KB. Do not use Bash, loops, shell scripts, generated shortcuts, or multiple writes. Output the entire file as the Write content parameter. Do not stop to ask permission. Finish with LARGE_WRITE_PROGRESS_OK.' \
-    --tools 'Read,Write' --allowedTools 'Read,Write' --permission-mode acceptEdits
+    "Create large-stream.txt in the current directory. $instruction Then verify it using Read. The file must contain 420 numbered lines about ordinary software testing, each line at least 105 ASCII characters long. Target 45-60 KB. Do not use Bash, loops, shell scripts, generated shortcuts, or multiple mutations. Do not stop to ask permission. Finish with LARGE_WRITE_PROGRESS_OK." \
+    --restricted --tools "Read,$FILE_WRITER" --allowedTools "Read,$FILE_WRITER" --permission-mode acceptEdits
   status=$?
   set -e
   evidence="$(client_evidence "$output")"
   size=0
-  [[ ! -f "$workspace/large-stream.txt" ]] || size="$(wc -c < "$workspace/large-stream.txt")"
-  if ((status != 0 || size < 40960)) || ! jq -e '.paired and .terminalSuccess and (.protocolError | not) and (.unrecoveredErrors == 0)' <<<"$evidence" >/dev/null || ! rg -q 'LARGE_WRITE_PROGRESS_OK' "$output"; then
-    CASE_DETAIL="large Write did not complete a paired, valid file workflow (status $status, bytes $size)"
+  [[ ! -f "$workspace/large-stream.txt" || -L "$workspace/large-stream.txt" ]] || size="$(wc -c < "$workspace/large-stream.txt")"
+  if ! client_has_tool "$output" "$FILE_WRITER" || ! client_has_tool "$output" Read; then
+    CASE_DETAIL="client tool capabilities changed after probe; file workflow was not verified"
     return 1
   fi
-  if ! jq -e '[.tools[] | select(.name == "Write" and .bytes >= 40960 and .stopMs != null)] | length == 1' "$timing" >/dev/null; then
-    CASE_DETAIL="missing large Write partial-message evidence"
+  if ((status != 0 || size < 40960)) || ! jq -e '.paired and .terminalSuccess and (.protocolError | not) and (.unrecoveredErrors == 0)' <<<"$evidence" >/dev/null || ! assert_client_result "$output" LARGE_WRITE_PROGRESS_OK; then
+    CASE_DETAIL="large $FILE_WRITER did not complete a paired, valid file workflow (status $status, bytes $size)"
     return 1
   fi
-  spread="$(jq '[.tools[] | select(.name == "Write" and .bytes >= 40960) | (.stopMs - .startMs)] | max' "$timing")"
-  gap="$(jq '[.tools[] | select(.name == "Write" and .bytes >= 40960) | .maxDeltaGapMs] | max // 0' "$timing")"
-  if ! jq -e '[.tools[] | select(.name == "Write" and .bytes >= 40960 and .deltaCount > 1 and (.stopMs - .firstDeltaMs) >= 1000)] | length == 1' "$timing" >/dev/null; then
+  if ! jq -e --arg writer "$FILE_WRITER" '[.tools[] | select(.name == $writer and .bytes >= 40960 and .stopMs != null and .jsonValid == true)] | length == 1' "$timing" >/dev/null; then
+    CASE_DETAIL="missing large $FILE_WRITER partial-message evidence"
+    return 1
+  fi
+  spread="$(jq --arg writer "$FILE_WRITER" '[.tools[] | select(.name == $writer and .bytes >= 40960) | (.stopMs - .startMs)] | max' "$timing")"
+  gap="$(jq --arg writer "$FILE_WRITER" '[.tools[] | select(.name == $writer and .bytes >= 40960) | .maxDeltaGapMs] | max // 0' "$timing")"
+  if ! jq -e --arg writer "$FILE_WRITER" '[.tools[] | select(.name == $writer and .bytes >= 40960 and .deltaCount > 1 and (.stopMs - .firstDeltaMs) >= 1000)] | length == 1' "$timing" >/dev/null; then
     CASE_STATUS_HINT=WARN
-    CASE_DETAIL="large file completed, but tool progress arrived buffered/bursty (bytes $size, start-to-stop ${spread}ms)"
+    CASE_DETAIL="large $FILE_WRITER completed, but arguments arrived buffered/bursty (bytes $size, start-to-stop ${spread}ms)"
     return 0
   fi
   if ((gap > 30000)); then
@@ -873,7 +906,37 @@ case_workspace_large_write_progress() {
     CASE_DETAIL="large file completed with early tool progress but a ${gap}ms argument gap; inspect upstream read/frame metrics"
     return 0
   fi
-  CASE_DETAIL="large Write completed with early partial messages (bytes $size, start-to-stop ${spread}ms, max argument gap ${gap}ms); terminal rendering is client-dependent"
+  CASE_DETAIL="large $FILE_WRITER completed with early partial messages (bytes $size, start-to-stop ${spread}ms, max argument gap ${gap}ms); terminal rendering is client-dependent"
+}
+
+case_workspace_chunked_edit_progress() {
+  command -v node >/dev/null 2>&1 || { CASE_DETAIL="Node.js is required for partial-message timing"; return 1; }
+  local workspace="$TMP_DIR/chunked-edit" output="$TMP_DIR/workspace-chunked-edit-progress.jsonl"
+  local timing="$TMP_DIR/chunked-edit-timing.json" status size
+  mkdir -p "$workspace"
+  probe_file_tools "$workspace" "$TMP_DIR/chunked-edit-capabilities.jsonl" || return 1
+  if ! client_has_tool "$TMP_DIR/chunked-edit-capabilities.jsonl" Edit || [[ -z "$FILE_WRITER" ]]; then
+    CASE_STATUS_HINT=SKIP
+    CASE_DETAIL="Claude Code does not expose Read/Edit; chunked editing not tested"
+    return 0
+  fi
+  printf '%s\n' 'CHUNK_01' 'CHUNK_02' 'CHUNK_03' 'CHUNK_04' 'CHUNK_05' 'CHUNK_06' 'CHUNK_07' 'CHUNK_08' 'CHUNK_09' 'CHUNK_10' >"$workspace/chunked-stream.txt"
+  set +e
+  CLI_TIMING_REPORT="$timing" run_cli_session "$AGENT_TIMEOUT" "$MODEL" "$workspace" "$output" \
+    'Read chunked-stream.txt. Replace each CHUNK_01 through CHUNK_10 placeholder using a separate Edit call. Each replacement must contain 42 numbered lines about ordinary software testing, each line at least 105 ASCII characters. Use 10 separate Edit calls, each with only one placeholder as old_string and 4-6 KB of new_string. Target 45-60 KB total. Do not use Write, Bash, shell scripts, loops or generated shortcuts. Read the final file to verify all placeholders are gone. Finish with CHUNKED_EDIT_PROGRESS_OK.' \
+    --restricted --tools 'Read,Edit' --allowedTools 'Read,Edit' --permission-mode acceptEdits
+  status=$?
+  set -e
+  size=0
+  [[ ! -f "$workspace/chunked-stream.txt" || -L "$workspace/chunked-stream.txt" ]] || size="$(wc -c < "$workspace/chunked-stream.txt")"
+  if ((status != 0 || size < 40960)) || rg -q 'CHUNK_[0-9][0-9]' "$workspace/chunked-stream.txt" ||
+    ! assert_client_result "$output" CHUNKED_EDIT_PROGRESS_OK ||
+    ! client_evidence "$output" | jq -e '.paired and .terminalSuccess and (.protocolError | not) and .unrecoveredErrors == 0' >/dev/null ||
+    ! jq -e '[.tools[] | select(.name == "Edit" and .stopMs != null and .jsonValid == true)] | length == 10 and all(.[]; .bytes < 12000)' "$timing" >/dev/null; then
+    CASE_DETAIL="chunked editing failed content/tool integrity checks (status $status, bytes $size)"
+    return 1
+  fi
+  CASE_DETAIL="10 bounded Edit calls completed and placeholders removed (bytes $size); see chunked-edit-timing.json for progress"
 }
 
 case_workspace_repo_loop() {
@@ -1156,6 +1219,7 @@ for scenario in "${SCENARIO_LIST[@]}"; do
     workspace-multiturn) run_case "$scenario" case_workspace_multiturn ;;
     workspace-long-tools) run_case "$scenario" case_workspace_long_tools ;;
     workspace-large-write-progress) run_case "$scenario" case_workspace_large_write_progress ;;
+    workspace-chunked-edit-progress) run_case "$scenario" case_workspace_chunked_edit_progress ;;
     workspace-repo-loop) run_case "$scenario" case_workspace_repo_loop ;;
     workspace-error-recovery) run_case "$scenario" case_workspace_error_recovery ;;
     workspace-parallel-tools) run_case "$scenario" case_workspace_parallel_tools ;;
@@ -1173,6 +1237,7 @@ if ((KEEP_ARTIFACTS)); then
   cp -- "$MCP_CONFIG" "$ARTIFACT_DIR/mcp.json"
   cp -- "$AUDIT_PATH" "$ARTIFACT_DIR/mcp-audit.log" 2>/dev/null || true
   [[ ! -f "$TMP_DIR/large-write-timing.json" ]] || cp -- "$TMP_DIR/large-write-timing.json" "$ARTIFACT_DIR/"
+  [[ ! -f "$TMP_DIR/chunked-edit-timing.json" ]] || cp -- "$TMP_DIR/chunked-edit-timing.json" "$ARTIFACT_DIR/"
   find "$TMP_DIR" -maxdepth 1 -type f -name '*.jsonl' -exec cp -- {} "$ARTIFACT_DIR/" \;
   find "$ARTIFACT_DIR" -type f -exec chmod 600 {} \;
 fi

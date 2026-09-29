@@ -2,14 +2,14 @@ const fs = require('node:fs');
 const readline = require('node:readline');
 
 class ToolTiming {
-  constructor() { this.blocks = new Map(); this.tools = []; }
+  constructor() { this.blocks = new Map(); this.arguments = new Map(); this.tools = []; }
   record(row, ms) {
     const event = row.type === 'stream_event' ? row.event : null;
     if (!event) return;
-    if (event.type === 'message_start') this.blocks.clear();
+    if (event.type === 'message_start') { this.blocks.clear(); this.arguments.clear(); }
     if (event.type === 'content_block_start' && event.content_block?.type === 'tool_use') {
       const tool = { name: event.content_block.name, startMs: ms, firstDeltaMs: null,
-        lastDeltaMs: null, stopMs: null, deltaCount: 0, bytes: 0, maxDeltaGapMs: 0 };
+        lastDeltaMs: null, stopMs: null, deltaCount: 0, bytes: 0, maxDeltaGapMs: 0, jsonValid: null };
       this.blocks.set(event.index, tool);
       this.tools.push(tool);
     }
@@ -21,10 +21,18 @@ class ToolTiming {
       tool.lastDeltaMs = ms;
       tool.deltaCount++;
       tool.bytes += Buffer.byteLength(event.delta.partial_json || '');
+      if (tool.bytes <= 8 * 1024 * 1024) {
+        this.arguments.set(event.index, (this.arguments.get(event.index) || '') + (event.delta.partial_json || ''));
+      } else this.arguments.delete(event.index);
     }
     if (event.type === 'content_block_stop') {
       tool.maxDeltaGapMs = Math.max(tool.maxDeltaGapMs, ms - (tool.lastDeltaMs ?? tool.startMs));
       tool.stopMs = ms;
+      try {
+        const value = JSON.parse(this.arguments.get(event.index) || '{}');
+        tool.jsonValid = tool.bytes <= 8 * 1024 * 1024 && value !== null && !Array.isArray(value) && typeof value === 'object';
+      } catch { tool.jsonValid = false; }
+      this.arguments.delete(event.index);
       this.blocks.delete(event.index);
     }
   }

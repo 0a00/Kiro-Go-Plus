@@ -19,8 +19,18 @@ test('large-tool timing separates early streaming from completed or bursty outpu
   assert.equal(t.tools[0].stopMs, 5100);
   assert.equal(t.tools[0].deltaCount, 2);
   assert.equal(t.tools[0].maxDeltaGapMs, 4850);
+  assert.equal(t.tools[0].jsonValid, true);
   assert.equal(t.tools[1].stopMs, null);
   assert.equal(JSON.stringify(t.tools).includes('content'), false);
+});
+
+test('client-generated stop on incomplete arguments does not prove a valid tool', () => {
+  const t=new ToolTiming();
+  t.record({type:'stream_event',event:{type:'content_block_start',index:0,content_block:{type:'tool_use',name:'Edit'}}},0);
+  t.record({type:'stream_event',event:{type:'content_block_delta',index:0,delta:{type:'input_json_delta',partial_json:'{"new_string":"partial'}}},10);
+  t.record({type:'stream_event',event:{type:'content_block_stop',index:0}},20);
+  assert.equal(t.tools[0].jsonValid,false);
+  assert.equal(t.arguments.size,0);
 });
 
 const evidencePath = path.join(__dirname, 'client-e2e-evidence.jq');
@@ -103,7 +113,40 @@ const reply = (id,content) => emit({type:'user',message:{content:[{type:'tool_re
 if (process.env.ANTHROPIC_AUTH_TOKEN) process.exit(43);
 const last = args.at(-1);
 if (args.at(-2)!=='--') process.exit(44);
-if (last.includes('claude-file-e2e.txt')) {
+if (last.includes('CLIENT_CAPABILITY_PROBE_OK')) {
+  if (!args.includes('--restricted')) process.exit(48);
+  emit({type:'system',subtype:'init',tools:mode==='capability-missing'?['Read']:['Read','Edit']});
+  emit({type:'result',subtype:mode==='capability-auth'?'error_during_execution':'success',is_error:mode==='capability-auth',result:'CLIENT_CAPABILITY_PROBE_OK'});
+  if(mode==='capability-auth') process.exit(1);
+} else if (last.includes('large-stream.txt')) {
+  if(mode==='capability-missing'||mode==='capability-auth') process.exit(49);
+  if(!last.includes('one Edit call') || !args.includes('Read,Edit')) process.exit(50);
+  emit({type:'system',subtype:'init',tools:mode==='capability-changed'?['Read']:['Read','Edit']});
+  const file=path.join(process.cwd(),'large-stream.txt');
+  const content='x'.repeat(45000), raw=JSON.stringify({file_path:file,old_string:'',new_string:content});
+  if(mode!=='large-no-file') fs.writeFileSync(file,content);
+  emit({type:'stream_event',event:{type:'content_block_start',index:0,content_block:{type:'tool_use',name:'Edit',id:'create',input:{}}}});
+  emit({type:'stream_event',event:{type:'content_block_delta',index:0,delta:{type:'input_json_delta',partial_json:raw}}});
+  emit({type:'stream_event',event:{type:'content_block_stop',index:0}});
+  call('create','Edit',file);reply('create','created');
+  call('read','Read',file);reply('read',content);
+  emit({type:'result',subtype:'success',is_error:false,result:'LARGE_WRITE_PROGRESS_OK'});
+} else if (last.includes('chunked-stream.txt')) {
+  emit({type:'system',subtype:'init',tools:['Read','Edit']});
+  const file=path.join(process.cwd(),'chunked-stream.txt');
+  call('read-before','Read',file);reply('read-before','placeholders');
+  const count=mode==='chunks-fewer'?9:10;
+  for(let i=0;i<count;i++){
+    const raw=JSON.stringify({file_path:file,old_string:'CHUNK_'+String(i+1).padStart(2,'0'),new_string:'x'.repeat(mode==='chunks-oversized'?13000:4500)});
+    emit({type:'stream_event',event:{type:'content_block_start',index:i,content_block:{type:'tool_use',name:'Edit',id:'edit-'+i,input:{}}}});
+    emit({type:'stream_event',event:{type:'content_block_delta',index:i,delta:{type:'input_json_delta',partial_json:raw}}});
+    emit({type:'stream_event',event:{type:'content_block_stop',index:i}});
+    call('edit-'+i,'Edit',file);reply('edit-'+i,'edited');
+  }
+  fs.writeFileSync(file,'x'.repeat(45000)+(mode==='chunks-placeholder'?'CHUNK_10':''));
+  call('read-after','Read',file);reply('read-after','verified');
+  emit({type:'result',subtype:'success',is_error:false,result:'CHUNKED_EDIT_PROGRESS_OK'});
+} else if (last.includes('claude-file-e2e.txt')) {
   if (!args.includes('--bare')) process.exit(45);
   emit({type:'system',subtype:'init',tools:['Read','Edit']});
   const file = path.join(process.cwd(),'claude-file-e2e.txt');
@@ -179,5 +222,36 @@ test('resumed workflow requires disk changes, recovered errors and successful te
     const failed = runFixture(mode, 'workspace-multiturn');
     assert.equal(failed.status, 1, failed.stdout + failed.stderr);
     assert.match(failed.stdout, /workspace-multiturn\s+FAIL/);
+  }
+});
+
+test('large-file preflight skips unavailable tools but does not hide authentication failures', () => {
+  const missing=runFixture('capability-missing','workspace-large-write-progress');
+  assert.equal(missing.status,0,missing.stdout+missing.stderr);
+  assert.match(missing.stdout,/SKIP/);
+  const auth=runFixture('capability-auth','workspace-large-write-progress');
+  assert.equal(auth.status,1,auth.stdout+auth.stderr);
+  assert.doesNotMatch(auth.stdout,/SKIP/);
+});
+
+test('large file supports Edit creation, warns on buffered progress, and rejects missing evidence', () => {
+  const ok=runFixture('large-edit','workspace-large-write-progress');
+  assert.equal(ok.status,0,ok.stdout+ok.stderr);
+  assert.match(ok.stdout,/WARN.*large Edit completed/);
+  const strict=runFixture('large-edit','workspace-large-write-progress',['--fail-on-warning']);
+  assert.equal(strict.status,1,strict.stdout+strict.stderr);
+  for(const mode of ['large-no-file','capability-changed']) {
+    const bad=runFixture(mode,'workspace-large-write-progress');
+    assert.equal(bad.status,1,bad.stdout+bad.stderr);
+  }
+});
+
+test('chunked workflow requires ten bounded mutations and no remaining placeholders', () => {
+  const ok=runFixture('chunks-ok','workspace-chunked-edit-progress');
+  assert.equal(ok.status,0,ok.stdout+ok.stderr);
+  assert.match(ok.stdout,/PASS/);
+  for(const mode of ['chunks-fewer','chunks-oversized','chunks-placeholder']){
+    const bad=runFixture(mode,'workspace-chunked-edit-progress');
+    assert.equal(bad.status,1,bad.stdout+bad.stderr);
   }
 });
