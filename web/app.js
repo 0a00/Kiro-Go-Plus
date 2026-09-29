@@ -875,6 +875,8 @@
         durationItems.push([t('requests.accountQueueWait'), formatRequestDuration(item.accountQueueWaitMs || 0) + ' · ' + t('requests.accountQueueWaitCount', item.accountQueueWaitCount || 0), true]);
       }
       durationItems.push(...[
+        [t('requests.upstreamHeaders'), formatRequestDuration(item.firstUpstreamHeadersMs), item.firstUpstreamHeadersMs],
+        [t('requests.upstreamBodyByte'), formatRequestDuration(item.firstUpstreamBodyByteMs), item.firstUpstreamBodyByteMs],
         [t('requests.upstreamActivity'), upstreamActivityDuration, item.upstreamFirstActivityMs],
         [t('requests.firstSseEvent'), firstSSEEventDuration, item.firstSseEventMs],
         [t('requests.firstThinking'), firstThinkingDuration, item.firstThinkingMs],

@@ -156,6 +156,17 @@ if (last.includes('CLIENT_CAPABILITY_PROBE_OK')) {
   call('edit','Edit',file);reply('edit','edited');
   call('r2','Read',file);reply('r2','FILE_EDIT_OK');
   emit({type:'result',subtype:'success',is_error:false,result:'FILE_TOOLS_OK'});
+} else if (last.includes('LONG_TOOL_STRESS_OK')) {
+  emit({type:'system',subtype:'init',tools:['Read','Edit','Bash']});
+  const file=path.join(process.cwd(),'first.txt');
+  for(let i=0;i<(mode==='long-few-files'?1:12);i++) fs.writeFileSync(path.join(process.cwd(),'file-'+i+'.txt'),'checked');
+  call('bad','Edit',file);
+  emit({type:'user',message:{content:[{type:'tool_result',tool_use_id:'bad',content:'Read first',is_error:true}]}});
+  call('read','Read',file);reply('read','readback');
+  call('retry','Edit',mode==='long-unrecovered'?file+'.other':file);reply('retry','updated');
+  for(let i=0;i<20;i++){call('read-'+i,'Read',file);reply('read-'+i,'verified');}
+  if(mode==='long-protocol') emit({type:'stream_event',event:{type:'error'}});
+  emit({type:'result',subtype:mode==='long-budget'?'error_max_budget_usd':'success',is_error:mode==='long-budget',result:'LONG_TOOL_STRESS_OK'});
 } else if (last.includes('workflow.sh')) {
   const file=path.join(process.cwd(),'workflow.sh');
   emit({type:'system',subtype:'init',tools:['Read','Edit'],session_id:'fixture-session'});
@@ -252,6 +263,19 @@ test('chunked workflow requires ten bounded mutations and no remaining placehold
   assert.match(ok.stdout,/PASS/);
   for(const mode of ['chunks-fewer','chunks-oversized','chunks-placeholder']){
     const bad=runFixture(mode,'workspace-chunked-edit-progress');
+    assert.equal(bad.status,1,bad.stdout+bad.stderr);
+  }
+});
+
+test('long workflow accepts recovered errors but requires complete evidence and files', () => {
+  const ok=runFixture('long-recovered','workspace-long-tools');
+  assert.equal(ok.status,0,ok.stdout+ok.stderr);
+  assert.match(ok.stdout,/PASS.*1 recovered tool errors/);
+  const budget=runFixture('long-budget','workspace-long-tools');
+  assert.equal(budget.status,0,budget.stdout+budget.stderr);
+  assert.match(budget.stdout,/WARN/);
+  for(const mode of ['long-unrecovered','long-protocol','long-few-files']){
+    const bad=runFixture(mode,'workspace-long-tools');
     assert.equal(bad.status,1,bad.stdout+bad.stderr);
   }
 });

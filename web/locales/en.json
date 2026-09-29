@@ -69,6 +69,8 @@
   "requests.lastMeaningfulEvent": "Last meaningful upstream event",
   "requests.maxMeaningfulGap": "Max meaningful gap",
   "requests.maxUpstreamReadGap": "Max upstream body-read gap",
+  "requests.upstreamHeaders": "First upstream headers",
+  "requests.upstreamBodyByte": "First upstream body byte",
   "requests.maxUpstreamFrameGap": "Max upstream frame gap",
   "requests.firstToolDispatchDelay": "First tool dispatch wait",
   "requests.firstToolFragment": "First tool fragment",

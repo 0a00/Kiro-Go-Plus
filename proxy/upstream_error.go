@@ -439,8 +439,8 @@ func newEndpointCircuitOpenError(endpoint string, retryAfter time.Duration) *Ups
 		Endpoint:             endpoint,
 		Message:              "endpoint circuit is open",
 		RetryAcrossEndpoints: true,
-		// The circuit is shared by endpoint host. Trying more accounts that resolve
-		// to the same host cannot recover it and only burns the selection budget.
+		// The circuit is shared by endpoint/model/workload/proxy route. Pure
+		// circuit rejections must not scan the entire account pool.
 		RetryAcrossAccounts: false,
 		RetryAfter:          retryAfter,
 	}

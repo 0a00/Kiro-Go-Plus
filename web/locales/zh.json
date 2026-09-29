@@ -69,6 +69,8 @@
   "requests.lastMeaningfulEvent": "末有效上游事件",
   "requests.maxMeaningfulGap": "有效事件最大间隔",
   "requests.maxUpstreamReadGap": "上游读取最大间隔",
+  "requests.upstreamHeaders": "首个上游响应头",
+  "requests.upstreamBodyByte": "首个上游响应体字节",
   "requests.maxUpstreamFrameGap": "上游完整帧最大间隔",
   "requests.firstToolDispatchDelay": "首工具转发等待",
   "requests.firstToolFragment": "首工具分片",

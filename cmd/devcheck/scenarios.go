@@ -488,6 +488,7 @@ func (r *runner) runProtocolMatrix(parent context.Context) {
 			cancel()
 			if matrix.stream {
 				result := streamScenarioResult(matrix.name, matrix.protocol, model, response)
+				warnSlowMatrixResponse(&result)
 				result.Detail += "; coverage=requested-model compatibility only; upstream route identity hidden"
 				r.add(result)
 				continue
@@ -501,8 +502,27 @@ func (r *runner) runProtocolMatrix(parent context.Context) {
 				result.Detail = fmt.Sprintf("text_chars=%d", len([]rune(responseText(response.body))))
 			}
 			result.Detail += "; coverage=requested-model compatibility only; upstream route identity hidden"
+			warnSlowMatrixResponse(&result)
 			r.add(result)
 		}
+	}
+}
+
+// Matrix prompts are tiny. A syntactically successful two-minute reply must
+// not look healthy merely because HTTP status and terminal events are valid.
+func warnSlowMatrixResponse(result *scenarioResult) {
+	if result.Status != statusPass && result.Status != statusWarn {
+		return
+	}
+	latency := result.TotalMillis
+	metric := "response"
+	if result.Stream {
+		latency = result.TTFTMillis
+		metric = "first meaningful output"
+	}
+	if latency > 30000 {
+		result.Status = statusWarn
+		result.Detail += fmt.Sprintf("; slow %s=%dms for a short matrix probe (warning threshold 30000ms)", metric, latency)
 	}
 }
 
@@ -677,6 +697,16 @@ func (r *runner) runStaircase(parent context.Context) {
 		}
 		r.add(result)
 		if parent.Err() != nil {
+			return
+		}
+		if result.Status != statusPass {
+			for _, remaining := range r.opts.concurrencySteps[level+1:] {
+				r.add(scenarioResult{
+					Name: fmt.Sprintf("concurrency-staircase-%d", remaining), Model: r.model, Status: statusSkip,
+					Detail: fmt.Sprintf("not escalated after concurrency %d returned %s; recovery probe follows", concurrency, result.Status),
+				})
+			}
+			r.runPostLoadRecovery(parent)
 			return
 		}
 		if level < len(r.opts.concurrencySteps)-1 && r.opts.staircaseCooldown > 0 {

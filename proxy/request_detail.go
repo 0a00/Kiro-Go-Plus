@@ -97,6 +97,8 @@ type requestDetail struct {
 	StatusCode               int                    `json:"statusCode"`
 	DurationMs               int64                  `json:"durationMs"`
 	FirstMeaningfulEventMs   *int64                 `json:"firstMeaningfulEventMs,omitempty"`
+	FirstUpstreamHeadersMs   *int64                 `json:"firstUpstreamHeadersMs,omitempty"`
+	FirstUpstreamBodyByteMs  *int64                 `json:"firstUpstreamBodyByteMs,omitempty"`
 	LastMeaningfulEventMs    *int64                 `json:"lastMeaningfulEventMs,omitempty"`
 	MaxMeaningfulGapMs       *int64                 `json:"maxMeaningfulGapMs,omitempty"`
 	MaxUpstreamReadGapMs     *int64                 `json:"maxUpstreamReadGapMs,omitempty"`
@@ -1113,6 +1115,8 @@ func (t *requestDetailTrace) finalize(entry requestLogEntry) (requestDetail, boo
 		StatusCode:               entry.StatusCode,
 		DurationMs:               entry.DurationMs,
 		FirstMeaningfulEventMs:   entry.FirstMeaningfulEventMs,
+		FirstUpstreamHeadersMs:   entry.FirstUpstreamHeadersMs,
+		FirstUpstreamBodyByteMs:  entry.FirstUpstreamBodyByteMs,
 		LastMeaningfulEventMs:    entry.LastMeaningfulEventMs,
 		MaxMeaningfulGapMs:       entry.MaxMeaningfulGapMs,
 		MaxUpstreamReadGapMs:     entry.MaxUpstreamReadGapMs,

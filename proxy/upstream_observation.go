@@ -24,6 +24,7 @@ func newUpstreamObservedReader(reader io.Reader, timing *requestFirstContentTime
 func (r *upstreamObservedReader) Read(p []byte) (int, error) {
 	n, err := r.reader.Read(p)
 	if n > 0 {
+		r.timing.MarkUpstreamBodyByte()
 		r.readAt(time.Now())
 	}
 	return n, err

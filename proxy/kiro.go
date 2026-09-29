@@ -1073,6 +1073,7 @@ func callKiroAPISingleModel(account *config.Account, payload *KiroPayload, callb
 
 	var lastErr error
 	var lastCircuitError error
+	var lastAttemptError error
 	effectiveProxyURL := ResolveAccountProxyURL(account)
 	client, err := GetClientForAccount(account)
 	if err != nil {
@@ -1140,7 +1141,7 @@ endpointLoop:
 		if parsedURL, parseErr := url.Parse(endpointURL); parseErr == nil && parsedURL.Host != "" {
 			endpointHost = parsedURL.Host
 		}
-		endpointCircuitKey := ep.Key + "|" + endpointHost
+		endpointCircuitKey := endpointCircuitScope(ep.Key, endpointHost, modelKey, effectiveProxyURL)
 		endpointCircuitLabel := ep.Name + " (" + endpointHost + ")"
 		invocationID := uuid.New().String()
 		for endpointAttempt := 0; endpointAttempt <= preOutputStreamRetries; endpointAttempt++ {
@@ -1282,6 +1283,9 @@ endpointLoop:
 			}
 
 			resp, err := client.Do(req)
+			if resp != nil {
+				payload.requestTimingTracker().MarkUpstreamHeaders()
+			}
 			if err != nil {
 				stopAndRecordToolAssembly(payload, toolMonitor)
 				if firstTokenTimer != nil {
@@ -1319,9 +1323,10 @@ endpointLoop:
 					proxyTransportFailed = true
 					sharedUpstreamHealth.endpointFailure(endpointCircuitKey, lastErr, time.Since(attemptStartedAt))
 				} else {
-					sharedUpstreamHealth.endpointSuccess(endpointCircuitKey, time.Since(attemptStartedAt))
+					sharedUpstreamHealth.releaseEndpoint(endpointCircuitKey)
 				}
 				logger.Warnf("[KiroAPI] Endpoint %s failed: %v", ep.Name, err)
+				lastAttemptError = lastErr
 				if payload != nil && payload.attemptBudget.expired() && requestContext.Err() == nil {
 					return newRetryBudgetError(payload.attemptBudget)
 				}
@@ -1345,6 +1350,7 @@ endpointLoop:
 				cancelRequest()
 				classifiedErr := classifyKiroHTTPResponseError(resp, ep.Name, errBody)
 				lastErr = classifiedErr
+				lastAttemptError = lastErr
 				detailTrace.recordAttempt(accountID, accountEmail, ep.Name, endpointHost, attemptStartedAt, resp.StatusCode, "http_error", lastErr, requestDetailRetryReason(lastErr))
 				if payload != nil {
 					payload.attemptBudget.recordFailure(ep.Name, lastErr)
@@ -1353,6 +1359,7 @@ endpointLoop:
 				// the confirmed candidate before cooling this logical endpoint, or the
 				// recursive call would reject the route that it needs to verify.
 				if handled, retryErr := retryAfterAPIKeyRegionRecovery(requestContext, account, payload, callback, lastErr, false); handled {
+					sharedUpstreamHealth.releaseEndpoint(endpointCircuitKey)
 					return retryErr
 				}
 				if cooldown := sharedAccountEndpointRoutes.recordFailure(accountID, modelKey, ep, lastErr); cooldown > 0 {
@@ -1472,6 +1479,7 @@ endpointLoop:
 					err = classifyTransportError(ep.Name, err)
 				}
 				lastErr = err
+				lastAttemptError = lastErr
 				retrySameEndpoint := !toolAssemblyTimedOut && endpointAttempt < preOutputStreamRetries &&
 					isRetryablePreOutputStreamError(err, meaningfulGate)
 				attemptStatus := "stream_error"
@@ -1523,10 +1531,12 @@ endpointLoop:
 				// same-endpoint empty retries are exhausted, try the remaining endpoint
 				// variants for this account before spending another account attempt.
 				lastErr = newEmptyResponseErrorWithDiagnostics(ep.Name, true, attemptDiagnostics)
+				lastAttemptError = lastErr
 				if payload != nil {
 					payload.attemptBudget.recordFailure(ep.Name, lastErr)
 				}
 				if emptyBudgetExhausted {
+					sharedUpstreamHealth.releaseEndpoint(endpointCircuitKey)
 					lastErr = newEmptyResponseLimitError(payload.attemptBudget, lastErr)
 					payload.attemptBudget.recordFailure(ep.Name, lastErr)
 					detailTrace.recordAttempt(accountID, accountEmail, ep.Name, endpointHost, attemptStartedAt, http.StatusOK, "empty_response_budget_exhausted", lastErr, requestDetailRetryReason(lastErr))
@@ -1566,6 +1576,11 @@ endpointLoop:
 		}
 	}
 
+	if lastAttemptError != nil {
+		// Skipped endpoints did not contact upstream. Preserve the real failure
+		// and its retry flags instead of masking it with a final circuit 503.
+		return lastAttemptError
+	}
 	if lastErr != nil {
 		return lastErr
 	}

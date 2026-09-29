@@ -65,7 +65,7 @@ func TestCallKiroAPISkipsOpenEndpointCircuit(t *testing.T) {
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)
-		http.Error(w, "temporary", http.StatusInternalServerError)
+		http.Error(w, "temporary", http.StatusServiceUnavailable)
 	}))
 	defer server.Close()
 	oldEndpoints := kiroEndpoints

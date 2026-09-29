@@ -806,7 +806,7 @@ case_workspace_multiturn() {
 case_workspace_long_tools() {
   local workspace="$TMP_DIR/workspace-long-tools"
   local output="$TMP_DIR/workspace-long-tools.jsonl"
-  local tool_uses tool_results tool_errors subtype file_count
+  local tool_uses tool_results tool_errors subtype file_count evidence recovered unrecovered
   mkdir -p "$workspace"
   set +e
   run_cli_session "$AGENT_TIMEOUT" "$MODEL" "$workspace" "$output" \
@@ -819,8 +819,12 @@ case_workspace_long_tools() {
   tool_errors="$(client_tool_error_count "$output")"
   subtype="$(client_result_subtype "$output")"
   file_count="$(find "$workspace" -type f | wc -l)"
+  evidence="$(client_evidence "$output")" || { CASE_DETAIL="invalid long-tool evidence"; return 1; }
+  recovered="$(jq -r '.recoveredErrors' <<<"$evidence")"
+  unrecovered="$(jq -r '.unrecoveredErrors' <<<"$evidence")"
   if [[ "$subtype" == "error_max_budget_usd" ]]; then
-    if ((tool_uses >= 20 && tool_results >= tool_uses && tool_errors == 0 && file_count >= 12)); then
+    if ((tool_uses >= 20 && file_count >= 12 && unrecovered == 0)) &&
+      jq -e '.paired and (.protocolError | not)' <<<"$evidence" >/dev/null; then
       CASE_STATUS_HINT=WARN
       CASE_DETAIL="structured long-tool workflow completed ${tool_uses} calls across ${file_count} files before the Claude Code budget was exhausted"
       return 0
@@ -832,11 +836,13 @@ case_workspace_long_tools() {
     CASE_DETAIL="long tool chain did not finish (status ${status}, subtype ${subtype}, calls ${tool_uses}, files ${file_count})"
     return 1
   fi
-  if ((tool_uses < 20 || tool_results < tool_uses || tool_errors > 0)) || ! rg -q 'LONG_TOOL_STRESS_OK' "$output"; then
+  if ((tool_uses < 20 || file_count < 12 || unrecovered > 0)) ||
+    ! assert_client_result "$output" LONG_TOOL_STRESS_OK ||
+    ! jq -e '.paired and .terminalSuccess and (.protocolError | not)' <<<"$evidence" >/dev/null; then
     CASE_DETAIL="long tool chain integrity failed (calls ${tool_uses}, results ${tool_results}, errors ${tool_errors}, files ${file_count})"
     return 1
   fi
-  CASE_DETAIL="${tool_uses} structured tool calls and ${tool_results} results completed across ${file_count} files"
+  CASE_DETAIL="${tool_uses} structured tool calls and ${tool_results} results completed across ${file_count} files (${recovered} recovered tool errors)"
 }
 
 probe_file_tools() {

@@ -1,8 +1,13 @@
 package proxy
 
 import (
+	"context"
+	"crypto/sha256"
+	"errors"
 	"fmt"
 	"kiro-go/config"
+	"net"
+	"net/http"
 	"sort"
 	"strings"
 	"sync"
@@ -15,12 +20,26 @@ type circuitRuntimeState struct {
 	openCount           int
 	cooldownUntil       time.Time
 	probeInFlight       bool
+	inFlight            int
 	successes           uint64
 	failures            uint64
 	ewmaLatencyMs       float64
 	lastError           string
 	lastSuccessAt       time.Time
 	lastFailureAt       time.Time
+	lastAccess          time.Time
+}
+
+const maxCircuitRuntimeEntries = 4096
+
+func endpointCircuitScope(endpoint, host, model, proxyURL string) string {
+	proxyURL = strings.TrimSpace(proxyURL)
+	if strings.EqualFold(proxyURL, "direct") {
+		proxyURL = ""
+	}
+	// Do not retain credentials or caller-controlled model names in map keys.
+	scope := sha256.Sum256([]byte(model + "\x00" + proxyURL))
+	return endpoint + "|" + host + "|" + fmt.Sprintf("%x", scope[:16])
 }
 
 type upstreamHealthRegistry struct {
@@ -74,9 +93,31 @@ func (r *upstreamHealthRegistry) begin(states map[string]circuitRuntimeState, ke
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	now := r.now()
+	if _, exists := states[key]; !exists && len(states) >= maxCircuitRuntimeEntries {
+		// Preserve cooling/probing entries. Evict only the least recently used
+		// closed entry, or fail closed when all slots are protecting a route.
+		oldestKey := ""
+		var oldest time.Time
+		for candidate, state := range states {
+			if state.probeInFlight || state.inFlight > 0 {
+				continue
+			}
+			if !state.cooldownUntil.IsZero() && (state.cooldownUntil.After(now) || now.Sub(state.lastAccess) < time.Hour) {
+				continue
+			}
+			if oldestKey == "" || state.lastAccess.Before(oldest) {
+				oldestKey, oldest = candidate, state.lastAccess
+			}
+		}
+		if oldestKey == "" {
+			return false
+		}
+		delete(states, oldestKey)
+	}
 	state := states[key]
 	state.label = label
-	now := r.now()
+	state.lastAccess = now
 	if state.cooldownUntil.After(now) {
 		states[key] = state
 		return false
@@ -88,6 +129,7 @@ func (r *upstreamHealthRegistry) begin(states map[string]circuitRuntimeState, ke
 		}
 		state.probeInFlight = true
 	}
+	state.inFlight++
 	states[key] = state
 	return true
 }
@@ -106,14 +148,19 @@ func (r *upstreamHealthRegistry) success(states map[string]circuitRuntimeState, 
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	state := states[key]
+	state, exists := states[key]
+	if !exists {
+		return
+	}
 	state.successes++
+	state.inFlight = max(0, state.inFlight-1)
 	state.consecutiveFailures = 0
 	state.openCount = 0
 	state.cooldownUntil = time.Time{}
 	state.probeInFlight = false
 	state.lastError = ""
 	state.lastSuccessAt = r.now()
+	state.lastAccess = state.lastSuccessAt
 	state.ewmaLatencyMs = updateLatencyEWMA(state.ewmaLatencyMs, latency)
 	states[key] = state
 }
@@ -141,12 +188,17 @@ func (r *upstreamHealthRegistry) failure(states map[string]circuitRuntimeState, 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	now := r.now()
-	state := states[key]
+	state, exists := states[key]
+	if !exists {
+		return
+	}
 	wasProbe := state.probeInFlight
+	state.inFlight = max(0, state.inFlight-1)
 	state.probeInFlight = false
 	state.failures++
 	state.consecutiveFailures++
 	state.lastFailureAt = now
+	state.lastAccess = now
 	state.ewmaLatencyMs = updateLatencyEWMA(state.ewmaLatencyMs, latency)
 	if err != nil {
 		state.lastError = truncateCircuitError(err.Error())
@@ -177,10 +229,14 @@ func (r *upstreamHealthRegistry) release(states map[string]circuitRuntimeState, 
 		return
 	}
 	r.mu.Lock()
-	state := states[key]
+	defer r.mu.Unlock()
+	state, exists := states[key]
+	if !exists {
+		return
+	}
 	state.probeInFlight = false
+	state.inFlight = max(0, state.inFlight-1)
 	states[key] = state
-	r.mu.Unlock()
 }
 
 func (r *upstreamHealthRegistry) Snapshot() map[string]interface{} {
@@ -198,14 +254,16 @@ func (r *upstreamHealthRegistry) Snapshot() map[string]interface{} {
 
 func circuitStateViews(states map[string]circuitRuntimeState, now time.Time) []map[string]interface{} {
 	views := make([]map[string]interface{}, 0, len(states))
-	for _, state := range states {
+	for key, state := range states {
 		status := "closed"
 		if state.cooldownUntil.After(now) {
 			status = "open"
 		} else if !state.cooldownUntil.IsZero() || state.probeInFlight {
 			status = "half_open"
 		}
+		scope := sha256.Sum256([]byte(key))
 		views = append(views, map[string]interface{}{
+			"scope":               fmt.Sprintf("%x", scope[:8]),
 			"target":              state.label,
 			"state":               status,
 			"successes":           state.successes,
@@ -256,15 +314,21 @@ func circuitMinInt(a, b int) int {
 }
 
 func circuitEligibleFailure(err error) bool {
-	upstreamErr, ok := asUpstreamError(err)
-	if !ok {
-		return err != nil
-	}
-	switch upstreamErr.Kind {
-	case UpstreamErrorTransient, UpstreamErrorFirstTokenTimeout, UpstreamErrorToolAssemblyTimeout,
-		UpstreamErrorEndpointUnavailable, UpstreamErrorUnknown:
-		return true
-	default:
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
+	upstreamErr, ok := asUpstreamError(err)
+	if ok {
+		// Generic 500s and generation faults can be account/prompt specific.
+		// Keep their account-route cooldown, not a shared service outage.
+		if upstreamErr.StatusCode != 0 {
+			return (upstreamErr.Kind == UpstreamErrorTransient || upstreamErr.Kind == UpstreamErrorFirstTokenTimeout) &&
+				(upstreamErr.StatusCode == http.StatusBadGateway || upstreamErr.StatusCode == http.StatusServiceUnavailable || upstreamErr.StatusCode == http.StatusGatewayTimeout)
+		}
+		if upstreamErr.Kind != UpstreamErrorTransient && upstreamErr.Kind != UpstreamErrorUnknown {
+			return false
+		}
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr)
 }

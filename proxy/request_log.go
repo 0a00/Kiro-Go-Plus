@@ -49,6 +49,8 @@ type requestLogEntry struct {
 	Status                   string   `json:"status"`
 	StatusCode               int      `json:"statusCode"`
 	UpstreamFirstActivityMs  *int64   `json:"upstreamFirstActivityMs,omitempty"`
+	FirstUpstreamHeadersMs   *int64   `json:"firstUpstreamHeadersMs,omitempty"`
+	FirstUpstreamBodyByteMs  *int64   `json:"firstUpstreamBodyByteMs,omitempty"`
 	FirstSSEEventMs          *int64   `json:"firstSseEventMs,omitempty"`
 	FirstThinkingMs          *int64   `json:"firstThinkingMs,omitempty"`
 	FirstVisibleTextMs       *int64   `json:"firstVisibleTextMs,omitempty"`
@@ -501,6 +503,8 @@ func requestDurationMs(start time.Time) int64 {
 }
 
 type requestFirstContentTimer struct {
+	firstUpstreamHeadersMs   atomic.Int64
+	firstUpstreamBodyByteMs  atomic.Int64
 	startedAt                time.Time
 	firstContentMs           atomic.Int64
 	firstSSEEventMs          atomic.Int64
@@ -523,6 +527,8 @@ type requestFirstContentTimer struct {
 
 func newRequestFirstContentTimer(startedAt time.Time) *requestFirstContentTimer {
 	timer := &requestFirstContentTimer{startedAt: startedAt}
+	timer.firstUpstreamHeadersMs.Store(-1)
+	timer.firstUpstreamBodyByteMs.Store(-1)
 	timer.firstContentMs.Store(-1)
 	timer.firstSSEEventMs.Store(-1)
 	timer.firstThinkingMs.Store(-1)
@@ -540,6 +546,18 @@ func newRequestFirstContentTimer(startedAt time.Time) *requestFirstContentTimer 
 	timer.firstToolFragmentMs.Store(-1)
 	timer.lastToolFragmentMs.Store(-1)
 	return timer
+}
+
+func (t *requestFirstContentTimer) MarkUpstreamHeaders() {
+	if t != nil {
+		t.markFirst(&t.firstUpstreamHeadersMs)
+	}
+}
+
+func (t *requestFirstContentTimer) MarkUpstreamBodyByte() {
+	if t != nil {
+		t.markFirst(&t.firstUpstreamBodyByteMs)
+	}
 }
 
 func (t *requestFirstContentTimer) MarkText(text string) {
@@ -685,6 +703,8 @@ func (t *requestFirstContentTimer) Apply(entry *requestLogEntry) {
 		return
 	}
 	setRequestTimingValue(&entry.FirstContentMs, t.firstContentMs.Load())
+	setRequestTimingValue(&entry.FirstUpstreamHeadersMs, t.firstUpstreamHeadersMs.Load())
+	setRequestTimingValue(&entry.FirstUpstreamBodyByteMs, t.firstUpstreamBodyByteMs.Load())
 	setRequestTimingValue(&entry.FirstSSEEventMs, t.firstSSEEventMs.Load())
 	setRequestTimingValue(&entry.FirstThinkingMs, t.firstThinkingMs.Load())
 	setRequestTimingValue(&entry.FirstVisibleTextMs, t.firstVisibleTextMs.Load())

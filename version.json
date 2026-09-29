@@ -1,5 +1,5 @@
 {
-  "version": "1.2.88",
-  "changelog": "Validate tool JSON before live block completion; distinguish upstream read/frame gaps and tool dispatch waits; retain diagnostic timeline tails and test large Claude Code writes.\n实时工具完成前校验 JSON，区分上游读取和事件空档，保留长日志关键事件，增加大文件写入进度测试。",
+  "version": "1.2.89",
+  "changelog": "Isolate shared endpoint circuits and preserve real failures; stop failed load escalation; recognize recovered tool errors; expose initial upstream timing and slow-model warnings.\n隔离端点熔断并保留真实错误，压力测试失败后停止升档，修复工具恢复误报，补充上游首响应时序与慢模型警告。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }
