@@ -873,7 +873,7 @@ probe_file_tools() {
 case_workspace_large_write_progress() {
   command -v node >/dev/null 2>&1 || { CASE_DETAIL="Node.js is required for partial-message timing"; return 1; }
   local workspace="$TMP_DIR/large-write" output="$TMP_DIR/workspace-large-write-progress.jsonl"
-  local timing="$TMP_DIR/large-write-timing.json" status evidence size spread gap instruction
+  local timing="$TMP_DIR/large-write-timing.json" status evidence size spread gap instruction file_evidence
   mkdir -p "$workspace"
   probe_file_tools "$workspace" "$TMP_DIR/large-write-capabilities.jsonl" || return 1
   [[ -n "$FILE_WRITER" ]] || return 0
@@ -881,7 +881,7 @@ case_workspace_large_write_progress() {
   if [[ "$FILE_WRITER" == Edit ]]; then instruction+=' Use old_string="" and put all file content in new_string.'; fi
   set +e
   CLI_TIMING_REPORT="$timing" run_cli_session "$AGENT_TIMEOUT" "$MODEL" "$workspace" "$output" \
-    "Create large-stream.txt in the current directory. $instruction Then verify it using Read. The file must contain 420 numbered lines about ordinary software testing, each line at least 105 ASCII characters long. Target 45-60 KB. Do not use Bash, loops, shell scripts, generated shortcuts, or multiple mutations. Do not stop to ask permission. Finish with LARGE_WRITE_PROGRESS_OK." \
+    "Create large-stream.txt in the current directory. $instruction Then use Read to verify all lines, with additional Read calls if truncated. The file must contain exactly 420 lines about ordinary software testing, numbered with prefixes 0001: through 0420: followed by a space. Each line must have at least 105 printable ASCII characters. Target 45-60 KiB. Do not use Bash, loops, shell scripts, generated shortcuts, or multiple mutations. Do not stop to ask permission. Finish with LARGE_WRITE_PROGRESS_OK." \
     --restricted --tools "Read,$FILE_WRITER" --allowedTools "Read,$FILE_WRITER" --permission-mode acceptEdits
   status=$?
   set -e
@@ -894,6 +894,10 @@ case_workspace_large_write_progress() {
   fi
   if ((status != 0 || size < 40960)) || ! jq -e '.paired and .terminalSuccess and (.protocolError | not) and (.unrecoveredErrors == 0)' <<<"$evidence" >/dev/null || ! assert_client_result "$output" LARGE_WRITE_PROGRESS_OK; then
     CASE_DETAIL="large $FILE_WRITER did not complete a paired, valid file workflow (status $status, bytes $size)"
+    return 1
+  fi
+  if ! file_evidence="$(node "$SCRIPT_DIR/client-file-evidence.js" "$output" "$workspace" large "$FILE_WRITER")"; then
+    CASE_DETAIL="large file evidence failed: $(jq -r '.reason // "invalid-evidence"' <<<"$file_evidence")"
     return 1
   fi
   if ! jq -e --arg writer "$FILE_WRITER" '[.tools[] | select(.name == $writer and .bytes >= 40960 and .stopMs != null and .jsonValid == true)] | length == 1' "$timing" >/dev/null; then
@@ -918,7 +922,7 @@ case_workspace_large_write_progress() {
 case_workspace_chunked_edit_progress() {
   command -v node >/dev/null 2>&1 || { CASE_DETAIL="Node.js is required for partial-message timing"; return 1; }
   local workspace="$TMP_DIR/chunked-edit" output="$TMP_DIR/workspace-chunked-edit-progress.jsonl"
-  local timing="$TMP_DIR/chunked-edit-timing.json" status size
+  local timing="$TMP_DIR/chunked-edit-timing.json" status size file_evidence
   mkdir -p "$workspace"
   probe_file_tools "$workspace" "$TMP_DIR/chunked-edit-capabilities.jsonl" || return 1
   if ! client_has_tool "$TMP_DIR/chunked-edit-capabilities.jsonl" Edit || [[ -z "$FILE_WRITER" ]]; then
@@ -929,7 +933,7 @@ case_workspace_chunked_edit_progress() {
   printf '%s\n' 'CHUNK_01' 'CHUNK_02' 'CHUNK_03' 'CHUNK_04' 'CHUNK_05' 'CHUNK_06' 'CHUNK_07' 'CHUNK_08' 'CHUNK_09' 'CHUNK_10' >"$workspace/chunked-stream.txt"
   set +e
   CLI_TIMING_REPORT="$timing" run_cli_session "$AGENT_TIMEOUT" "$MODEL" "$workspace" "$output" \
-    'Read chunked-stream.txt. Replace each CHUNK_01 through CHUNK_10 placeholder using a separate Edit call. Each replacement must contain 42 numbered lines about ordinary software testing, each line at least 105 ASCII characters. Use 10 separate Edit calls, each with only one placeholder as old_string and 4-6 KB of new_string. Target 45-60 KB total. Do not use Write, Bash, shell scripts, loops or generated shortcuts. Read the final file to verify all placeholders are gone. Finish with CHUNKED_EDIT_PROGRESS_OK.' \
+    'Read chunked-stream.txt. Replace each CHUNK_01 through CHUNK_10 placeholder using a separate Edit call. Each replacement must contain exactly 42 lines about ordinary software testing, each line at least 105 printable ASCII characters. Number lines globally with prefixes 0001: through 0420: followed by a space: CHUNK_01 covers 0001-0042, CHUNK_02 covers 0043-0084, and so on. Use 10 sequential Edit calls, each with only one placeholder as old_string and 4-6 KiB of new_string, without a trailing newline in new_string. Target 45-60 KiB total. Do not use Write, Bash, shell scripts, loops or generated shortcuts. Read all final lines, with additional Read calls if truncated, to verify the content and removed placeholders. Finish with CHUNKED_EDIT_PROGRESS_OK.' \
     --restricted --tools 'Read,Edit' --allowedTools 'Read,Edit' --permission-mode acceptEdits
   status=$?
   set -e
@@ -940,6 +944,10 @@ case_workspace_chunked_edit_progress() {
     ! client_evidence "$output" | jq -e '.paired and .terminalSuccess and (.protocolError | not) and .unrecoveredErrors == 0' >/dev/null ||
     ! jq -e '[.tools[] | select(.name == "Edit" and .stopMs != null and .jsonValid == true)] | length == 10 and all(.[]; .bytes < 12000)' "$timing" >/dev/null; then
     CASE_DETAIL="chunked editing failed content/tool integrity checks (status $status, bytes $size)"
+    return 1
+  fi
+  if ! file_evidence="$(node "$SCRIPT_DIR/client-file-evidence.js" "$output" "$workspace" chunked Edit)"; then
+    CASE_DETAIL="chunked file evidence failed: $(jq -r '.reason // "invalid-evidence"' <<<"$file_evidence")"
     return 1
   fi
   CASE_DETAIL="10 bounded Edit calls completed and placeholders removed (bytes $size); see chunked-edit-timing.json for progress"

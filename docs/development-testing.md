@@ -100,9 +100,30 @@ unavailable CLI capability as failure, or `--client-require-web-search` through
 authentication and execution failures are never treated as capability skips.
 
 Offline assertion/launcher regressions: `node --test scripts/client-e2e.test.js`.
+File-evidence regressions: `node --test scripts/client-file-evidence.test.js`.
 These fake-client tests use no live credentials or network and run in the quick
 quality gate. This test-only change requires no server configuration migration
 or container restart; update the test checkout before rerunning.
+
+The `workspace-large-write-progress` and `workspace-chunked-edit-progress` cases
+also replay successful file mutations against the fixed fixture and compare the
+result to disk. They require 420 globally numbered printable ASCII lines,
+45-60 KiB, correct targets, and successful final Read results covering every
+line (pagination is accepted). Chunked edits must replace each of ten seeded
+placeholders exactly once with 42 lines and 4-6 KiB per replacement. Filler bytes,
+completion markers, or a tool result that merely says "verified" cannot pass.
+The JSONL validator rejects symlinks and limits trace input to 32 MiB; summaries
+contain only metrics/reason codes, never tool arguments or file content.
+Existing protocol, recovery and timing assertions remain in place. These checks
+prove fixture integrity, not semantic software quality. The resumed shell case
+still checks growth and syntax, not a fivefold expansion or runtime behavior.
+
+For ordinary development tasks, see the optional
+[Claude Code workflow guide](claude-code-workflow.md). It prefers file tools for
+ordinary edits while preserving Bash for appropriate work. It is never injected
+by the proxy. Live tests intentionally do not auto-load this guide, so baseline
+results remain comparable. File-only stress restrictions apply only to those
+fixtures; a shell tool call in a normal session is not itself a protocol bug.
 
 Run only the new cases while iterating:
 

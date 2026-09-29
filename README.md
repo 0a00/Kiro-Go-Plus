@@ -267,6 +267,10 @@ closed-loop, fixed-rate, ramp, and realistic mixed-protocol load tests, plus
 bounded soak and post-load recovery checks. See
 [Local Development Testing](docs/development-testing.md).
 
+For file-heavy Claude Code tasks, an optional [client workflow guide](docs/claude-code-workflow.md)
+covers tool selection and evidence-based completion checks. It does not inject
+server prompts or disable shell tools.
+
 For a deployed service, run the protected complete verification entry point:
 
 ```bash

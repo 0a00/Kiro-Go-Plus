@@ -164,6 +164,7 @@ run_quick() {
     node --check web/credential-import.js
     node scripts/credential-import.test.js
     node --test scripts/client-e2e.test.js
+    node --test scripts/client-file-evidence.test.js
     node --test scripts/dev-stream-relay.test.js
   else
     info "Node.js unavailable; skipping JavaScript checks"

@@ -108,8 +108,9 @@ const fakeCLI = `#!/usr/bin/env node
 const fs = require('node:fs'), path = require('node:path');
 const args = process.argv.slice(2), mode = process.env.KIRO_E2E_FIXTURE;
 const emit = r => process.stdout.write(JSON.stringify(r)+'\\n');
-const call = (id,name,file) => emit({type:'assistant',message:{content:[{type:'tool_use',id,name,input:{file_path:file}}]}});
+const call = (id,name,file,input={}) => emit({type:'assistant',message:{content:[{type:'tool_use',id,name,input:{file_path:file,...input}}]}});
 const reply = (id,content) => emit({type:'user',message:{content:[{type:'tool_result',tool_use_id:id,content}]}});
+const numbered = (start,count) => Array.from({length:count},(_,i)=>String(start+i).padStart(4,'0')+': '+'Test assertions check file contents and actual tool results before declaring the workflow complete.'.padEnd(105,'.')).join('\\n');
 if (process.env.ANTHROPIC_AUTH_TOKEN) process.exit(43);
 const last = args.at(-1);
 if (args.at(-2)!=='--') process.exit(44);
@@ -123,28 +124,32 @@ if (last.includes('CLIENT_CAPABILITY_PROBE_OK')) {
   if(!last.includes('one Edit call') || !args.includes('Read,Edit')) process.exit(50);
   emit({type:'system',subtype:'init',tools:mode==='capability-changed'?['Read']:['Read','Edit']});
   const file=path.join(process.cwd(),'large-stream.txt');
-  const content='x'.repeat(45000), raw=JSON.stringify({file_path:file,old_string:'',new_string:content});
+  const content=mode==='large-filler'?'x'.repeat(47040):numbered(1,420)+'\\n';
+  const input={old_string:'',new_string:content}, raw=JSON.stringify({file_path:file,...input});
   if(mode!=='large-no-file') fs.writeFileSync(file,content);
   emit({type:'stream_event',event:{type:'content_block_start',index:0,content_block:{type:'tool_use',name:'Edit',id:'create',input:{}}}});
   emit({type:'stream_event',event:{type:'content_block_delta',index:0,delta:{type:'input_json_delta',partial_json:raw}}});
   emit({type:'stream_event',event:{type:'content_block_stop',index:0}});
-  call('create','Edit',file);reply('create','created');
-  call('read','Read',file);reply('read',content);
+  call('create','Edit',mode==='large-wrong-target'?file+'.other':file,input);reply('create','created');
+  if(mode!=='large-no-read'){call('read','Read',file);reply('read',mode==='large-fake-read'?'verified':content);}
   emit({type:'result',subtype:'success',is_error:false,result:'LARGE_WRITE_PROGRESS_OK'});
 } else if (last.includes('chunked-stream.txt')) {
   emit({type:'system',subtype:'init',tools:['Read','Edit']});
   const file=path.join(process.cwd(),'chunked-stream.txt');
   call('read-before','Read',file);reply('read-before','placeholders');
   const count=mode==='chunks-fewer'?9:10;
+  let content=fs.readFileSync(file,'utf8');
   for(let i=0;i<count;i++){
-    const raw=JSON.stringify({file_path:file,old_string:'CHUNK_'+String(i+1).padStart(2,'0'),new_string:'x'.repeat(mode==='chunks-oversized'?13000:4500)});
+    const input={old_string:'CHUNK_'+String(i+1).padStart(2,'0'),new_string:mode==='chunks-oversized'?'x'.repeat(13000):numbered(i*42+1,42)};
+    const raw=JSON.stringify({file_path:file,...input});
     emit({type:'stream_event',event:{type:'content_block_start',index:i,content_block:{type:'tool_use',name:'Edit',id:'edit-'+i,input:{}}}});
     emit({type:'stream_event',event:{type:'content_block_delta',index:i,delta:{type:'input_json_delta',partial_json:raw}}});
     emit({type:'stream_event',event:{type:'content_block_stop',index:i}});
-    call('edit-'+i,'Edit',file);reply('edit-'+i,'edited');
+    call('edit-'+i,'Edit',file,input);reply('edit-'+i,'edited');
+    content=content.replace(input.old_string,()=>input.new_string);
   }
-  fs.writeFileSync(file,'x'.repeat(45000)+(mode==='chunks-placeholder'?'CHUNK_10':''));
-  call('read-after','Read',file);reply('read-after','verified');
+  fs.writeFileSync(file,content+(mode==='chunks-placeholder'?'CHUNK_10':''));
+  call('read-after','Read',file);reply('read-after',mode==='chunks-fake-read'?'verified':content);
   emit({type:'result',subtype:'success',is_error:false,result:'CHUNKED_EDIT_PROGRESS_OK'});
 } else if (last.includes('claude-file-e2e.txt')) {
   if (!args.includes('--bare')) process.exit(45);
@@ -251,7 +256,7 @@ test('large file supports Edit creation, warns on buffered progress, and rejects
   assert.match(ok.stdout,/WARN.*large Edit completed/);
   const strict=runFixture('large-edit','workspace-large-write-progress',['--fail-on-warning']);
   assert.equal(strict.status,1,strict.stdout+strict.stderr);
-  for(const mode of ['large-no-file','capability-changed']) {
+  for(const mode of ['large-no-file','capability-changed','large-filler','large-wrong-target','large-no-read','large-fake-read']) {
     const bad=runFixture(mode,'workspace-large-write-progress');
     assert.equal(bad.status,1,bad.stdout+bad.stderr);
   }
@@ -261,7 +266,7 @@ test('chunked workflow requires ten bounded mutations and no remaining placehold
   const ok=runFixture('chunks-ok','workspace-chunked-edit-progress');
   assert.equal(ok.status,0,ok.stdout+ok.stderr);
   assert.match(ok.stdout,/PASS/);
-  for(const mode of ['chunks-fewer','chunks-oversized','chunks-placeholder']){
+  for(const mode of ['chunks-fewer','chunks-oversized','chunks-placeholder','chunks-fake-read']){
     const bad=runFixture(mode,'workspace-chunked-edit-progress');
     assert.equal(bad.status,1,bad.stdout+bad.stderr);
   }

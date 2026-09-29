@@ -264,6 +264,9 @@ go build -o kiro-go .
 闭环/固定速率/ramp/真实混合负载、有限额 soak 以及压测后恢复检查。完整用法与测试边界见
 [本地开发测试说明](docs/development-testing.md)。
 
+Claude Code 文件任务可选用[客户端工作规范](docs/claude-code-workflow.md)，
+改善工具选择和完成验收；不会在服务端注入提示，也不禁用 Bash。
+
 生产环境使用受保护的完整测试入口。API Key 只从环境变量读取，远程地址必须显式
 确认：
 
