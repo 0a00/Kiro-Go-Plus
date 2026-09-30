@@ -110,7 +110,7 @@ const args = process.argv.slice(2), mode = process.env.KIRO_E2E_FIXTURE;
 const emit = r => process.stdout.write(JSON.stringify(r)+'\\n');
 const call = (id,name,file,input={}) => emit({type:'assistant',message:{content:[{type:'tool_use',id,name,input:{file_path:file,...input}}]}});
 const reply = (id,content) => emit({type:'user',message:{content:[{type:'tool_result',tool_use_id:id,content}]}});
-if(mode==='file-recovered') emit({type:'user',message:{content:[{type:'text',text:'Your response above was cut off mid-stream. Resume directly from where it stops - no apology, no recap.'}]}});
+if(mode==='file-recovered'||mode==='file-recovered-fail') emit({type:'user',message:{content:[{type:'text',text:'Your response above was cut off mid-stream. Resume directly from where it stops - no apology, no recap.'}]}});
 const numbered = (start,count) => Array.from({length:count},(_,i)=>String(start+i).padStart(4,'0')+': '+'Test assertions check file contents and actual tool results before declaring the workflow complete.'.padEnd(105,'.')).join('\\n');
 if (process.env.ANTHROPIC_AUTH_TOKEN) process.exit(43);
 const last = args.at(-1);
@@ -156,7 +156,7 @@ if (last.includes('CLIENT_CAPABILITY_PROBE_OK')) {
   if (!args.includes('--bare')) process.exit(45);
   emit({type:'system',subtype:'init',tools:['Read','Edit']});
   const file = path.join(process.cwd(),'claude-file-e2e.txt');
-  fs.writeFileSync(file,mode==='file-wrong'?'WRONG':'FILE_EDIT_OK');
+  fs.writeFileSync(file,mode==='file-wrong'||mode==='file-recovered-fail'?'WRONG':'FILE_EDIT_OK');
   call('create','Edit',file);reply('create','created');
   call('r1','Read',file);reply('r1','FILE_WRITE_OK');
   call('edit','Edit',file);reply('edit','edited');
@@ -223,8 +223,13 @@ test('automatic stream continuation cannot be reported as uninterrupted success'
   const recovered = runFixture('file-recovered', 'file-tools');
   assert.equal(recovered.status, 0, recovered.stdout + recovered.stderr);
   assert.match(recovered.stdout, /file-tools\s+WARN.*automatic_stream_continuations=1/);
+  assert.match(recovered.stdout, /recovery attempted; final status=WARN/);
   const strict = runFixture('file-recovered', 'file-tools', ['--fail-on-warning']);
   assert.equal(strict.status, 1, strict.stdout + strict.stderr);
+  const failed = runFixture('file-recovered-fail', 'file-tools');
+  assert.equal(failed.status, 1, failed.stdout + failed.stderr);
+  assert.match(failed.stdout, /file-tools\s+FAIL.*recovery attempted; final status=FAIL/);
+  assert.doesNotMatch(failed.stdout, /\(recovered,/);
 });
 test('native search launcher enables the real capability and rejects fake search output', () => {
   const ok = runFixture('search-ok', 'web-search', ['--require-web-search']);

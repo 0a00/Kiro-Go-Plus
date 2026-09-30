@@ -177,6 +177,72 @@ func TestRequestDetailTraceCapturesOutputUsageToolsAttemptsAndTimeline(t *testin
 	}
 }
 
+func TestRequestDetailPreservesToolGapWhenTimelineIsFull(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	trace := newRequestDetailTrace(req, "claude.messages.stream", nil, config.DefaultRequestDetailMaxBytes)
+	trace.recordToolUseStart("tool-gap", "Edit")
+	const prefix = `{"file_path":"private-test.txt",`
+	trace.recordToolUseDelta("tool-gap", prefix)
+	// Advance the logical trace clock; do not sleep for a production-size gap.
+	trace.mu.Lock()
+	trace.startedAt = trace.startedAt.Add(-60 * time.Second)
+	trace.mu.Unlock()
+	trace.recordToolUseDelta("tool-gap", `"new_string":"private-test-content"}`)
+	for i := 0; i < trace.maxEvents*2; i++ {
+		trace.recordText("x", false)
+	}
+	trace.recordToolUseStop("tool-gap")
+	detail, ok := trace.finalize(requestLogEntry{RequestID: "req-gap", Status: "success", StatusCode: 200})
+	if !ok || len(detail.Response.Tools) != 1 || detail.DroppedEvents == 0 {
+		t.Fatal("missing tool evidence")
+	}
+	tool := detail.Response.Tools[0]
+	if tool.MaxFragmentGapMs < 60000 || tool.BytesBeforeMaxGap != len(prefix) || !tool.Completed {
+		t.Fatalf("lost argument-gap position: %+v", tool)
+	}
+	raw, _ := json.Marshal(detail)
+	if strings.Contains(string(raw), "private-test.txt") || strings.Contains(string(raw), "private-test-content") {
+		t.Fatal("tool gap metrics leaked arguments")
+	}
+}
+
+func TestRequestDetailIncludesFinalStalledToolGap(t *testing.T) {
+	trace := newRequestDetailTrace(httptest.NewRequest(http.MethodPost, "/v1/messages", nil), "claude.messages.stream", nil, config.DefaultRequestDetailMaxBytes)
+	trace.recordToolUseStart("tool-stall", "Edit")
+	trace.recordToolUseDelta("tool-stall", `{"new_string":`)
+	trace.mu.Lock()
+	trace.startedAt = trace.startedAt.Add(-180 * time.Second)
+	trace.mu.Unlock()
+	detail, ok := trace.finalize(requestLogEntry{RequestID: "req-stall", Status: "failed", StatusCode: 504})
+	if !ok || len(detail.Response.Tools) != 1 {
+		t.Fatal("missing stalled tool")
+	}
+	tool := detail.Response.Tools[0]
+	if tool.Completed || tool.MaxFragmentGapMs < 180000 || tool.BytesBeforeMaxGap != tool.ArgumentBytes {
+		t.Fatalf("final stall was omitted: %+v", tool)
+	}
+}
+
+func TestRequestDetailToolGapDoesNotIncludeSubsequentRetryTime(t *testing.T) {
+	trace := newRequestDetailTrace(httptest.NewRequest(http.MethodPost, "/v1/messages", nil), "claude.messages.stream", nil, config.DefaultRequestDetailMaxBytes)
+	trace.recordToolUseStart("attempt-one", "Edit")
+	trace.recordToolUseDelta("attempt-one", `{"new_string":`)
+	trace.mu.Lock()
+	trace.startedAt = trace.startedAt.Add(-180 * time.Second)
+	trace.mu.Unlock()
+	trace.recordAttempt("fixture", "", "fixture", "example.invalid", time.Now(), 200, "partial_stream_error", nil, "tool_assembly_timeout")
+	trace.mu.Lock()
+	trace.startedAt = trace.startedAt.Add(-10 * time.Minute)
+	trace.mu.Unlock()
+	detail, ok := trace.finalize(requestLogEntry{RequestID: "req-retried", Status: "success", StatusCode: 200})
+	if !ok || len(detail.Response.Tools) != 1 {
+		t.Fatal("missing original attempt")
+	}
+	if gap := detail.Response.Tools[0].MaxFragmentGapMs; gap < 180000 || gap > 181000 {
+		t.Fatalf("later attempts inflated previous tool gap: %d", gap)
+	}
+}
+
 func TestRequestDetailRecordsToolFragmentsBeforeBufferedCommit(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"test"}`))
 	trace := newRequestDetailTrace(req, "claude.messages.stream", []byte(`{"model":"test"}`), config.DefaultRequestDetailMaxBytes)

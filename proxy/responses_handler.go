@@ -369,7 +369,7 @@ func (h *Handler) handleResponsesNonStream(
 		// Responses non-stream is fully buffered, so replaying a truncated
 		// upstream attempt cannot duplicate anything sent to the client.
 		err := runKiroWithIntegrityRetry(payload.requestContext, account, payload,
-			func() error { return h.callKiroAPIWithHealth(account, payload, callback) },
+			func() error { return h.callKiroAPIWithHealth(account, payload, callback, guard) },
 			resetAttempt, nil)
 		if err == nil {
 			h.pool.RecordUpstreamSuccess(account.ID, account.ProfileArn, model)
@@ -1089,7 +1089,7 @@ func (h *Handler) handleResponsesStream(
 		// Retry only before responseStarted becomes true. The reset prevents a
 		// discarded attempt from contaminating the next Responses event sequence.
 		err := runKiroWithIntegrityRetry(payload.requestContext, account, payload,
-			func() error { return h.callKiroAPIWithHealth(account, payload, callback) },
+			func() error { return h.callKiroAPIWithHealth(account, payload, callback, guard) },
 			resetAttempt, func() bool { return !responseStarted })
 		if err == nil {
 			h.pool.RecordUpstreamSuccess(account.ID, account.ProfileArn, model)

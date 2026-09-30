@@ -112,6 +112,12 @@ and prefers advertised Sonnet 4.5; `--model` overrides it. See
 [idle timeouts and test evidence](idle-timeout-and-test-evidence.md) for behavior,
 upstream review, migration and remaining coverage limits.
 
+For a single-request comparison without executing generated tools or automatic
+client retries, use the [large-tool diagnostic probe](large-tool-investigation.md).
+It separates complete tool JSON delivery from content acceptance and supports
+small/large, generated/copied and thinking/non-thinking variants. Real requests
+remain opt-in and quota-consuming.
+
 The `workspace-large-write-progress` and `workspace-chunked-edit-progress` cases
 also replay successful file mutations against the fixed fixture and compare the
 result to disk. They require 420 globally numbered printable ASCII lines,

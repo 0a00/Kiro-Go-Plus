@@ -191,6 +191,8 @@ type UpstreamRequestGuard struct {
 	profileArn  string
 	model       string
 	affinityHit bool
+	routeKey    string
+	routeSeen   time.Time
 	released    atomic.Bool
 }
 
@@ -203,6 +205,19 @@ func (g *UpstreamRequestGuard) Release() {
 		return
 	}
 	g.p.releaseUpstreamSlot(g.accountID, g.profileArn, g.model)
+}
+
+// ForgetAffinity removes only the binding acquired by this request. A delayed
+// failure must not erase a newer binding, including one for the same account.
+func (g *UpstreamRequestGuard) ForgetAffinity() {
+	if g == nil || g.p == nil || g.routeKey == "" {
+		return
+	}
+	g.p.mu.Lock()
+	defer g.p.mu.Unlock()
+	if entry, ok := g.p.affinity[g.routeKey]; ok && entry.accountID == g.accountID && entry.lastSeen.Equal(g.routeSeen) {
+		delete(g.p.affinity, g.routeKey)
+	}
 }
 
 // AcquireForModel picks an account and acquires its local upstream protection
@@ -244,6 +259,7 @@ func (p *AccountPool) AcquireForModel(model, routeKey string, excluded map[strin
 					guard.affinityHit = true
 					p.recordDispatchLocked(acc.ID, true)
 					p.rememberRouteAffinityLocked(routeKey, acc.ID, now, up)
+					guard.routeKey, guard.routeSeen = routeKey, now
 					return cloneAccount(acc), guard, nil
 				} else if busy != nil {
 					bestRetry = maxDuration(bestRetry, busy.RetryAfter)
@@ -260,6 +276,7 @@ func (p *AccountPool) AcquireForModel(model, routeKey string, excluded map[strin
 			p.recordDispatchLocked(acc.ID, false)
 			p.commitWeightedSelectionLocked(acc.ID, selectionIndexes, routingMode)
 			p.rememberRouteAffinityLocked(routeKey, acc.ID, now, up)
+			guard.routeKey, guard.routeSeen = routeKey, now
 			return cloneAccount(acc), guard, nil
 		} else if busy != nil {
 			bestRetry = maxDuration(bestRetry, busy.RetryAfter)

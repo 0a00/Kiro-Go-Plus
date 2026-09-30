@@ -1,5 +1,5 @@
 {
-  "version": "1.2.91",
-  "changelog": "Honor configured tool-argument and stream idle timeouts without hidden Claude Code extensions. Report automatic client continuations and bounded per-request load failure evidence; unify acceptance-model selection and add paced soak coverage.\n修复 Claude Code 工具参数与流空闲超时被隐式延长；测试标记自动续接、记录脱敏失败明细，统一验收模型并增加持续测试节奏与时长覆盖检查。",
+  "version": "1.2.92",
+  "changelog": "Release request-scoped account affinity after incomplete or stalled tools, preserve per-tool gap evidence, and add bounded single-request field-size probes. Keep partial tool JSON unexecuted and preserve configured timeout and output budgets.\n工具截断或停滞后解除当前请求的账号亲和绑定，补充参数空闲位置指标与单请求诊断探针；不执行半截工具、不增加隐式超时或字节硬限制。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }

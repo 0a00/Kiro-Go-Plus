@@ -271,6 +271,9 @@ For file-heavy Claude Code tasks, an optional [client workflow guide](docs/claud
 covers tool selection and evidence-based completion checks. It does not inject
 server prompts or disable shell tools.
 
+[Large-tool diagnostics](docs/large-tool-investigation.md) document remaining
+upstream stalls, bounded probes and request-scoped affinity recovery in 1.2.92.
+
 For a deployed service, run the protected complete verification entry point:
 
 ```bash

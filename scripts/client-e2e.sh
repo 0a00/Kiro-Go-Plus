@@ -522,7 +522,7 @@ run_case() {
   done
   if ((recoveries > 0)); then
     [[ "$status" != PASS ]] || status=WARN
-    CASE_DETAIL+="; automatic_stream_continuations=$recoveries (recovered, not uninterrupted)"
+    CASE_DETAIL+="; automatic_stream_continuations=$recoveries (recovery attempted; final status=$status)"
   fi
   if ((stream_errors > 0)); then
     [[ "$status" != PASS ]] || status=WARN

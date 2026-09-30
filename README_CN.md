@@ -267,6 +267,9 @@ go build -o kiro-go .
 Claude Code 文件任务可选用[客户端工作规范](docs/claude-code-workflow.md)，
 改善工具选择和完成验收；不会在服务端注入提示，也不禁用 Bash。
 
+[大工具诊断说明](docs/large-tool-investigation.md)记录了仍存在的上游停滞、
+有界对照测试，以及 1.2.92 的请求级账号亲和恢复；不代表上游问题已经彻底解决。
+
 生产环境使用受保护的完整测试入口。API Key 只从环境变量读取，远程地址必须显式
 确认：
 

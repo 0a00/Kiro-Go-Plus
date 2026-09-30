@@ -528,11 +528,19 @@ func (h *Handler) acquireAccountForModel(model, routeKey string, excluded map[st
 	return nil, nil, &accountpool.UpstreamBusyError{Model: model, RetryAfter: time.Second, Description: err.Error()}
 }
 
-func (h *Handler) callKiroAPIWithHealth(account *config.Account, payload *KiroPayload, callback *KiroStreamCallback) error {
+func (h *Handler) callKiroAPIWithHealth(account *config.Account, payload *KiroPayload, callback *KiroStreamCallback, guard *accountpool.UpstreamRequestGuard) error {
 	startedAt := time.Now()
 	err := CallKiroAPI(account, payload, callback)
+	if failedToolCall(err) {
+		guard.ForgetAffinity()
+	}
 	if h != nil && h.pool != nil && account != nil && !isLocalConfigurationError(err) && !isStreamIntegrityError(err) {
 		h.pool.RecordAccountOutcome(account.ID, time.Since(startedAt), err == nil)
 	}
 	return err
+}
+
+func failedToolCall(err error) bool {
+	upstreamErr, ok := asUpstreamError(err)
+	return ok && (upstreamErr.Kind == UpstreamErrorToolAssemblyTimeout || upstreamErr.Kind == UpstreamErrorToolOutputTruncated)
 }

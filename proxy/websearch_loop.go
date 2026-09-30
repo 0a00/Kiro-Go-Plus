@@ -477,7 +477,7 @@ func (h *Handler) callClaudeWebSearchRound(
 			},
 		}
 
-		err := h.callKiroAPIWithHealth(account, payload, callback)
+		err := h.callKiroAPIWithHealth(account, payload, callback, guard)
 		if err == nil {
 			h.pool.RecordUpstreamSuccess(account.ID, account.ProfileArn, req.Model)
 		}

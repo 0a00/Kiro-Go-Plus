@@ -183,14 +183,16 @@ type requestDetailEvent struct {
 }
 
 type requestDetailToolUse struct {
-	ToolUseID       string `json:"toolUseId,omitempty"`
-	Name            string `json:"name,omitempty"`
-	ArgumentBytes   int    `json:"argumentBytes,omitempty"`
-	ArgumentSHA256  string `json:"argumentSha256,omitempty"`
-	FragmentCount   int    `json:"fragmentCount,omitempty"`
-	FirstFragmentMs *int64 `json:"firstFragmentMs,omitempty"`
-	LastFragmentMs  *int64 `json:"lastFragmentMs,omitempty"`
-	Completed       bool   `json:"completed,omitempty"`
+	ToolUseID         string `json:"toolUseId,omitempty"`
+	Name              string `json:"name,omitempty"`
+	ArgumentBytes     int    `json:"argumentBytes,omitempty"`
+	ArgumentSHA256    string `json:"argumentSha256,omitempty"`
+	FragmentCount     int    `json:"fragmentCount,omitempty"`
+	FirstFragmentMs   *int64 `json:"firstFragmentMs,omitempty"`
+	LastFragmentMs    *int64 `json:"lastFragmentMs,omitempty"`
+	MaxFragmentGapMs  int64  `json:"maxFragmentGapMs,omitempty"`
+	BytesBeforeMaxGap int    `json:"bytesBeforeMaxGap,omitempty"`
+	Completed         bool   `json:"completed,omitempty"`
 }
 
 type boundedDetailText struct {
@@ -221,9 +223,10 @@ func (c *boundedDetailText) string() string {
 }
 
 type requestDetailToolState struct {
-	detail   requestDetailToolUse
-	hasher   hash.Hash
-	sawDelta bool
+	detail    requestDetailToolUse
+	hasher    hash.Hash
+	sawDelta  bool
+	gapSealed bool
 }
 
 type requestDetailTrace struct {
@@ -801,6 +804,12 @@ func (t *requestDetailTrace) recordToolUseDelta(toolUseID, input string) {
 	t.mu.Lock()
 	state := t.toolStateLocked(toolUseID, "")
 	nowMs := t.elapsedMsLocked(time.Now())
+	if state.detail.LastFragmentMs != nil {
+		if gap := nowMs - *state.detail.LastFragmentMs; gap > state.detail.MaxFragmentGapMs {
+			state.detail.MaxFragmentGapMs = gap
+			state.detail.BytesBeforeMaxGap = state.detail.ArgumentBytes
+		}
+	}
 	if state.detail.FirstFragmentMs == nil {
 		value := nowMs
 		state.detail.FirstFragmentMs = &value
@@ -918,6 +927,7 @@ func (t *requestDetailTrace) recordAttempt(accountID, accountEmail, endpoint, ho
 		return
 	}
 	t.mu.Lock()
+	t.sealToolGapsLocked(t.elapsedMsLocked(time.Now()))
 	if len(t.attempts) >= maxRequestDetailAttempts {
 		t.droppedEvents++
 		t.mu.Unlock()
@@ -946,6 +956,22 @@ func (t *requestDetailTrace) recordAttempt(accountID, accountEmail, endpoint, ho
 	t.attempts = append(t.attempts, attempt)
 	t.recordEventLocked("upstream_attempt", 0)
 	t.mu.Unlock()
+}
+
+func (t *requestDetailTrace) sealToolGapsLocked(nowMs int64) {
+	for _, state := range t.tools {
+		if state.gapSealed {
+			continue
+		}
+		state.gapSealed = true
+		detail := &state.detail
+		if !detail.Completed && detail.LastFragmentMs != nil {
+			if gap := nowMs - *detail.LastFragmentMs; gap > detail.MaxFragmentGapMs {
+				detail.MaxFragmentGapMs = gap
+				detail.BytesBeforeMaxGap = detail.ArgumentBytes
+			}
+		}
+	}
 }
 
 func (t *requestDetailTrace) toolStateLocked(toolUseID, name string) *requestDetailToolState {
@@ -1045,6 +1071,7 @@ func (t *requestDetailTrace) finalize(entry requestLogEntry) (requestDetail, boo
 		return requestDetail{}, false
 	}
 	t.finalized = true
+	t.sealToolGapsLocked(t.elapsedMsLocked(time.Now()))
 	tools := make([]requestDetailToolUse, 0, len(t.toolOrder))
 	for _, key := range t.toolOrder {
 		state := t.tools[key]

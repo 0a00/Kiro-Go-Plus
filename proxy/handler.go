@@ -2901,7 +2901,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 		}
 
 		err := runKiroWithIntegrityRetry(payload.requestContext, account, payload,
-			func() error { return h.callKiroAPIWithHealth(account, payload, callback) },
+			func() error { return h.callKiroAPIWithHealth(account, payload, callback, guard) },
 			resetAttempt, func() bool { return !actionableCommitted.Load() })
 		if err == nil {
 			h.pool.RecordUpstreamSuccess(account.ID, account.ProfileArn, model)
@@ -3321,7 +3321,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 		// response before the attempt completes, so replaying a truncated stream
 		// cannot duplicate client-visible content.
 		err := runKiroWithIntegrityRetry(payload.requestContext, account, payload,
-			func() error { return h.callKiroAPIWithHealth(account, payload, callback) },
+			func() error { return h.callKiroAPIWithHealth(account, payload, callback, guard) },
 			resetAttempt, nil)
 		if err == nil {
 			h.pool.RecordUpstreamSuccess(account.ID, account.ProfileArn, model)
@@ -3994,7 +3994,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 		// parser and accounting state so the discarded attempt cannot leak into
 		// the recovered response.
 		err := runKiroWithIntegrityRetry(payload.requestContext, account, payload,
-			func() error { return h.callKiroAPIWithHealth(account, payload, callback) },
+			func() error { return h.callKiroAPIWithHealth(account, payload, callback, guard) },
 			resetAttempt, func() bool { return !responseStarted })
 		if err == nil {
 			h.pool.RecordUpstreamSuccess(account.ID, account.ProfileArn, model)
@@ -4231,7 +4231,7 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 		// This path is fully buffered, so a truncated upstream stream can be
 		// replayed on the same account without duplicating downstream output.
 		err := runKiroWithIntegrityRetry(payload.requestContext, account, payload,
-			func() error { return h.callKiroAPIWithHealth(account, payload, callback) },
+			func() error { return h.callKiroAPIWithHealth(account, payload, callback, guard) },
 			resetAttempt, nil)
 		if err == nil {
 			h.pool.RecordUpstreamSuccess(account.ID, account.ProfileArn, model)
