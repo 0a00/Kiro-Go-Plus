@@ -560,7 +560,8 @@ func TestCallKiroAPIStopsToolStreamThatNeverCompletes(t *testing.T) {
 	retry.MaxRetryDurationSeconds = 5
 	retry.FirstTokenTimeoutSeconds = 5
 	retry.StreamIdleTimeoutSeconds = 15
-	retry.ToolAssemblyTimeoutSeconds = 1
+	retry.ToolAssemblyTimeoutSeconds = 600
+	retry.ToolArgumentIdleTimeoutSeconds = 1
 	if err := config.UpdateRetryConfig(retry); err != nil {
 		t.Fatalf("update retry config: %v", err)
 	}
@@ -586,7 +587,7 @@ func TestCallKiroAPIStopsToolStreamThatNeverCompletes(t *testing.T) {
 	kiroEndpoints = []kiroEndpoint{{Key: "kiro", URL: server.URL, Name: "Kiro IDE"}}
 	t.Cleanup(func() { kiroEndpoints = oldEndpoints })
 
-	payload := &KiroPayload{requireActionableOutput: true, requireToolUse: true}
+	payload := &KiroPayload{requireActionableOutput: true, requireToolUse: true, transparentClaudeCode: true, clientUserAgent: "claude-code/2.1.284"}
 	startedAt := time.Now()
 	err := CallKiroAPI(&config.Account{ID: "a", AccessToken: "token"}, payload, &KiroStreamCallback{})
 	if time.Since(startedAt) > 3*time.Second {
@@ -612,6 +613,7 @@ func TestCallKiroAPIRecoversToolAssemblyTimeoutWithRebuiltPayload(t *testing.T) 
 	retry.FirstTokenTimeoutSeconds = 5
 	retry.StreamIdleTimeoutSeconds = 5
 	retry.ToolAssemblyTimeoutSeconds = 1
+	retry.ToolArgumentIdleTimeoutSeconds = 1
 	if err := config.UpdateRetryConfig(retry); err != nil {
 		t.Fatalf("update retry config: %v", err)
 	}
@@ -691,6 +693,45 @@ func TestCallKiroAPIRecoversToolAssemblyTimeoutWithRebuiltPayload(t *testing.T) 
 	}
 }
 
+func TestCallKiroAPIHonorsClaudeCodeStreamIdleWithoutAssemblyExtension(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatal(err)
+	}
+	retry := config.GetRetryConfig()
+	retry.MaxUpstreamAttempts = 1
+	retry.MaxRetryDurationSeconds = 30
+	retry.FirstTokenTimeoutSeconds = 30
+	retry.StreamIdleTimeoutSeconds = 15
+	retry.ToolAssemblyTimeoutSeconds = 600
+	retry.ToolArgumentIdleTimeoutSeconds = 180
+	if err := config.UpdateRetryConfig(retry); err != nil {
+		t.Fatal(err)
+	}
+	_ = config.UpdatePreferredEndpoint("kiro")
+	_ = config.UpdateEndpointFallback(false)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "hello"}))
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+	oldEndpoints := kiroEndpoints
+	kiroEndpoints = []kiroEndpoint{{Key: "kiro", URL: server.URL, Name: "Kiro IDE"}}
+	t.Cleanup(func() { kiroEndpoints = oldEndpoints })
+	var text string
+	started := time.Now()
+	err := CallKiroAPI(&config.Account{ID: "idle-account", AccessToken: "fixture"},
+		&KiroPayload{transparentClaudeCode: true, clientUserAgent: "claude-code/2.1.284"},
+		&KiroStreamCallback{OnText: func(s string, _ bool) { text += s }})
+	upstreamErr, ok := asUpstreamError(err)
+	if !ok || upstreamErr.Kind != UpstreamErrorStreamIdleTimeout || text != "hello" || time.Since(started) > 25*time.Second {
+		t.Fatalf("stream idle limit not honored: text=%q elapsed=%s err=%v", text, time.Since(started), err)
+	}
+	if got := requestDetailRetryReason(err); got != "stream_idle_timeout" {
+		t.Fatalf("stream idle misclassified as %s", got)
+	}
+}
+
 func TestCallKiroAPIRecoversTransparentTruncatedToolBeforeClientCommit(t *testing.T) {
 	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatalf("init config: %v", err)
@@ -702,6 +743,7 @@ func TestCallKiroAPIRecoversTransparentTruncatedToolBeforeClientCommit(t *testin
 	retry.FirstTokenTimeoutSeconds = 5
 	retry.StreamIdleTimeoutSeconds = 5
 	retry.ToolAssemblyTimeoutSeconds = 2
+	retry.ToolArgumentIdleTimeoutSeconds = 2
 	if err := config.UpdateRetryConfig(retry); err != nil {
 		t.Fatalf("update retry config: %v", err)
 	}
@@ -793,6 +835,7 @@ func TestCallKiroAPIAllowsToolAssemblyThatKeepsReceivingFragments(t *testing.T) 
 	retry.FirstTokenTimeoutSeconds = 5
 	retry.StreamIdleTimeoutSeconds = 5
 	retry.ToolAssemblyTimeoutSeconds = 1
+	retry.ToolArgumentIdleTimeoutSeconds = 1
 	if err := config.UpdateRetryConfig(retry); err != nil {
 		t.Fatalf("update retry config: %v", err)
 	}
@@ -864,6 +907,7 @@ func TestCallKiroAPIRecoversSchemaDeclaredZeroArgumentTool(t *testing.T) {
 	retry.FirstTokenTimeoutSeconds = 5
 	retry.StreamIdleTimeoutSeconds = 5
 	retry.ToolAssemblyTimeoutSeconds = 2
+	retry.ToolArgumentIdleTimeoutSeconds = 2
 	if err := config.UpdateRetryConfig(retry); err != nil {
 		t.Fatalf("update retry config: %v", err)
 	}
@@ -921,6 +965,7 @@ func TestCallKiroAPIRotatesEndpointAfterActionableOutputTimeout(t *testing.T) {
 	retry.FirstTokenTimeoutSeconds = 5
 	retry.StreamIdleTimeoutSeconds = 15
 	retry.ToolAssemblyTimeoutSeconds = 0
+	retry.ToolArgumentIdleTimeoutSeconds = 0
 	if err := config.UpdateRetryConfig(retry); err != nil {
 		t.Fatalf("update retry config: %v", err)
 	}
@@ -1010,6 +1055,7 @@ func TestCallKiroAPIKeepsActionableWatchdogAliveDuringThinking(t *testing.T) {
 	retry.FirstTokenTimeoutSeconds = 5
 	retry.StreamIdleTimeoutSeconds = 5
 	retry.ToolAssemblyTimeoutSeconds = 1
+	retry.ToolArgumentIdleTimeoutSeconds = 1
 	if err := config.UpdateRetryConfig(retry); err != nil {
 		t.Fatalf("update retry config: %v", err)
 	}
@@ -1625,6 +1671,12 @@ func TestMapDownstreamErrorPreservesActionableStatus(t *testing.T) {
 		{
 			name:       "timeout",
 			err:        &UpstreamError{Kind: UpstreamErrorFirstTokenTimeout},
+			wantStatus: http.StatusGatewayTimeout,
+			wantType:   "server_error",
+		},
+		{
+			name:       "stream idle timeout",
+			err:        &UpstreamError{Kind: UpstreamErrorStreamIdleTimeout},
 			wantStatus: http.StatusGatewayTimeout,
 			wantType:   "server_error",
 		},

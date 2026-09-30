@@ -349,6 +349,7 @@ run_cli_with_budget() {
   local workspace="$5"
   local output="$6"
   local prompt="$7"
+  CASE_OUTPUTS+=("$output")
   local timeout_signal="${CLI_TIMEOUT_SIGNAL:-TERM}"
   local -a persistence_args=()
   local -a client_mode_args=(--bare --setting-sources project)
@@ -391,6 +392,7 @@ run_cli_resume() {
   local output="$4"
   local session_id="$5"
   local prompt="$6"
+  CASE_OUTPUTS+=("$output")
   local timeout_signal="${CLI_TIMEOUT_SIGNAL:-TERM}"
   shift 6
   (
@@ -506,11 +508,27 @@ run_case() {
   shift
   CASE_STATUS_HINT=PASS
   CASE_DETAIL=""
-  if "$@"; then
-    record_case "$name" "$CASE_STATUS_HINT" "${CASE_DETAIL:-completed}"
-  else
-    record_case "$name" FAIL "${CASE_DETAIL:-check failed}"
+  CASE_OUTPUTS=()
+  local status file evidence recoveries=0 stream_errors=0
+  local -A inspected=()
+  if "$@"; then status="$CASE_STATUS_HINT"; else status=FAIL; fi
+  for file in "${CASE_OUTPUTS[@]}"; do
+    [[ -s "$file" && -z "${inspected[$file]:-}" ]] || continue
+    inspected[$file]=1
+    if evidence="$(client_evidence "$file" 2>/dev/null)"; then
+      recoveries=$((recoveries + $(jq -r '.automaticContinuations // 0' <<<"$evidence")))
+      stream_errors=$((stream_errors + $(jq -r '.protocolErrorCount // 0' <<<"$evidence")))
+    fi
+  done
+  if ((recoveries > 0)); then
+    [[ "$status" != PASS ]] || status=WARN
+    CASE_DETAIL+="; automatic_stream_continuations=$recoveries (recovered, not uninterrupted)"
   fi
+  if ((stream_errors > 0)); then
+    [[ "$status" != PASS ]] || status=WARN
+    CASE_DETAIL+="; observed_stream_errors=$stream_errors"
+  fi
+  record_case "$name" "$status" "${CASE_DETAIL:-check completed}"
 }
 
 case_text_stream() {
@@ -705,6 +723,7 @@ case_concurrent_clients() {
     local marker="CLIENT_CONCURRENT_${i}_OK"
     mkdir -p "$workspace"
     outputs+=("$output")
+    CASE_OUTPUTS+=("$output")
     markers+=("$marker")
     (
       run_cli "$CLIENT_TIMEOUT" "$MODEL" "$workspace" "$output" \
@@ -1216,6 +1235,7 @@ mkdir -p "$TMP_DIR/thinking-workspace" "$TMP_DIR/long-workspace" "$TMP_DIR/cance
 printf 'scenario\tstatus\tdetail\n' >"$SUMMARY_PATH"
 chmod 600 "$SUMMARY_PATH"
 declare -a CASE_NAMES=()
+declare -a CASE_OUTPUTS=()
 declare -a CASE_STATUSES=()
 declare -a CASE_DETAILS=()
 

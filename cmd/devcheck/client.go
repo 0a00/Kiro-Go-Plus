@@ -52,6 +52,7 @@ type apiResponse struct {
 	total      time.Duration
 	requestID  string
 	err        error
+	errorStage string
 }
 
 type tokenUsage struct {
@@ -128,7 +129,7 @@ func (r *runner) post(ctx context.Context, path string, payload interface{}, aut
 func (r *runner) postWithSSEObserver(ctx context.Context, path string, payload interface{}, authenticated, stream bool, onEvent func()) apiResponse {
 	data, err := json.Marshal(payload)
 	if err != nil {
-		return apiResponse{err: err}
+		return apiResponse{err: err, errorStage: "encode_request"}
 	}
 	return r.doWithSSEObserver(ctx, http.MethodPost, path, data, authenticated, stream, onEvent)
 }
@@ -145,7 +146,7 @@ func (r *runner) doWithSSEObserver(ctx context.Context, method, path string, bod
 	}
 	req, err := http.NewRequestWithContext(ctx, method, r.opts.baseURL+path, reader)
 	if err != nil {
-		return apiResponse{err: err}
+		return apiResponse{err: err, errorStage: "build_request"}
 	}
 	req.Header.Set("User-Agent", r.userAgent)
 	if body != nil {
@@ -161,7 +162,7 @@ func (r *runner) doWithSSEObserver(ctx context.Context, method, path string, bod
 
 	resp, err := r.client.Do(req)
 	if err != nil {
-		return apiResponse{total: time.Since(startedAt), err: err}
+		return apiResponse{total: time.Since(startedAt), err: err, errorStage: "request_headers"}
 	}
 	defer resp.Body.Close()
 	result := apiResponse{
@@ -171,10 +172,16 @@ func (r *runner) doWithSSEObserver(ctx context.Context, method, path string, bod
 	}
 	if stream && resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		result.stream, result.err = consumeSSEWithObserver(resp.Body, startedAt, onEvent)
+		if result.err != nil {
+			result.errorStage = "read_stream"
+		}
 		result.total = time.Since(startedAt)
 		return result
 	}
 	result.body, result.err = readBounded(resp.Body, maxDiagnosticResponseBytes)
+	if result.err != nil {
+		result.errorStage = "read_body"
+	}
 	result.total = time.Since(startedAt)
 	return result
 }

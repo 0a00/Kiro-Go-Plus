@@ -131,36 +131,36 @@ func TestClaudeCodeUserAgentVariants(t *testing.T) {
 	}
 }
 
-func TestClaudeCodeToolArgumentIdleTimeoutUsesAssemblyGrace(t *testing.T) {
+func TestToolArgumentIdleTimeoutHonorsExplicitLimitsForEveryClient(t *testing.T) {
 	retry := config.RetryConfig{
 		ToolAssemblyTimeoutSeconds:     600,
 		ToolArgumentIdleTimeoutSeconds: 180,
 		StreamIdleTimeoutSeconds:       300,
 	}
 
-	if got := toolArgumentIdleTimeoutForRequest(retry, &KiroPayload{clientUserAgent: "claude-code/2.1.263"}); got != 600*time.Second {
-		t.Fatalf("Claude Code timeout = %s, want 10m", got)
+	if got := toolArgumentIdleTimeoutForRequest(retry, &KiroPayload{clientUserAgent: "claude-code/2.1.263"}); got != 180*time.Second {
+		t.Fatalf("Claude Code timeout = %s, want 3m", got)
 	}
-	if got := toolArgumentIdleTimeoutForRequest(retry, &KiroPayload{clientUserAgent: "Go-http-client/1.1", transparentClaudeCode: true}); got != 600*time.Second {
-		t.Fatalf("forwarded Claude Code timeout = %s, want 10m", got)
+	if got := toolArgumentIdleTimeoutForRequest(retry, &KiroPayload{clientUserAgent: "Go-http-client/1.1", transparentClaudeCode: true}); got != 180*time.Second {
+		t.Fatalf("forwarded Claude Code timeout = %s, want 3m", got)
 	}
 	if got := streamIdleTimeoutForRequest(retry, &KiroPayload{
 		clientUserAgent:        "claude-code/2.1.263",
 		deferTextUntilComplete: true,
-	}); got != 600*time.Second {
-		t.Fatalf("Claude Code stream idle timeout = %s, want 10m", got)
+	}); got != 300*time.Second {
+		t.Fatalf("Claude Code stream idle timeout = %s, want 5m", got)
 	}
 	if got := streamIdleTimeoutForRequest(retry, &KiroPayload{
 		clientUserAgent:         "claude-code/2.1.263",
 		requireActionableOutput: true,
-	}); got != 600*time.Second {
-		t.Fatalf("Claude Code non-stream tool timeout = %s, want 10m", got)
+	}); got != 300*time.Second {
+		t.Fatalf("Claude Code non-stream tool timeout = %s, want 5m", got)
 	}
 	if got := streamIdleTimeoutForRequest(retry, &KiroPayload{
 		clientUserAgent:       "Go-http-client/1.1",
 		transparentClaudeCode: true,
-	}); got != 600*time.Second {
-		t.Fatalf("forwarded Claude Code stream idle timeout = %s, want 10m", got)
+	}); got != 300*time.Second {
+		t.Fatalf("forwarded Claude Code stream idle timeout = %s, want 5m", got)
 	}
 	if got := toolArgumentIdleTimeoutForRequest(retry, &KiroPayload{clientUserAgent: "anthropic-sdk-go/1.0"}); got != 180*time.Second {
 		t.Fatalf("generic client timeout = %s, want 3m", got)
@@ -175,6 +175,18 @@ func TestClaudeCodeToolArgumentIdleTimeoutUsesAssemblyGrace(t *testing.T) {
 	retry.ToolArgumentIdleTimeoutSeconds = 900
 	if got := toolArgumentIdleTimeoutForRequest(retry, &KiroPayload{clientUserAgent: "claude-code/2.1.263"}); got != 900*time.Second {
 		t.Fatalf("explicit longer Claude Code timeout = %s, want 15m", got)
+	}
+	if got := toolArgumentIdleTimeoutForRequest(retry, nil); got != 900*time.Second {
+		t.Fatalf("explicit generic timeout = %s, want 15m", got)
+	}
+	retry.ToolArgumentIdleTimeoutSeconds = 0
+	if got := toolArgumentIdleTimeoutForRequest(retry, nil); got != 600*time.Second {
+		t.Fatalf("legacy fallback timeout = %s, want 10m", got)
+	}
+	retry.ToolAssemblyTimeoutSeconds = 0
+	retry.StreamIdleTimeoutSeconds = 0
+	if toolArgumentIdleTimeoutForRequest(retry, nil) != 0 || streamIdleTimeoutForRequest(retry, &KiroPayload{transparentClaudeCode: true}) != 0 {
+		t.Fatal("disabled timeouts must remain disabled")
 	}
 }
 

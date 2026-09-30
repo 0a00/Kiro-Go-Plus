@@ -265,6 +265,9 @@ if ((DRY_RUN)); then
   printf 'staircase: %s; soak: %s\n' \
     "$([[ $RUN_STAIRCASE == 1 ]] && printf enabled || printf disabled)" \
     "$([[ $RUN_SOAK == 1 ]] && printf enabled || printf disabled)"
+  if ((RUN_SOAK)); then
+    printf 'soak_bounds: duration=5m interval=3s max_requests=101 requested_output_tokens=3232\n'
+  fi
   printf 'fail_on_warning: %s\n' "$([[ $FAIL_ON_WARNING == 1 ]] && printf enabled || printf disabled)"
   printf 'client_require_web_search: %s\n' "$CLIENT_REQUIRE_WEB_SEARCH"
   printf 'No network request or credential access was performed.\n'
@@ -424,9 +427,12 @@ extract_first_claude_model() {
   local model=""
   if command -v jq >/dev/null 2>&1; then
     model="$(jq -r '
-      ([.data[]?.id? | select(type == "string") | select(startswith("claude-")) | select(endswith("-thinking") | not)][0]
-       // [.data[]?.id? | select(type == "string") | select(startswith("claude-"))][0]
-       // "")' "$file" 2>/dev/null || true)"
+      [.data[]?.id? | select(type == "string")] as $models |
+      [["claude-sonnet-4-5", "claude-sonnet-4.5", "claude-sonnet-5", "claude-sonnet-4-6", "claude-sonnet-4.6", "claude-opus-5", "claude-opus-4-8", "claude-opus-4.8"][] as $preferred |
+        $models[] | select(ascii_downcase == $preferred)] | .[0] // ""' "$file" 2>/dev/null || true)"
+    if [[ -z "$model" ]]; then
+      model="$(jq -r '[.data[]?.id? | select(type == "string") | select(startswith("claude-")) | select(endswith("-thinking") | not)] | sort | .[0] // ""' "$file" 2>/dev/null || true)"
+    fi
   fi
   if [[ -z "$model" ]]; then
     model="$(grep -oE '"id"[[:space:]]*:[[:space:]]*"claude-[^"]+"' "$file" 2>/dev/null \
@@ -649,6 +655,15 @@ if [[ "$LAST_PHASE_STATUS" != PASS ]]; then
   record_skip claude-code-e2e "health preflight failed"
 else
   run_probe_phase api-observability api_probe
+  # Use one discovered primary for API, load and CLI cases. The matrix still
+  # covers every advertised Claude name independently of this default.
+  if [[ -z "$MODEL" && -s "$DISCOVERED_MODEL_PATH" ]]; then
+    IFS= read -r MODEL <"$DISCOVERED_MODEL_PATH" || true
+    if [[ -n "$MODEL" ]]; then
+      DEV_MODEL_ARGS=(--model "$MODEL")
+      [[ -z "$THINKING_MODEL" ]] || DEV_MODEL_ARGS+=(--thinking-model "$THINKING_MODEL")
+    fi
+  fi
   # A smoke failure is recorded, but it must not hide independent diagnostics.
   # Authentication failures are consequently visible in every affected phase,
   # while model- or protocol-specific failures still leave useful results from
@@ -747,7 +762,7 @@ if ((RUN_SOAK)); then
     record_skip bounded-soak "preflight failed"
   else
     SOAK_ARGS=(--suite soak --timeout "$REQUEST_TIMEOUT" --concurrency 10 --requests 100 \
-      --load-max-tokens 32 --soak-duration 5m --soak-max-requests 100 --soak-token-budget 3200 \
+      --load-max-tokens 32 --soak-duration 5m --soak-interval 3s --soak-max-requests 101 --soak-token-budget 3232 \
       --json-report "$REPORT_DIR/bounded-soak.json" --allow-remote)
     SOAK_ARGS+=("${DEV_MODEL_ARGS[@]}")
     SOAK_ARGS+=("${DEV_WARNING_ARGS[@]}")

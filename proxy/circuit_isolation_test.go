@@ -27,6 +27,7 @@ func TestSharedCircuitOnlyCountsServiceAndTransportFailures(t *testing.T) {
 	for _, err := range []error{
 		context.Canceled, context.DeadlineExceeded,
 		classifyTransportError("test", context.DeadlineExceeded),
+		newStreamIdleTimeoutError("test", time.Minute),
 		newToolAssemblyTimeoutError("test", "Edit", 90, time.Minute),
 		newEmptyResponseError("test", true),
 		newEndpointCircuitOpenError("test", time.Second),
@@ -38,6 +39,22 @@ func TestSharedCircuitOnlyCountsServiceAndTransportFailures(t *testing.T) {
 	}
 	if !circuitEligibleFailure(classifyTransportError("test", &net.OpError{Op: "dial", Err: errors.New("refused")})) {
 		t.Fatal("transport outage ignored")
+	}
+}
+
+func TestStreamIdleTimeoutPreservesRequestLocalRecoveryPolicy(t *testing.T) {
+	err := newStreamIdleTimeoutError("fixture", time.Minute)
+	if !shouldRetryAcrossEndpoints(err) || !shouldRetryAcrossAccounts(err) {
+		t.Fatal("idle timeout lost retry eligibility before client output")
+	}
+	if _, ok := endpointRouteFailure(err); !ok {
+		t.Fatal("idle timeout lost account-route cooldown")
+	}
+	if trigger, ok := fallbackTriggerForError(err); !ok || trigger != config.ModelFallbackTriggerUpstreamError {
+		t.Fatalf("idle timeout changed fallback classification: %s %v", trigger, ok)
+	}
+	if requestDetailRetryReason(err) != "stream_idle_timeout" || circuitEligibleFailure(err) {
+		t.Fatal("idle timeout diagnosis or shared circuit policy is incorrect")
 	}
 }
 

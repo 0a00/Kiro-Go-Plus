@@ -309,6 +309,7 @@ func TestLoadBaselineMetadataCoversScheduleAndSuiteBounds(t *testing.T) {
 	}
 	for name, mutate := range map[string]func(*devReport){
 		"duration": func(report *devReport) { report.SoakMillis++ },
+		"interval": func(report *devReport) { report.SoakIntervalMillis++ },
 		"requests": func(report *devReport) { report.SoakMaxRequests++ },
 		"tokens":   func(report *devReport) { report.SoakTokenBudget++ },
 	} {

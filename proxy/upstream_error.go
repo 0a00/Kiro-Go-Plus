@@ -31,6 +31,7 @@ const (
 	UpstreamErrorEndpointUnavailable UpstreamErrorKind = "endpoint_unavailable"
 	UpstreamErrorTransient           UpstreamErrorKind = "transient"
 	UpstreamErrorFirstTokenTimeout   UpstreamErrorKind = "first_token_timeout"
+	UpstreamErrorStreamIdleTimeout   UpstreamErrorKind = "stream_idle_timeout"
 	UpstreamErrorActionableTimeout   UpstreamErrorKind = "actionable_output_timeout"
 	UpstreamErrorToolAssemblyTimeout UpstreamErrorKind = "tool_assembly_timeout"
 	UpstreamErrorToolOutputTruncated UpstreamErrorKind = "tool_output_truncated"
@@ -224,7 +225,7 @@ func mapDownstreamError(err error) downstreamError {
 		// These credentials and models belong to the proxy, not the caller.
 		// Returning 401 would incorrectly tell clients their own API key failed.
 		mapped.Status = http.StatusServiceUnavailable
-	case UpstreamErrorFirstTokenTimeout, UpstreamErrorActionableTimeout, UpstreamErrorToolAssemblyTimeout:
+	case UpstreamErrorFirstTokenTimeout, UpstreamErrorStreamIdleTimeout, UpstreamErrorActionableTimeout, UpstreamErrorToolAssemblyTimeout:
 		mapped.Status = http.StatusGatewayTimeout
 	case UpstreamErrorToolOutputTruncated:
 		mapped.Status = http.StatusBadGateway
@@ -410,6 +411,14 @@ func classifyTransportError(endpoint string, err error) *UpstreamError {
 func isLocalConfigurationError(err error) bool {
 	upstreamErr, ok := asUpstreamError(err)
 	return ok && upstreamErr.Kind == UpstreamErrorLocalConfiguration
+}
+
+func newStreamIdleTimeoutError(endpoint string, timeout time.Duration) *UpstreamError {
+	return &UpstreamError{
+		Kind: UpstreamErrorStreamIdleTimeout, Endpoint: endpoint,
+		Message: fmt.Sprintf("upstream stream had no body data for %s", timeout),
+		Cause:   context.DeadlineExceeded, RetryAcrossEndpoints: true, RetryAcrossAccounts: true,
+	}
 }
 
 func classifyRequestCancellation(endpoint string, err error) *UpstreamError {

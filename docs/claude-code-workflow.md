@@ -44,4 +44,4 @@ node --test scripts/client-file-evidence.test.js scripts/client-e2e.test.js
 ```
 
 真实模型测试会消耗额度，参见[开发测试说明](development-testing.md)。
-此次仅修改文档和测试，无需调整服务器设置、重建容器或升级运行时版本。
+仅启用这份客户端规范不需要重建服务器容器；运行时修复须单独部署。

@@ -57,6 +57,15 @@ clean_env=(
   --skip-load --skip-client-e2e --staircase --soak --fail-on-warning --client-require-web-search >/dev/null
 [[ ! -e "$NETWORK_MARKER" ]] || fail "dry-run invoked curl"
 
+# Exercise discovery without invoking the production entry point or network.
+source <(sed -n '/^extract_first_claude_model()/,/^}/p' "$TEST_SCRIPT")
+for model in claude-sonnet-4-5 claude-sonnet-4.5; do
+  printf '{"data":[{"id":"claude-haiku-4-5"},{"id":"claude-sonnet-5"},{"id":"%s"}]}\n' "$model" >"$TMP_DIR/models.json"
+  [[ "$(extract_first_claude_model "$TMP_DIR/models.json")" == "$model" ]] || fail "Sonnet 4.5 selection drifted"
+done
+printf '{"data":[{"id":"claude-sonnet-4-thinking"},{"id":"claude-sonnet-4"}]}\n' >"$TMP_DIR/models.json"
+[[ "$(extract_first_claude_model "$TMP_DIR/models.json")" == claude-sonnet-4 ]] || fail "non-thinking fallback selection failed"
+
 assert_fails "remote dry-run without opt-in" \
   env "PATH=$FAKE_BIN:$PATH" KIRO_PROD_API_KEY=test-key \
   bash "$TEST_SCRIPT" --base-url http://remote.invalid --dry-run

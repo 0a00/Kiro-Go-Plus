@@ -271,8 +271,8 @@ type RetryConfig struct {
 	PreOutputRetryBackoffMs        int  `json:"preOutputRetryBackoffMs"`
 	FirstTokenTimeoutSeconds       int  `json:"firstTokenTimeoutSeconds"`
 	StreamIdleTimeoutSeconds       int  `json:"streamIdleTimeoutSeconds"`
-	// ToolAssemblyTimeoutSeconds is the allowed idle interval while a tool call
-	// is being assembled. It is not a total tool-call duration limit.
+	// ToolAssemblyTimeoutSeconds is the legacy argument-idle fallback used
+	// when ToolArgumentIdleTimeoutSeconds is zero, not a total duration limit.
 	ToolAssemblyTimeoutSeconds int `json:"toolAssemblyTimeoutSeconds"`
 	// ToolArgumentIdleTimeoutSeconds is the maximum time without new tool
 	// argument bytes after a tool call starts. Zero falls back to the assembly
@@ -650,7 +650,7 @@ const (
 )
 
 // Version current version
-const Version = "1.2.90"
+const Version = "1.2.91"
 
 var (
 	cfg           *Config

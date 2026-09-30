@@ -56,6 +56,7 @@ type options struct {
 	collectServerStats       bool
 	requireServerStats       bool
 	soakDuration             time.Duration
+	soakInterval             time.Duration
 	soakMaxRequests          int
 	soakTokenBudget          int
 	minSuccessRate           float64
@@ -164,6 +165,11 @@ type scenarioResult struct {
 	ToolUses                  int            `json:"toolUses,omitempty"`
 	SelectionP95MS            int64          `json:"accountSelectionP95Millis,omitempty"`
 	Detail                    string         `json:"detail,omitempty"`
+
+	FailureDetails        []loadFailureDetail `json:"failureDetails,omitempty"`
+	FailureDetailsOmitted int                 `json:"failureDetailsOmitted,omitempty"`
+	SoakDurationReached   bool                `json:"soakDurationReached,omitempty"`
+	SoakStopReason        string              `json:"soakStopReason,omitempty"`
 }
 
 type devReport struct {
@@ -185,6 +191,7 @@ type devReport struct {
 	StaircaseCooldownMillis  int64            `json:"staircaseCooldownMillis,omitempty"`
 	StaircaseMaxRequests     int              `json:"staircaseMaxRequests,omitempty"`
 	SoakMillis               int64            `json:"soakMillis,omitempty"`
+	SoakIntervalMillis       int64            `json:"soakIntervalMillis,omitempty"`
 	SoakMaxRequests          int              `json:"soakMaxRequests,omitempty"`
 	SoakTokenBudget          int              `json:"soakTokenBudget,omitempty"`
 	Model                    string           `json:"model,omitempty"`
@@ -303,6 +310,7 @@ func parseOptions(args []string) (options, error) {
 	set.BoolVar(&opts.collectServerStats, "server-stats", true, "sample authenticated customer counters before and after load")
 	set.BoolVar(&opts.requireServerStats, "require-server-stats", false, "fail load results when authenticated customer counters cannot be sampled or reset")
 	set.DurationVar(&opts.soakDuration, "soak-duration", 5*time.Minute, "maximum duration of the soak suite")
+	set.DurationVar(&opts.soakInterval, "soak-interval", 0, "minimum interval between soak requests (0 sends at worker capacity)")
 	set.IntVar(&opts.soakMaxRequests, "soak-max-requests", 100, "maximum requests in the soak suite")
 	set.IntVar(&opts.soakTokenBudget, "soak-token-budget", 3200, "maximum requested output tokens in the soak suite")
 	set.Float64Var(&opts.minSuccessRate, "min-success-rate", 0, "minimum load success rate in percent; 0 keeps the default all-request gate")
@@ -400,6 +408,9 @@ func parseOptions(args []string) (options, error) {
 	}
 	if opts.soakDuration < time.Second || opts.soakDuration > 24*time.Hour {
 		return options{}, errors.New("--soak-duration must be between 1s and 24h")
+	}
+	if opts.soakInterval < 0 || opts.soakInterval > opts.soakDuration {
+		return options{}, errors.New("--soak-interval must be between 0 and --soak-duration")
 	}
 	if opts.soakMaxRequests < 1 || opts.soakMaxRequests > 10000 {
 		return options{}, errors.New("--soak-max-requests must be between 1 and 10000")
@@ -649,6 +660,7 @@ func (r *runner) writeReport(path string) error {
 		StaircaseCooldownMillis:  r.opts.staircaseCooldown.Milliseconds(),
 		StaircaseMaxRequests:     r.opts.staircaseMaxRequests,
 		SoakMillis:               r.opts.soakDuration.Milliseconds(),
+		SoakIntervalMillis:       r.opts.soakInterval.Milliseconds(),
 		SoakMaxRequests:          r.opts.soakMaxRequests,
 		SoakTokenBudget:          r.opts.soakTokenBudget,
 		Model:                    r.model,
@@ -731,6 +743,7 @@ func configurationFingerprint(opts options) string {
 		AllowHighLoad            bool     `json:"allowHighLoad"`
 		PostRecovery             bool     `json:"postLoadRecovery"`
 		SoakMillis               int64    `json:"soakMillis"`
+		SoakIntervalMillis       int64    `json:"soakIntervalMillis"`
 		SoakMaxRequests          int      `json:"soakMaxRequests"`
 		SoakTokenBudget          int      `json:"soakTokenBudget"`
 		StaircaseHoldMillis      int64    `json:"staircaseHoldMillis"`
@@ -757,8 +770,9 @@ func configurationFingerprint(opts options) string {
 		Concurrency: opts.concurrency, Requests: opts.requests, SoakMillis: opts.soakDuration.Milliseconds(),
 		LoadProfile: opts.loadProfile, LoadPattern: opts.loadPattern, LoadMaxTokens: opts.loadMaxTokens,
 		WarmupRequests: opts.warmupRequests, TargetRPS: opts.targetRPS, RampMillis: opts.rampDuration.Milliseconds(), AllowHighLoad: opts.allowHighLoad,
-		PostRecovery:    opts.postLoadRecovery,
-		SoakMaxRequests: opts.soakMaxRequests, SoakTokenBudget: opts.soakTokenBudget,
+		PostRecovery:       opts.postLoadRecovery,
+		SoakIntervalMillis: opts.soakInterval.Milliseconds(),
+		SoakMaxRequests:    opts.soakMaxRequests, SoakTokenBudget: opts.soakTokenBudget,
 		StaircaseHoldMillis: opts.staircaseHold.Milliseconds(), StaircaseCooldownMillis: opts.staircaseCooldown.Milliseconds(), StaircaseMaxRequests: opts.staircaseMaxRequests,
 		ResourceSampleMillis: opts.resourceSampleInterval.Milliseconds(), MinSuccessRate: opts.minSuccessRate,
 		CollectServerStats: opts.collectServerStats,

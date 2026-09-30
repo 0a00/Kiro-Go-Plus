@@ -102,8 +102,15 @@ authentication and execution failures are never treated as capability skips.
 Offline assertion/launcher regressions: `node --test scripts/client-e2e.test.js`.
 File-evidence regressions: `node --test scripts/client-file-evidence.test.js`.
 These fake-client tests use no live credentials or network and run in the quick
-quality gate. This test-only change requires no server configuration migration
-or container restart; update the test checkout before rerunning.
+quality gate. Updating only the fixture validators requires no container restart;
+update the test checkout before rerunning. Runtime changes are documented separately.
+
+From 1.2.91, automatic Claude Code continuation turns and explicit stream errors
+cannot count as uninterrupted PASS. Load JSON reports preserve up to 32 sanitized
+per-request failure details. Default API/load/CLI model selection is consistent
+and prefers advertised Sonnet 4.5; `--model` overrides it. See
+[idle timeouts and test evidence](idle-timeout-and-test-evidence.md) for behavior,
+upstream review, migration and remaining coverage limits.
 
 The `workspace-large-write-progress` and `workspace-chunked-edit-progress` cases
 also replay successful file mutations against the fixed fixture and compare the
@@ -186,6 +193,12 @@ bash scripts/dev-test.sh staircase --concurrency-levels 1,5,10,20,50,100 --reque
 bash scripts/dev-test.sh soak --concurrency 10 --soak-duration 10m \
   --soak-max-requests 500 --soak-token-budget 16000
 ```
+
+That unpaced soak can reach its request cap well before ten minutes. To spread
+low-rate probes across the window, add `--soak-interval 2s`; quota and duration
+caps still apply. Reports mark early quota completion as WARN and distinguish it
+from duration coverage. The production entry point uses a paced five-minute soak
+(3-second interval, 101-request cap), not continuous maximum-concurrency load.
 
 The matrix runs Anthropic Messages, Chat Completions, and Responses in stream
 and non-stream modes for every selected model. Load, staircase, and soak probes

@@ -341,7 +341,7 @@ func endpointRouteFailure(err error) (*UpstreamError, bool) {
 	}
 	switch upstreamErr.Kind {
 	case UpstreamErrorQuota, UpstreamErrorRateLimit, UpstreamErrorModelUnavailable, UpstreamErrorTransient,
-		UpstreamErrorFirstTokenTimeout, UpstreamErrorActionableTimeout, UpstreamErrorToolAssemblyTimeout,
+		UpstreamErrorFirstTokenTimeout, UpstreamErrorStreamIdleTimeout, UpstreamErrorActionableTimeout, UpstreamErrorToolAssemblyTimeout,
 		UpstreamErrorToolOutputTruncated, UpstreamErrorEndpointUnavailable, UpstreamErrorEmptyResponse,
 		UpstreamErrorStreamTruncated, UpstreamErrorForbidden:
 		return upstreamErr, true

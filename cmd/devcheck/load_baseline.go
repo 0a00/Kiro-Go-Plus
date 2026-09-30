@@ -124,6 +124,9 @@ func validateLoadBaselineMetadata(opts options, baseline devReport) error {
 			mismatches = append(mismatches, "staircase request cap")
 		}
 	case "soak":
+		if baseline.SoakIntervalMillis != opts.soakInterval.Milliseconds() {
+			mismatches = append(mismatches, "soak interval")
+		}
 		if baseline.SoakMillis != opts.soakDuration.Milliseconds() {
 			mismatches = append(mismatches, "soak duration")
 		}

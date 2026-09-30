@@ -1,5 +1,5 @@
 {
-  "version": "1.2.90",
-  "changelog": "Close delivered text blocks when buffered tool assembly starts so Claude Code can render the preamble before the tool completes. Preserve tool validation and replay boundaries.\n平衡模式在工具开始组装时及时结束已发送正文块，修复 Claude Code 只显示圆点、完成后集中出现正文的问题，保留工具校验与重试边界。",
+  "version": "1.2.91",
+  "changelog": "Honor configured tool-argument and stream idle timeouts without hidden Claude Code extensions. Report automatic client continuations and bounded per-request load failure evidence; unify acceptance-model selection and add paced soak coverage.\n修复 Claude Code 工具参数与流空闲超时被隐式延长；测试标记自动续接、记录脱敏失败明细，统一验收模型并增加持续测试节奏与时长覆盖检查。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }

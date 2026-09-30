@@ -110,6 +110,7 @@ const args = process.argv.slice(2), mode = process.env.KIRO_E2E_FIXTURE;
 const emit = r => process.stdout.write(JSON.stringify(r)+'\\n');
 const call = (id,name,file,input={}) => emit({type:'assistant',message:{content:[{type:'tool_use',id,name,input:{file_path:file,...input}}]}});
 const reply = (id,content) => emit({type:'user',message:{content:[{type:'tool_result',tool_use_id:id,content}]}});
+if(mode==='file-recovered') emit({type:'user',message:{content:[{type:'text',text:'Your response above was cut off mid-stream. Resume directly from where it stops - no apology, no recap.'}]}});
 const numbered = (start,count) => Array.from({length:count},(_,i)=>String(start+i).padStart(4,'0')+': '+'Test assertions check file contents and actual tool results before declaring the workflow complete.'.padEnd(105,'.')).join('\\n');
 if (process.env.ANTHROPIC_AUTH_TOKEN) process.exit(43);
 const last = args.at(-1);
@@ -213,6 +214,17 @@ test('file scenario passes with Edit creation but fails if the disk content is w
   assert.match(ok.stdout, /file-tools\s+PASS/);
   const bad = runFixture('file-wrong', 'file-tools');
   assert.equal(bad.status, 1, bad.stdout + bad.stderr);
+});
+
+test('automatic stream continuation cannot be reported as uninterrupted success', () => {
+  const recovery = { type: 'user', message: { content: [{ type: 'text', text: 'Your response above was cut off mid-stream. Resume directly from where it stops - no recap.' }] } };
+  assert.equal(evidence([init(), recovery, done()]).automaticContinuations, 1);
+  assert.equal(evidence([init(), reply('r', recovery.message.content[0].text), done(recovery.message.content[0].text)]).automaticContinuations, 0);
+  const recovered = runFixture('file-recovered', 'file-tools');
+  assert.equal(recovered.status, 0, recovered.stdout + recovered.stderr);
+  assert.match(recovered.stdout, /file-tools\s+WARN.*automatic_stream_continuations=1/);
+  const strict = runFixture('file-recovered', 'file-tools', ['--fail-on-warning']);
+  assert.equal(strict.status, 1, strict.stdout + strict.stderr);
 });
 test('native search launcher enables the real capability and rejects fake search output', () => {
   const ok = runFixture('search-ok', 'web-search', ['--require-web-search']);

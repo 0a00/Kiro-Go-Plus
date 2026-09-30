@@ -235,7 +235,7 @@ func fallbackTriggerForError(err error) (string, bool) {
 		}
 		return config.ModelFallbackTriggerUpstreamError, true
 	case UpstreamErrorRateLimit, UpstreamErrorQuota, UpstreamErrorEndpointUnavailable,
-		UpstreamErrorTransient, UpstreamErrorFirstTokenTimeout, UpstreamErrorActionableTimeout,
+		UpstreamErrorTransient, UpstreamErrorFirstTokenTimeout, UpstreamErrorStreamIdleTimeout, UpstreamErrorActionableTimeout,
 		UpstreamErrorToolAssemblyTimeout, UpstreamErrorToolOutputTruncated, UpstreamErrorStreamTruncated:
 		return config.ModelFallbackTriggerUpstreamError, true
 	default:

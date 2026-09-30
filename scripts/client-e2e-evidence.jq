@@ -30,9 +30,17 @@ def same_target($a; $b):
 {
   initialized: any($events[]; .type == "system" and .subtype == "init"),
   tools: $tools,
+  # Claude Code can recover a truncated response by inserting a user turn
+  # without exposing an error event. Count only its known standalone message.
+  automaticContinuations: ([$events[] | select(.type == "user") |
+    .message.content? | select(type == "array" and length == 1) | .[0] |
+    select(.type == "text" and (.text | type) == "string") |
+    select(.text | startswith("Your response above was cut off mid-stream. Resume directly from where it stops"))] | length),
   terminalSuccess: ($terminal != null and $terminal.subtype == "success" and $terminal.is_error != true),
   protocolError: any($events[]; .type == "error" or .event.type? == "error" or
     (.type == "assistant" and .isApiErrorMessage == true)),
+  protocolErrorCount: ([$events[] | select(.type == "error" or .event.type? == "error" or
+    (.type == "assistant" and .isApiErrorMessage == true))] | length),
   subtype: ($terminal.subtype // "missing"),
   calls: ($calls | length), results: ($replies | length),
   errors: ($errors | length), recoveredErrors: (($errors | length) - ($unrecovered | length)),

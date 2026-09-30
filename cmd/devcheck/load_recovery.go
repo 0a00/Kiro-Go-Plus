@@ -34,6 +34,7 @@ func (r *runner) runPostLoadRecovery(parent context.Context) {
 		result.Detail = "health check failed after load: " + responseErrorDetail(health)
 	case !sample.success:
 		result.Status = statusFail
+		result.FailureDetails = []loadFailureDetail{sample.failureDetail}
 		result.Detail = "deterministic request failed after load: " + sample.category
 	default:
 		result.Status = statusPass

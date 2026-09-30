@@ -915,39 +915,17 @@ func getRequestEndpointsForAccount(preferred string, payload *KiroPayload, accou
 	return endpoints
 }
 
-// toolArgumentIdleTimeoutForRequest keeps Claude Code long tool turns from
-// inheriting a shorter legacy argument-only timeout when the operator has
-// configured a larger assembly window. The upstream attempt budget remains the
-// hard upper bound, so this only changes the idle grace period.
-func toolArgumentIdleTimeoutForRequest(retry config.RetryConfig, payload *KiroPayload) time.Duration {
-	assemblyTimeout := time.Duration(retry.ToolAssemblyTimeoutSeconds) * time.Second
-	argumentTimeout := time.Duration(retry.ToolArgumentIdleTimeoutSeconds) * time.Second
-	if argumentTimeout <= 0 {
-		argumentTimeout = assemblyTimeout
+// An explicit argument-idle limit takes precedence over the legacy assembly
+// fallback. Active argument fragments renew the monitor, regardless of client.
+func toolArgumentIdleTimeoutForRequest(retry config.RetryConfig, _ *KiroPayload) time.Duration {
+	if retry.ToolArgumentIdleTimeoutSeconds > 0 {
+		return time.Duration(retry.ToolArgumentIdleTimeoutSeconds) * time.Second
 	}
-	if payload != nil && (payload.transparentClaudeCode || isClaudeCodeUserAgent(payload.clientUserAgent)) {
-		// Claude Code needs the larger configured assembly window as a grace
-		// period for long workspace tools; the upstream attempt budget still
-		// bounds the total request duration.
-		if assemblyTimeout > argumentTimeout {
-			argumentTimeout = assemblyTimeout
-		}
-	} else if assemblyTimeout > 0 && assemblyTimeout < argumentTimeout {
-		// Preserve the stricter legacy behavior for generic clients.
-		argumentTimeout = assemblyTimeout
-	}
-	return argumentTimeout
+	return time.Duration(retry.ToolAssemblyTimeoutSeconds) * time.Second
 }
 
-func streamIdleTimeoutForRequest(retry config.RetryConfig, payload *KiroPayload) time.Duration {
-	idleTimeout := time.Duration(retry.StreamIdleTimeoutSeconds) * time.Second
-	if payload != nil && (payload.transparentClaudeCode || isClaudeCodeUserAgent(payload.clientUserAgent)) &&
-		(payload.transparentClaudeCode || payload.deferTextUntilComplete || payload.requireToolUse || payload.requireActionableOutput) {
-		if toolTimeout := toolArgumentIdleTimeoutForRequest(retry, payload); toolTimeout > idleTimeout {
-			idleTimeout = toolTimeout
-		}
-	}
-	return idleTimeout
+func streamIdleTimeoutForRequest(retry config.RetryConfig, _ *KiroPayload) time.Duration {
+	return time.Duration(retry.StreamIdleTimeoutSeconds) * time.Second
 }
 
 // callKiroAPISingleModel calls the Kiro streaming API for one model, trying
@@ -1449,10 +1427,13 @@ endpointLoop:
 					detailTrace.recordAttempt(accountID, accountEmail, ep.Name, endpointHost, attemptStartedAt, http.StatusOK, "canceled", lastErr, requestDetailRetryReason(lastErr))
 					return lastErr
 				}
-				if actionableOutputTimedOut.Load() && !meaningfulGate.hasActionableOutput() {
+				if toolAssemblyTimedOut {
+					// Preserve the specific stalled-tool diagnosis and bounded retry
+					// decision if another watchdog expires during cancellation.
+				} else if actionableOutputTimedOut.Load() && !meaningfulGate.hasActionableOutput() {
 					err = newActionableOutputTimeoutError(ep.Name, actionableOutputTimeout)
 				} else if streamIdleTimedOut.Load() {
-					err = classifyTransportError(ep.Name, context.DeadlineExceeded)
+					err = newStreamIdleTimeoutError(ep.Name, idleTimeout)
 				} else if firstTokenTimedOut.Load() && !meaningfulGate.hasActivity() {
 					err = classifyTransportError(ep.Name, context.DeadlineExceeded)
 				} else {

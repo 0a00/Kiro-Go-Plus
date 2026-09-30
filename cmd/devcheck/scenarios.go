@@ -737,6 +737,12 @@ func (r *runner) runSoak(parent context.Context) {
 	if parent.Err() != nil {
 		stopReason = "parent cancellation"
 	}
+	result.SoakDurationReached = durationReached && parent.Err() == nil
+	result.SoakStopReason = stopReason
+	if !result.SoakDurationReached && result.Status == statusPass {
+		result.Status = statusWarn
+		result.Detail += "; requested soak duration was not covered"
+	}
 	if scheduled == 0 {
 		result.Status = statusFail
 		result.Detail = "no soak requests were scheduled"
@@ -818,6 +824,7 @@ type loadSample struct {
 	cacheStatus     string
 	toolUses        int
 	correlated      bool
+	failureDetail   loadFailureDetail
 }
 
 func (r *runner) executeLoad(parent context.Context, concurrency, requests, maxTokens int) loadExecution {
@@ -1161,6 +1168,16 @@ func (r *runner) executeSoakExecution(parent context.Context, concurrency, targe
 		defer close(jobs)
 		scheduled := 0
 		for index := 0; index < target; index++ {
+			if index > 0 && r.opts.soakInterval > 0 {
+				if !sleepWithContext(scheduleCtx, r.opts.soakInterval) {
+					scheduledResult <- scheduleResult{count: scheduled, durationReached: errors.Is(scheduleCtx.Err(), context.DeadlineExceeded), wall: time.Since(scheduleStartedAt)}
+					return
+				}
+			}
+			if scheduleCtx.Err() != nil {
+				scheduledResult <- scheduleResult{count: scheduled, durationReached: errors.Is(scheduleCtx.Err(), context.DeadlineExceeded), wall: time.Since(scheduleStartedAt)}
+				return
+			}
 			select {
 			case jobs <- index:
 				scheduled++
@@ -1258,6 +1275,9 @@ func classifyLoadSample(response apiResponse, probe loadProbe) loadSample {
 	default:
 		sample.success = true
 	}
+	if !sample.success {
+		sample.failureDetail = describeLoadFailure(response, sample)
+	}
 	return sample
 }
 
@@ -1339,6 +1359,8 @@ func buildLoadExecutionResult(name, model string, concurrency, expected int, exe
 	streamSuccesses := 0
 	nonStreamSuccesses := 0
 	failures := make(map[string]int)
+	var failureDetails []loadFailureDetail
+	failureDetailsOmitted := 0
 	protocolSuccesses := make(map[string]int)
 	workloadSuccesses := make(map[string]int)
 	workloadFailures := make(map[string]int)
@@ -1401,6 +1423,13 @@ func buildLoadExecutionResult(name, model string, concurrency, expected int, exe
 				category = sample.protocol + "_" + category
 			}
 			failures[category]++
+			if len(failureDetails) < maxLoadFailureDetails {
+				detail := sample.failureDetail
+				detail.Protocol, detail.Category = sample.protocol, sample.category
+				failureDetails = append(failureDetails, detail)
+			} else {
+				failureDetailsOmitted++
+			}
 		}
 		if sample.requestID != "" {
 			requestIDs[sample.requestID] = struct{}{}
@@ -1441,6 +1470,7 @@ func buildLoadExecutionResult(name, model string, concurrency, expected int, exe
 		SampleCount: len(samples), CompletedRequests: completed,
 		DistinctRequestIDs: len(requestIDs), OutputTokens: outputTokens,
 		FailureCategories: failures, WorkloadSuccesses: workloadSuccesses, WorkloadFailures: workloadFailures,
+		FailureDetails: failureDetails, FailureDetailsOmitted: failureDetailsOmitted,
 		EndpointCounts: endpointCounts, CorrelatedRequests: correlated, AccountAttempts: accountAttempts,
 		AffinityHits: affinityHits, CacheHits: cacheHits, ToolUses: toolUses,
 		P50Millis: percentile(durations, 0.50), P95Millis: percentile(durations, 0.95), P99Millis: percentile(durations, 0.99),
@@ -1708,7 +1738,7 @@ func extractModelIDs(data []byte) []string {
 }
 
 func selectClaudeModel(models []string) string {
-	for _, preferred := range []string{"claude-sonnet-5", "claude-sonnet-4-6", "claude-sonnet-4.6", "claude-opus-5", "claude-opus-4-8", "claude-opus-4.8"} {
+	for _, preferred := range []string{"claude-sonnet-4-5", "claude-sonnet-4.5", "claude-sonnet-5", "claude-sonnet-4-6", "claude-sonnet-4.6", "claude-opus-5", "claude-opus-4-8", "claude-opus-4.8"} {
 		for _, model := range models {
 			if strings.EqualFold(model, preferred) {
 				return model
