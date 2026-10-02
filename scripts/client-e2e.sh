@@ -769,19 +769,26 @@ case_workspace_multiturn() {
   local first="$TMP_DIR/workspace-multiturn-first.jsonl"
   local second="$TMP_DIR/workspace-multiturn-second.jsonl"
   local session_id second_status second_tools second_results second_errors subtype
-  local before_hash before_lines evidence
+  local before_hash before_lines evidence instruction
   mkdir -p "$workspace"
+  probe_file_tools "$workspace" "$TMP_DIR/workspace-multiturn-capabilities.jsonl" || return 1
+  [[ -n "$FILE_WRITER" ]] || return 0
+  instruction="Use $FILE_WRITER to create $workspace/workflow.sh."
+  if [[ "$FILE_WRITER" == Edit ]]; then
+    instruction+=' The file does not exist yet: use old_string="" and put the complete initial script in new_string; do not search for a placeholder in a nonexistent file.'
+  fi
   set +e
   run_cli_session "$AGENT_TIMEOUT" "$MODEL" "$workspace" "$first" \
-    'Create workflow.sh, a self-contained POSIX shell script of 20-40 lines. Without arguments it prints MULTITURN_OK; --help prints usage. Use only Read, Write or Edit to create it; do not execute commands. Finish with MULTITURN_CREATED_OK.' \
-    --restricted --tools 'Read,Write,Edit' --allowedTools 'Read,Write,Edit' --permission-mode acceptEdits
+    "Create workflow.sh, a self-contained POSIX shell script of 20-40 lines. Without arguments it prints MULTITURN_OK; --help prints usage. $instruction Read is for files, not directories: after creation read back the exact file to verify it. Use only the available file tools; do not execute commands. Finish with MULTITURN_CREATED_OK." \
+    --restricted --tools "Read,$FILE_WRITER" --allowedTools "Read,$FILE_WRITER" --permission-mode acceptEdits
   local first_status=$?
   set -e
+  evidence="$(client_evidence "$first")" || { CASE_DETAIL="initial turn returned invalid structured evidence"; return 1; }
   if ((first_status != 0)) || ! assert_client_result "$first" MULTITURN_CREATED_OK ||
     [[ ! -f "$workspace/workflow.sh" || -L "$workspace/workflow.sh" ]] ||
     ! bash -n "$workspace/workflow.sh" ||
-    ! client_evidence "$first" | jq -e '.terminalSuccess and (.protocolError | not) and .paired and .workspaceEdit and .unrecoveredErrors == 0' >/dev/null; then
-    CASE_DETAIL="initial Claude Code workspace turn failed (status ${first_status})"
+    ! jq -e --arg writer "$FILE_WRITER" '.terminalSuccess and (.protocolError | not) and .paired and .workspaceEdit and .workspaceReadback and .unrecoveredErrors == 0 and (.tools | index($writer) != null) and (.tools | index("Read") != null)' <<<"$evidence" >/dev/null; then
+    CASE_DETAIL="initial workspace acceptance failed (status ${first_status}, $(jq -r '"calls=\(.calls) unrecovered_errors=\(.unrecoveredErrors) paired=\(.paired) readback=\(.workspaceReadback) protocol_error=\(.protocolError)"' <<<"$evidence"))"
     return 1
   fi
   before_hash="$(sha256sum "$workspace/workflow.sh" | cut -d ' ' -f1)"
@@ -793,7 +800,7 @@ case_workspace_multiturn() {
   fi
   set +e
   run_cli_resume "$AGENT_TIMEOUT" "$MODEL" "$workspace" "$second" "$session_id" \
-    '增加5倍代码量。Read workflow.sh first, then expand the same script with useful argument handling and helper functions. Preserve default MULTITURN_OK and --help. Use only file tools, do not execute commands. Finish with MULTITURN_EDITED_OK.' \
+    '增加5倍代码量。Read workflow.sh first, then expand the same script with useful argument handling and helper functions. Preserve default MULTITURN_OK and --help. Read the edited workflow.sh again before finishing; do not read the directory. Use only available file tools, do not execute commands. Finish with MULTITURN_EDITED_OK.' \
     --restricted --tools 'Read,Write,Edit' --allowedTools 'Read,Write,Edit' --permission-mode acceptEdits
   second_status=$?
   set -e
@@ -815,8 +822,8 @@ case_workspace_multiturn() {
     (( $(wc -l < "$workspace/workflow.sh") <= before_lines )) ||
     ! bash -n "$workspace/workflow.sh" || ! rg -q 'MULTITURN_OK' "$workspace/workflow.sh" ||
     ! assert_client_result "$second" MULTITURN_EDITED_OK ||
-    ! jq -e '(.protocolError | not) and .workspaceEdit and .unrecoveredErrors == 0' <<<"$evidence" >/dev/null; then
-    CASE_DETAIL="resumed turn did not prove a valid file change or left an unrecovered tool error"
+    ! jq -e '.terminalSuccess and (.protocolError | not) and .workspaceEdit and .workspaceReadback and .workspaceReadBeforeEdit and .unrecoveredErrors == 0' <<<"$evidence" >/dev/null; then
+    CASE_DETAIL="resumed workspace acceptance failed ($(jq -r '"unrecovered_errors=\(.unrecoveredErrors) read_before_edit=\(.workspaceReadBeforeEdit) readback=\(.workspaceReadback)"' <<<"$evidence"); disk change and syntax must also pass)"
     return 1
   fi
   CASE_DETAIL="resumed edit verified on disk (${second_tools} paired calls, ${second_errors} recovered tool errors)"

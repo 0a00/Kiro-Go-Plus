@@ -90,6 +90,16 @@ a recoverable error counts as recovered only after a successful retry of the
 same tool on the same file. Unrecovered errors, unchanged files, protocol errors
 and budget-exhausted termination fail the case.
 
+`workspace-multiturn` probes actual Read/Write/Edit capabilities before its
+creation turn, prefers Write when available, and explicitly uses empty-old-string
+Edit creation otherwise. It identifies the file target rather than asking Read
+to inspect a directory. Both creation and resumed editing require a successful
+Read after the last successful mutation; resume also requires a successful Read
+before editing. Readback must include the fixture marker. Tool errors are still
+reported and unrecovered errors fail; unsupported optional capabilities SKIP,
+while failed authentication is FAIL. This refines a test task, not production
+tool definitions or user prompts. Prior unassisted results remain separate.
+
 Native WebSearch runs without `--bare`, which sets `CLAUDE_CODE_SIMPLE=1` and can
 hide that capability. The test uses a disposable `CLAUDE_CONFIG_DIR`, no settings
 sources, explicit tool permissions and an empty strict MCP configuration. It

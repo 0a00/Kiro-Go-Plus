@@ -15,6 +15,8 @@ def same_target($a; $b):
    if $target != null then
      $target == ($b.input.file_path // $b.input.path // null)
    else $a.input == $b.input end);
+def workspace_file:
+  (.input.file_path // "") | . == "workflow.sh" or endswith("/workflow.sh");
 
 . as $events | calls as $calls | replies as $replies |
 ([$events[] | select(.type == "result")] | last) as $terminal |
@@ -27,6 +29,13 @@ def same_target($a; $b):
        select(.tool_use_id == $retry.id and .is_error != true and .position > $retry.position)
      ] | length) == 0)] as $unrecovered |
 ([$events[] | select(.type == "system" and .subtype == "init") | .tools // []] | first // []) as $tools |
+[$calls[] | select((.name == "Write" or .name == "Edit") and workspace_file) | . as $call |
+  $replies[] | select(.tool_use_id == $call.id and .is_error != true and .position > $call.position) |
+  {file: $call.input.file_path, position: $call.position, resultPosition: .position}] as $workspaceWrites |
+($workspaceWrites | last) as $lastWorkspaceWrite |
+[$calls[] | select(.name == "Read" and workspace_file) | . as $call |
+  $replies[] | select(.tool_use_id == $call.id and .is_error != true and .position > $call.position) |
+  {file: $call.input.file_path, position: $call.position, resultPosition: .position, text: (.content | content_text)}] as $workspaceReads |
 {
   initialized: any($events[]; .type == "system" and .subtype == "init"),
   tools: $tools,
@@ -67,6 +76,11 @@ def same_target($a; $b):
     (.name == "Edit" or .name == "Write") and
     (.input.file_path // "" | . == "workflow.sh" or endswith("/workflow.sh")) and
     any($replies[]; .tool_use_id == $edit.id and .is_error != true)),
+  workspaceReadback: ($lastWorkspaceWrite != null and any($workspaceReads[];
+    .file == $lastWorkspaceWrite.file and .position > $lastWorkspaceWrite.resultPosition and
+    (.text | contains("MULTITURN_OK")))),
+  workspaceReadBeforeEdit: ($lastWorkspaceWrite != null and any($workspaceReads[];
+    .file == $lastWorkspaceWrite.file and .resultPosition < $lastWorkspaceWrite.position)),
   searched: any($calls[]; . as $search |
     .name == "WebSearch" and
     any($replies[]; .tool_use_id == $search.id and .is_error != true and

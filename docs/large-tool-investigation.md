@@ -152,3 +152,39 @@ fixture can meet the original limits, not a guarantee of model compliance or
 proof of a runtime fix. The new runtime error wording was covered with local
 upstream fault fixtures, not deployed to production in that run. The previously
 failing race shuffle seed 1790944726468863253 passed without skipping tests.
+
+## Capability Aware Multi Turn Verification
+
+The recurring initial workspace failure used a nonempty `old_string` to create
+a nonexistent file, followed by Read on the directory. The tool returned the
+appropriate missing-file and EISDIR errors; the later Edit creation succeeded.
+These errors are not evidence of a proxy disconnection. The original test also
+skipped the capability preflight already present in the large-file cases.
+
+The refined test now checks the exposed tools, specifies Write or empty-string
+Edit creation, and requires file readback after both turns as well as a pre-edit
+Read on resume. Authentication failures are not capability skips, and directory
+reads, unpaired calls, missing readbacks or unrecovered mutations still fail.
+No proxy tool rewriting, global instruction changes or relaxed error acceptance
+were added. The existing growth/syntax test still does not prove fivefold code
+growth or semantic application behavior.
+
+Local upstream fault regressions exercise delayed 64 KiB and 256 KiB tool tails
+after a 90-byte prefix in live and balanced modes. Complete JSON must arrive
+unchanged exactly once; EOF must report failure and never complete an unfinished
+tool. These simulations verify local transport integrity, not live-provider
+generation capacity or a cure for the previously observed upstream stalls.
+
+The comparison heads were checked again and remain unchanged from the 1.2.93
+review. No reusable capability-aware CLI acceptance fix or proven upstream
+large-generation fix was found. No code was ported; runtime behavior and version
+remain 1.2.93. Updating these tests needs no production container rebuild.
+
+Three consecutive live runs against unchanged production 1.2.93 with Claude Code
+2.1.286 passed the refined multi-turn case. All used Edit then Read for creation,
+and Read/Edit/Read on resume, with no tool errors or synthetic continuations.
+Creation took 21.9-28.1 seconds and resumed editing 47.7-54.5 seconds. These
+assisted task prompts differ from the original failure case: they demonstrate
+the corrected test workflow, not a guarantee of autonomous model tool selection
+for arbitrary user requests. No additional live large-tool trial was run in this
+test-only change; the previously recorded production failures remain unresolved.

@@ -117,7 +117,7 @@ const last = args.at(-1);
 if (args.at(-2)!=='--') process.exit(44);
 if (last.includes('CLIENT_CAPABILITY_PROBE_OK')) {
   if (!args.includes('--restricted')) process.exit(48);
-  emit({type:'system',subtype:'init',tools:mode==='capability-missing'?['Read']:['Read','Edit']});
+  emit({type:'system',subtype:'init',tools:mode==='capability-missing'?['Read']:mode==='multi-write'?['Read','Write']:['Read','Edit']});
   emit({type:'result',subtype:mode==='capability-auth'?'error_during_execution':'success',is_error:mode==='capability-auth',result:'CLIENT_CAPABILITY_PROBE_OK'});
   if(mode==='capability-auth') process.exit(1);
 } else if (last.includes('large-stream.txt')) {
@@ -175,17 +175,23 @@ if (last.includes('CLIENT_CAPABILITY_PROBE_OK')) {
   emit({type:'result',subtype:mode==='long-budget'?'error_max_budget_usd':'success',is_error:mode==='long-budget',result:'LONG_TOOL_STRESS_OK'});
 } else if (last.includes('workflow.sh')) {
   const file=path.join(process.cwd(),'workflow.sh');
-  emit({type:'system',subtype:'init',tools:['Read','Edit'],session_id:'fixture-session'});
+  emit({type:'system',subtype:'init',tools:mode==='multi-write'?['Read','Write','Edit']:['Read','Edit'],session_id:'fixture-session'});
   if (!args.includes('--resume')) {
+    const writer=mode==='multi-write'?'Write':'Edit';
+    if(!last.includes('Use '+writer+' to create')||!last.includes('Read is for files, not directories')||
+       (writer==='Edit'&&!last.includes('old_string=""')))process.exit(51);
     fs.writeFileSync(file,'#!/bin/sh\\necho MULTITURN_OK\\n');
-    call('create','Edit',file);reply('create','created');
+    call('create',writer,file);reply('create','created');
+    if(mode!=='multi-first-no-read'){call('verify','Read',file);reply('verify',fs.readFileSync(file,'utf8'));}
     emit({type:'result',subtype:'success',is_error:false,result:'MULTITURN_CREATED_OK',session_id:'fixture-session'});
   } else {
     call('bad','Edit',file);
     emit({type:'user',message:{content:[{type:'tool_result',tool_use_id:'bad',content:'Read first',is_error:true}]}});
-    call('read','Read',file);reply('read','script');
+    if(mode!=='multi-no-initial-read'){call('read','Read',file);reply('read','script');}
+    if(mode==='multi-directory-read'){call('dir','Read',process.cwd());emit({type:'user',message:{content:[{type:'tool_result',tool_use_id:'dir',content:'EISDIR',is_error:true}]}});}
     call('retry','Edit',mode==='multi-unresolved'?file+'.other':file);reply('retry','edited');
     if(mode!=='multi-unchanged')fs.appendFileSync(file,'# expanded\\n# more content\\n');
+    if(mode!=='multi-no-readback'){call('verify','Read',file);reply('verify',fs.readFileSync(file,'utf8'));}
     emit({type:'result',subtype:mode==='multi-budget'?'error_max_budget_usd':'success',is_error:mode==='multi-budget',result:'MULTITURN_EDITED_OK'});
   }
 } else if (last.includes('WebSearch')) {
@@ -251,11 +257,40 @@ test('resumed workflow requires disk changes, recovered errors and successful te
   assert.equal(recovered.status, 0, recovered.stdout + recovered.stderr);
   assert.match(recovered.stdout, /workspace-multiturn\s+PASS/);
   assert.match(recovered.stdout, /1 recovered tool errors/);
-  for (const mode of ['multi-unresolved', 'multi-unchanged', 'multi-budget']) {
+  for (const mode of ['multi-unresolved', 'multi-unchanged', 'multi-budget','multi-first-no-read','multi-no-readback','multi-no-initial-read','multi-directory-read']) {
     const failed = runFixture(mode, 'workspace-multiturn');
     assert.equal(failed.status, 1, failed.stdout + failed.stderr);
     assert.match(failed.stdout, /workspace-multiturn\s+FAIL/);
   }
+});
+
+test('multi-turn preflight handles Write availability and cannot hide auth errors', () => {
+  const write=runFixture('multi-write','workspace-multiturn');
+  assert.equal(write.status,0,write.stdout+write.stderr);
+  const missing=runFixture('capability-missing','workspace-multiturn');
+  assert.equal(missing.status,0,missing.stdout+missing.stderr);
+  assert.match(missing.stdout,/workspace-multiturn\s+SKIP/);
+  const auth=runFixture('capability-auth','workspace-multiturn');
+  assert.equal(auth.status,1,auth.stdout+auth.stderr);
+  assert.doesNotMatch(auth.stdout,/workspace-multiturn\s+SKIP/);
+});
+
+test('workspace readback must follow the last successful mutation result on the same file', () => {
+  const records=[init(),call('r0','Read'),reply('r0','MULTITURN_OK'),call('w','Edit'),reply('w'),call('r1','Read'),reply('r1','MULTITURN_OK'),done()];
+  assert.equal(evidence(records).workspaceReadBeforeEdit,true);
+  assert.equal(evidence(records).workspaceReadback,true);
+  assert.equal(evidence(records.slice(0,5)).workspaceReadback,false);
+  const wrong=structuredClone(records);
+  wrong[5].message.content[0].input.file_path='/workspace/elsewhere/workflow.sh';
+  assert.equal(evidence(wrong).workspaceReadback,false);
+  const late=[...records.slice(0,-1),call('w2','Edit'),reply('w2'),done()];
+  assert.equal(evidence(late).workspaceReadback,false);
+  const early=structuredClone(records);
+  [early[4],early[5]]=[early[5],early[4]];
+  assert.equal(evidence(early).workspaceReadback,false);
+  const failed=structuredClone(records);
+  failed[6].message.content[0].is_error=true;
+  assert.equal(evidence(failed).workspaceReadback,false);
 });
 
 test('large-file preflight skips unavailable tools but does not hide authentication failures', () => {
