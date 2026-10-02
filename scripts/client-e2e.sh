@@ -889,6 +889,15 @@ probe_file_tools() {
   fi
 }
 
+file_evidence_failure_detail() {
+  jq -r '
+    (.reason // "invalid-evidence") +
+    (if .metrics then " (bytes=" + (.metrics.actualBytes|tostring) +
+      ", allowed=" + (.metrics.minBytes|tostring) + ".." + (.metrics.maxBytes|tostring) +
+      ", over=" + (.metrics.overBytes|tostring) + ", under=" + (.metrics.underBytes|tostring) +
+      (if .metrics.chunkIndex then ", chunk=" + (.metrics.chunkIndex|tostring) else "" end) + ")" else "" end)'
+}
+
 case_workspace_large_write_progress() {
   command -v node >/dev/null 2>&1 || { CASE_DETAIL="Node.js is required for partial-message timing"; return 1; }
   local workspace="$TMP_DIR/large-write" output="$TMP_DIR/workspace-large-write-progress.jsonl"
@@ -916,7 +925,7 @@ case_workspace_large_write_progress() {
     return 1
   fi
   if ! file_evidence="$(node "$SCRIPT_DIR/client-file-evidence.js" "$output" "$workspace" large "$FILE_WRITER")"; then
-    CASE_DETAIL="large file evidence failed: $(jq -r '.reason // "invalid-evidence"' <<<"$file_evidence")"
+    CASE_DETAIL="large file evidence failed: $(file_evidence_failure_detail <<<"$file_evidence")"
     return 1
   fi
   if ! jq -e --arg writer "$FILE_WRITER" '[.tools[] | select(.name == $writer and .bytes >= 40960 and .stopMs != null and .jsonValid == true)] | length == 1' "$timing" >/dev/null; then
@@ -952,7 +961,7 @@ case_workspace_chunked_edit_progress() {
   printf '%s\n' 'CHUNK_01' 'CHUNK_02' 'CHUNK_03' 'CHUNK_04' 'CHUNK_05' 'CHUNK_06' 'CHUNK_07' 'CHUNK_08' 'CHUNK_09' 'CHUNK_10' >"$workspace/chunked-stream.txt"
   set +e
   CLI_TIMING_REPORT="$timing" run_cli_session "$AGENT_TIMEOUT" "$MODEL" "$workspace" "$output" \
-    'Read chunked-stream.txt. Replace each CHUNK_01 through CHUNK_10 placeholder using a separate Edit call. Each replacement must contain exactly 42 lines about ordinary software testing, each line at least 105 printable ASCII characters. Number lines globally with prefixes 0001: through 0420: followed by a space: CHUNK_01 covers 0001-0042, CHUNK_02 covers 0043-0084, and so on. Use 10 sequential Edit calls, each with only one placeholder as old_string and 4-6 KiB of new_string, without a trailing newline in new_string. Target 45-60 KiB total. Do not use Write, Bash, shell scripts, loops or generated shortcuts. Read all final lines, with additional Read calls if truncated, to verify the content and removed placeholders. Finish with CHUNKED_EDIT_PROGRESS_OK.' \
+    'Read chunked-stream.txt. Replace each CHUNK_01 through CHUNK_10 placeholder using a separate Edit call. Each replacement must contain exactly 42 lines about ordinary software testing, each line at least 105 printable ASCII characters. Aim for 110-125 characters per line INCLUDING the number prefix, leaving size headroom. Number lines globally with prefixes 0001: through 0420: followed by a space: CHUNK_01 covers 0001-0042, CHUNK_02 covers 0043-0084, and so on. Use 10 sequential Edit calls, each with only one placeholder as old_string and 4-6 KiB (4096-6144 bytes) of new_string, without a trailing newline in new_string. With the suggested line length, 42 lines use about 4661-5291 bytes including newlines; aim near 5 KiB, not the upper limit. Target 45-60 KiB (46080-61440 bytes) total. Do not use Write, Bash, shell scripts, loops or generated shortcuts. Read all final lines, with additional Read calls if truncated, to verify the content and removed placeholders. Finish with CHUNKED_EDIT_PROGRESS_OK.' \
     --restricted --tools 'Read,Edit' --allowedTools 'Read,Edit' --permission-mode acceptEdits
   status=$?
   set -e
@@ -966,7 +975,7 @@ case_workspace_chunked_edit_progress() {
     return 1
   fi
   if ! file_evidence="$(node "$SCRIPT_DIR/client-file-evidence.js" "$output" "$workspace" chunked Edit)"; then
-    CASE_DETAIL="chunked file evidence failed: $(jq -r '.reason // "invalid-evidence"' <<<"$file_evidence")"
+    CASE_DETAIL="chunked file evidence failed: $(file_evidence_failure_detail <<<"$file_evidence")"
     return 1
   fi
   CASE_DETAIL="10 bounded Edit calls completed and placeholders removed (bytes $size); see chunked-edit-timing.json for progress"

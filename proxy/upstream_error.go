@@ -510,13 +510,25 @@ func newToolAssemblyTimeoutError(endpoint, toolName string, argumentBytes int, t
 	if argumentBytes > 0 {
 		message += fmt.Sprintf(" after %d argument bytes", argumentBytes)
 	}
+	message = withToolFailureRecoveryAdvice(message, toolName)
 	return &UpstreamError{
 		Kind:                 UpstreamErrorToolAssemblyTimeout,
 		Endpoint:             endpoint,
 		Message:              message,
 		RetryAcrossEndpoints: true,
 		RetryAcrossAccounts:  true,
+		ToolName:             toolName,
+		ArgumentBytes:        argumentBytes,
 	}
+}
+
+// Advice belongs to the actual failure, not a synthetic tool result or a new
+// system instruction. Do not imply that the provider has a known size limit.
+func withToolFailureRecoveryAdvice(message, toolName string) string {
+	if isHighRiskToolName(toolName) {
+		message += "; the tool call did not complete. For file changes, retry with smaller complete edits instead of repeating the same large payload; preserve any required atomic operation"
+	}
+	return message
 }
 
 func newActionableOutputTimeoutError(endpoint string, timeout time.Duration) *UpstreamError {
@@ -551,6 +563,7 @@ func newToolOutputTruncatedError(endpoint string, streamErr *EventStreamError) *
 	if fragmentCount > 0 {
 		message += fmt.Sprintf(" across %d fragments", fragmentCount)
 	}
+	message = withToolFailureRecoveryAdvice(message, toolName)
 	return &UpstreamError{
 		Kind:                 UpstreamErrorToolOutputTruncated,
 		Endpoint:             endpoint,

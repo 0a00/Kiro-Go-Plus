@@ -6740,6 +6740,13 @@ func (h *Handler) apiRunAutoRefresh(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON"})
 		return
 	}
+	// Reject unsupported modes before touching shared configuration or the run
+	// lock. Invalid input must not depend on initialization by a prior request.
+	if req.Mode != "due" && req.Mode != "failed" {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "mode must be due or failed"})
+		return
+	}
 	if !h.autoRefreshRunning.CompareAndSwap(false, true) {
 		w.WriteHeader(http.StatusConflict)
 		_ = json.NewEncoder(w).Encode(map[string]string{"error": "auto refresh is already running"})
@@ -6765,11 +6772,6 @@ func (h *Handler) apiRunAutoRefresh(w http.ResponseWriter, r *http.Request) {
 		if autoRefresh.MaxAccountsPerRun > 0 && len(selected) > autoRefresh.MaxAccountsPerRun {
 			selected = selected[:autoRefresh.MaxAccountsPerRun]
 		}
-	default:
-		h.autoRefreshRunning.Store(false)
-		w.WriteHeader(http.StatusBadRequest)
-		_ = json.NewEncoder(w).Encode(map[string]string{"error": "mode must be due or failed"})
-		return
 	}
 
 	if len(selected) == 0 {

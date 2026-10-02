@@ -108,3 +108,47 @@ Regression tests cover request-scoped binding removal, concurrent newer bindings
 unrelated errors, no replay of delivered text, argument redaction/gap retention,
 probe bounds, transport/content separation, and CLI recovery wording. Run
 `bash scripts/dev-test.sh full`. Tests cannot promise upstream availability.
+
+## Follow Up in 1.2.93
+
+The 1.2.92 production run again stalled on a forced single 420-line Edit across
+four accounts. Chunked transport completed all ten edits, but generated 61763
+bytes, 323 above the 60 KiB fixture cap; four chunks also exceeded 6 KiB. The
+data was not lost in transport. The acceptance failure is retained.
+
+File evidence now distinguishes `file-size`, `chunk-size`, `trace-size` and
+`input-type`, with numeric actual/min/max/over/under byte counts and chunk index
+when applicable. It never includes file paths or content. Read limits, strict
+size limits and exact content/readback validation are unchanged. The chunked
+fixture now suggests 110-125 ASCII characters per line including numbering,
+giving margin below the unchanged 6 KiB chunk cap; this is a prompt refinement,
+not a relaxation of acceptance. Pre/post timings use different prompt wording
+and should not be treated as a controlled performance comparison.
+
+Incomplete file-changing tool errors include a qualified suggestion to use
+smaller complete edits while preserving required atomic operations. Error kinds,
+HTTP mapping, timeout configuration, retry limits and JSON validation are
+unchanged. This is an actual error message, not a fabricated tool result,
+completion signal, forced split, or new injected system prompt. Clients may
+still retry automatically; the advice is not proven to make them adapt, and the
+upstream large-generation limitation remains unresolved.
+
+An independent auto-refresh regression also exposed invalid input accessing
+uninitialized configuration. Invalid modes are now rejected before configuration
+access and before acquiring the run lock. Malformed/invalid requests return 400
+without releasing another running job's lock; valid concurrent requests still
+return 409. No configuration migration is required. Code rollback restores the
+prior behavior without changing stored settings.
+
+The 2026-10-02 reference review found no direct upstream fix for these defects.
+AIClient2API `9a29d60` adds top-level reasoning-effort forwarding, outside this
+scope; the other comparison heads match the review above. Rust's existing chunk
+guidance and Go's no-replay boundary remain references, not newly copied code.
+
+One live Claude Code 2.1.286 rerun against unchanged production 1.2.92 passed
+the revised chunked fixture: 420 lines, 58465 bytes, ten chunks of 5761-5931
+bytes, complete readback, 317.064 seconds. This is evidence that the refined
+fixture can meet the original limits, not a guarantee of model compliance or
+proof of a runtime fix. The new runtime error wording was covered with local
+upstream fault fixtures, not deployed to production in that run. The previously
+failing race shuffle seed 1790944726468863253 passed without skipping tests.

@@ -859,6 +859,34 @@ func TestApiRunAutoRefreshInvalidModeReleasesRunLock(t *testing.T) {
 	}
 }
 
+func TestApiRunAutoRefreshRejectsInvalidInputWithoutChangingRunLock(t *testing.T) {
+	for _, body := range []string{`{"mode":"all"}`, `{"mode":""}`, `{}`, `null`, `{"mode":"DUE"}`, `{"mode":1}`, `{`} {
+		for _, running := range []bool{false, true} {
+			h := &Handler{}
+			h.autoRefreshRunning.Store(running)
+			recorder := httptest.NewRecorder()
+			h.apiRunAutoRefresh(recorder, httptest.NewRequest(http.MethodPost, "/auto-refresh/run", strings.NewReader(body)))
+			if recorder.Code != http.StatusBadRequest || h.autoRefreshRunning.Load() != running {
+				t.Fatalf("body=%q running=%v: status=%d lock=%v", body, running, recorder.Code, h.autoRefreshRunning.Load())
+			}
+		}
+	}
+}
+
+func TestApiRunAutoRefreshValidEmptyPoolReleasesRunLock(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatal(err)
+	}
+	for _, mode := range []string{"due", "failed"} {
+		h := &Handler{}
+		recorder := httptest.NewRecorder()
+		h.apiRunAutoRefresh(recorder, httptest.NewRequest(http.MethodPost, "/auto-refresh/run", strings.NewReader(`{"mode":"`+mode+`"}`)))
+		if recorder.Code != http.StatusOK || h.autoRefreshRunning.Load() {
+			t.Fatalf("mode=%s status=%d locked=%v", mode, recorder.Code, h.autoRefreshRunning.Load())
+		}
+	}
+}
+
 func TestRebuildCachedModelsDropsRemovedModels(t *testing.T) {
 	h := &Handler{modelsByAccount: map[string][]ModelInfo{
 		"a": {{ModelId: "model-a"}, {ModelId: "model-shared"}},

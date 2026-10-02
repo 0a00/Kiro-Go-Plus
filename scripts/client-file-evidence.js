@@ -1,8 +1,24 @@
 const fs = require('node:fs');
 const path = require('node:path');
 
-function requireEvidence(condition, code) {
-  if (!condition) throw new Error(code);
+const MIN_FILE_BYTES = 45 * 1024;
+const MAX_FILE_BYTES = 60 * 1024;
+const MIN_CHUNK_BYTES = 4 * 1024;
+const MAX_CHUNK_BYTES = 6 * 1024;
+
+class EvidenceError extends Error {
+  constructor(code, metrics) {
+    super(code);
+    this.metrics = metrics;
+  }
+}
+
+function requireEvidence(condition, code, metrics) {
+  if (!condition) throw new EvidenceError(code, metrics);
+}
+
+function sizeMetrics(actualBytes, minBytes, maxBytes) {
+  return { actualBytes, minBytes, maxBytes, overBytes: Math.max(0, actualBytes - maxBytes), underBytes: Math.max(0, minBytes - actualBytes) };
 }
 
 function lines(text) {
@@ -34,7 +50,7 @@ function validateFileEvidence(records, content, { workspace, scenario, writer = 
   const chunked = scenario === 'chunked';
   const target = path.resolve(workspace, chunked ? 'chunked-stream.txt' : 'large-stream.txt');
   const bytes = Buffer.byteLength(content);
-  requireEvidence(bytes >= 45 * 1024 && bytes <= 60 * 1024, 'file-size');
+  requireEvidence(bytes >= MIN_FILE_BYTES && bytes <= MAX_FILE_BYTES, 'file-size', sizeMetrics(bytes, MIN_FILE_BYTES, MAX_FILE_BYTES));
   const rows = numberedLines(content, 420);
   const calls = [], replies = new Map();
   let position = 0;
@@ -76,7 +92,9 @@ function validateFileEvidence(records, content, { workspace, scenario, writer = 
         !placeholders.has(input.old_string), 'chunk-placeholder');
       requireEvidence(typeof input.new_string === 'string', 'mutation-content');
       const size = Buffer.byteLength(input.new_string);
-      requireEvidence(size >= 4 * 1024 && size <= 6 * 1024, 'chunk-size');
+      requireEvidence(size >= MIN_CHUNK_BYTES && size <= MAX_CHUNK_BYTES, 'chunk-size', {
+        ...sizeMetrics(size, MIN_CHUNK_BYTES, MAX_CHUNK_BYTES), chunkIndex: Number(input.old_string.slice(-2)),
+      });
       numberedLines(input.new_string, 42, (Number(input.old_string.slice(-2)) - 1) * 42 + 1);
       placeholders.add(input.old_string);
       // Callback replacement keeps literal $&, $` and $' in generated text.
@@ -106,25 +124,26 @@ function validateFileEvidence(records, content, { workspace, scenario, writer = 
   return { bytes, lines: rows.length, mutations: mutations.length, verifiedLines: observed.size };
 }
 
-function readRegular(file, maxBytes) {
+function readRegular(file, maxBytes, sizeCode, minBytes = 0) {
   const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
   try {
     const stat = fs.fstatSync(fd);
-    requireEvidence(stat.isFile() && stat.size <= maxBytes, 'input-size-or-type');
+    requireEvidence(stat.isFile(), 'input-type');
+    requireEvidence(stat.size <= maxBytes, sizeCode, sizeMetrics(stat.size, minBytes, maxBytes));
     const buffer = Buffer.alloc(maxBytes + 1);
     let size = 0, n;
     while (size <= maxBytes && (n = fs.readSync(fd, buffer, size, buffer.length - size, null)) > 0) size += n;
-    requireEvidence(size <= maxBytes, 'input-size-or-type');
+    requireEvidence(size <= maxBytes, sizeCode, sizeMetrics(size, minBytes, maxBytes));
     return buffer.subarray(0, size).toString('utf8');
   } finally { fs.closeSync(fd); }
 }
 
 function checkFileEvidence(trace, workspace, scenario, writer) {
   requireEvidence(scenario === 'large' || scenario === 'chunked', 'scenario');
-  const records = readRegular(trace, 32 * 1024 * 1024).split('\n').filter(row => row.trim()).map(row => JSON.parse(row));
+  const records = readRegular(trace, 32 * 1024 * 1024, 'trace-size').split('\n').filter(row => row.trim()).map(row => JSON.parse(row));
   requireEvidence(records.every(record => record && typeof record === 'object' && !Array.isArray(record)), 'invalid-record');
   const filename = scenario === 'large' ? 'large-stream.txt' : 'chunked-stream.txt';
-  return validateFileEvidence(records, readRegular(path.join(workspace, filename), 60 * 1024), { workspace, scenario, writer });
+  return validateFileEvidence(records, readRegular(path.join(workspace, filename), MAX_FILE_BYTES, 'file-size', MIN_FILE_BYTES), { workspace, scenario, writer });
 }
 
 if (require.main === module) {
@@ -133,8 +152,9 @@ if (require.main === module) {
     process.stdout.write(JSON.stringify({ ok: true, ...checkFileEvidence(trace, workspace, scenario, writer) }) + '\n');
   } catch (error) {
     // Never include parser errors, file paths, tool arguments or file content.
-    const reason = /^[a-z]+(?:-[a-z]+)*$/.test(error.message) ? error.message : 'invalid-input';
-    process.stdout.write(JSON.stringify({ ok: false, reason }) + '\n');
+    const reason = error instanceof EvidenceError ? error.message : 'invalid-input';
+    const metrics = error instanceof EvidenceError ? error.metrics : undefined;
+    process.stdout.write(JSON.stringify({ ok: false, reason, metrics }) + '\n');
     process.exitCode = 1;
   }
 }

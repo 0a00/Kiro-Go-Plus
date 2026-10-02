@@ -149,7 +149,7 @@ if (last.includes('CLIENT_CAPABILITY_PROBE_OK')) {
     call('edit-'+i,'Edit',file,input);reply('edit-'+i,'edited');
     content=content.replace(input.old_string,()=>input.new_string);
   }
-  fs.writeFileSync(file,content+(mode==='chunks-placeholder'?'CHUNK_10':''));
+  fs.writeFileSync(file,mode==='chunks-total-oversized'?'x'.repeat(61763):content+(mode==='chunks-placeholder'?'CHUNK_10':''));
   call('read-after','Read',file);reply('read-after',mode==='chunks-fake-read'?'verified':content);
   emit({type:'result',subtype:'success',is_error:false,result:'CHUNKED_EDIT_PROGRESS_OK'});
 } else if (last.includes('claude-file-e2e.txt')) {
@@ -287,6 +287,9 @@ test('chunked workflow requires ten bounded mutations and no remaining placehold
     const bad=runFixture(mode,'workspace-chunked-edit-progress');
     assert.equal(bad.status,1,bad.stdout+bad.stderr);
   }
+  const oversized=runFixture('chunks-total-oversized','workspace-chunked-edit-progress');
+  assert.equal(oversized.status,1,oversized.stdout+oversized.stderr);
+  assert.match(oversized.stdout,/FAIL.*file-size \(bytes=61763, allowed=46080\.\.61440, over=323/);
 });
 
 test('long workflow accepts recovered errors but requires complete evidence and files', () => {

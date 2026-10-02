@@ -101,6 +101,9 @@ authentication and execution failures are never treated as capability skips.
 
 Offline assertion/launcher regressions: `node --test scripts/client-e2e.test.js`.
 File-evidence regressions: `node --test scripts/client-file-evidence.test.js`.
+Size failures retain FAIL and include numeric actual/allowed byte counts;
+`file-size` is distinct from `trace-size` or a non-regular input. The chunked
+fixture suggests a safe target below the size cap without changing its limits.
 These fake-client tests use no live credentials or network and run in the quick
 quality gate. Updating only the fixture validators requires no container restart;
 update the test checkout before rerunning. Runtime changes are documented separately.

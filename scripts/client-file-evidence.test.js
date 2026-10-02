@@ -148,12 +148,51 @@ test('CLI bounds inputs, rejects symlinks, and never prints private parse errors
     fs.unlinkSync(file);
     fs.writeFileSync(file, f.content);
     fs.truncateSync(trace, 33 * 1024 * 1024);
-    assert.throws(() => checkFileEvidence(trace, dir, 'large', 'Write'), /input-size-or-type/);
+    assert.throws(() => checkFileEvidence(trace, dir, 'large', 'Write'), /trace-size/);
     fs.writeFileSync(trace, '{private_fixture_text: invalid}');
     const result = spawnSync(process.execPath, [path.join(__dirname, 'client-file-evidence.js'), trace, dir, 'large', 'Write'], { encoding: 'utf8' });
     assert.equal(result.status, 1);
     assert.deepEqual(JSON.parse(result.stdout), { ok: false, reason: 'invalid-input' });
     assert.equal(result.stderr, '');
     assert.doesNotMatch(result.stdout, /private_fixture_text/);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('file and chunk size failures include bounded numeric evidence', () => {
+  const file = fixture();
+  file.content = 'x'.repeat(61440 + 323);
+  assert.throws(() => check(file), error => {
+    assert.equal(error.message, 'file-size');
+    assert.deepEqual(error.metrics, { actualBytes: 61763, minBytes: 46080, maxBytes: 61440, overBytes: 323, underBytes: 0 });
+    return true;
+  });
+  const chunk = fixture('chunked');
+  chunk.records[0].message.content[0].input.new_string = 'x'.repeat(6145);
+  assert.throws(() => check(chunk), error => {
+    assert.equal(error.message, 'chunk-size');
+    assert.deepEqual(error.metrics, { actualBytes: 6145, minBytes: 4096, maxBytes: 6144, overBytes: 1, underBytes: 0, chunkIndex: 1 });
+    return true;
+  });
+});
+
+test('CLI reports oversized output separately from oversized trace and non-file input', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kiro-file-size-evidence.'));
+  try {
+    const f = fixture();
+    const trace = path.join(dir, 'events.jsonl'), file = path.join(dir, 'large-stream.txt');
+    fs.writeFileSync(trace, f.records.map(r => JSON.stringify(r)).join('\n'));
+    fs.writeFileSync(file, 'x'.repeat(61440 + 323));
+    const result = spawnSync(process.execPath, [path.join(__dirname, 'client-file-evidence.js'), trace, dir, 'large', 'Write'], { encoding: 'utf8' });
+    assert.equal(result.status, 1);
+    const report = JSON.parse(result.stdout);
+    assert.equal(report.reason, 'file-size');
+    assert.equal(report.metrics.actualBytes, 61763);
+    assert.equal(report.metrics.overBytes, 323);
+    assert.equal(report.metrics.maxBytes, 61440);
+    assert.doesNotMatch(result.stdout, /kiro-file-size-evidence|events\.jsonl/);
+    assert.equal(result.stderr, '');
+    fs.unlinkSync(file);
+    fs.mkdirSync(file);
+    assert.throws(() => checkFileEvidence(trace, dir, 'large', 'Write'), /input-type/);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
