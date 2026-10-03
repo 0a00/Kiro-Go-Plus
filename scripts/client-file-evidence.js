@@ -42,13 +42,14 @@ function resultText(content) {
     .map(block => block.text).join('\n');
 }
 
-// Supplemental to client-e2e-evidence.jq: replay only the two fixed file-only
+// Supplemental to client-e2e-evidence.jq: replay only the fixed file-only
 // fixtures. This is not a general interpreter for model-generated commands.
 function validateFileEvidence(records, content, { workspace, scenario, writer = 'Write' }) {
-  requireEvidence(scenario === 'large' || scenario === 'chunked', 'scenario');
+  requireEvidence(['large', 'chunked', 'autonomous'].includes(scenario), 'scenario');
   requireEvidence(writer === 'Write' || writer === 'Edit', 'writer');
   const chunked = scenario === 'chunked';
-  const target = path.resolve(workspace, chunked ? 'chunked-stream.txt' : 'large-stream.txt');
+  const autonomous = scenario === 'autonomous';
+  const target = path.resolve(workspace, `${scenario === 'large' ? 'large' : scenario}-stream.txt`);
   const bytes = Buffer.byteLength(content);
   requireEvidence(bytes >= MIN_FILE_BYTES && bytes <= MAX_FILE_BYTES, 'file-size', sizeMetrics(bytes, MIN_FILE_BYTES, MAX_FILE_BYTES));
   const rows = numberedLines(content, 420);
@@ -66,7 +67,7 @@ function validateFileEvidence(records, content, { workspace, scenario, writer = 
       }
     }
   }
-  const allowed = new Set(['Read', chunked ? 'Edit' : writer]);
+  const allowed = new Set(autonomous ? ['Read', writer, 'Edit'] : ['Read', chunked ? 'Edit' : writer]);
   const ids = new Set();
   for (const call of calls) {
     requireEvidence(allowed.has(call.name), 'unexpected-tool');
@@ -80,14 +81,39 @@ function validateFileEvidence(records, content, { workspace, scenario, writer = 
   requireEvidence(ids.size === replies.size, 'orphan-result');
   const succeeded = calls.filter(call => replies.get(call.id).is_error !== true);
   const mutations = succeeded.filter(call => call.name !== 'Read');
-  requireEvidence(mutations.length === (chunked ? 10 : 1), 'mutation-count');
+  requireEvidence(autonomous ? mutations.length >= 1 && mutations.length <= 64 : mutations.length === (chunked ? 10 : 1), 'mutation-count');
   let replay = chunked ? Array.from({ length: 10 }, (_, i) => `CHUNK_${String(i + 1).padStart(2, '0')}\n`).join('') : '';
   let lastMutationResult = -1;
   const placeholders = new Set();
+  let fileExists = chunked;
+  let maxMutationBytes = 0;
   for (const call of mutations) {
     requireEvidence(call.position > lastMutationResult, 'mutation-order');
     const input = call.input;
-    if (chunked) {
+    if (autonomous) {
+      const value = call.name === 'Write' ? input.content : input.new_string;
+      requireEvidence(typeof value === 'string', 'mutation-content');
+      requireEvidence(Buffer.byteLength(value) <= 1024 * 1024, 'mutation-size');
+      maxMutationBytes = Math.max(maxMutationBytes, Buffer.byteLength(value));
+      if (call.name === 'Write') replay = value;
+      else {
+        requireEvidence(typeof input.old_string === 'string', 'edit-input');
+        requireEvidence(input.replace_all === undefined || typeof input.replace_all === 'boolean', 'edit-input');
+        if (input.old_string === '') {
+          requireEvidence(!fileExists, 'creation-input');
+          replay = value;
+        } else {
+          const count = replay.split(input.old_string).length - 1;
+          requireEvidence(count > 0 && (count === 1 || input.replace_all === true), 'edit-match');
+          const replacements = input.replace_all ? count : 1;
+          const nextBytes = Buffer.byteLength(replay) + replacements * (Buffer.byteLength(value) - Buffer.byteLength(input.old_string));
+          requireEvidence(nextBytes <= 1024 * 1024, 'replay-size');
+          replay = input.replace_all ? replay.split(input.old_string).join(value) : replay.replace(input.old_string, () => value);
+        }
+      }
+      fileExists = true;
+      requireEvidence(Buffer.byteLength(replay) <= 1024 * 1024, 'replay-size');
+    } else if (chunked) {
       requireEvidence(typeof input.old_string === 'string' && /^CHUNK_(0[1-9]|10)$/.test(input.old_string) &&
         !placeholders.has(input.old_string), 'chunk-placeholder');
       requireEvidence(typeof input.new_string === 'string', 'mutation-content');
@@ -121,7 +147,8 @@ function validateFileEvidence(records, content, { workspace, scenario, writer = 
   }
   requireEvidence(reads.length > 0, 'missing-final-read');
   requireEvidence(observed.size === expected.size, 'readback-content');
-  return { bytes, lines: rows.length, mutations: mutations.length, verifiedLines: observed.size };
+  return { bytes, lines: rows.length, mutations: mutations.length, verifiedLines: observed.size,
+    ...(autonomous ? { strategy: mutations.length === 1 ? 'single' : 'multiple', maxMutationBytes } : {}) };
 }
 
 function readRegular(file, maxBytes, sizeCode, minBytes = 0) {
@@ -139,10 +166,10 @@ function readRegular(file, maxBytes, sizeCode, minBytes = 0) {
 }
 
 function checkFileEvidence(trace, workspace, scenario, writer) {
-  requireEvidence(scenario === 'large' || scenario === 'chunked', 'scenario');
+  requireEvidence(['large', 'chunked', 'autonomous'].includes(scenario), 'scenario');
   const records = readRegular(trace, 32 * 1024 * 1024, 'trace-size').split('\n').filter(row => row.trim()).map(row => JSON.parse(row));
   requireEvidence(records.every(record => record && typeof record === 'object' && !Array.isArray(record)), 'invalid-record');
-  const filename = scenario === 'large' ? 'large-stream.txt' : 'chunked-stream.txt';
+  const filename = `${scenario}-stream.txt`;
   return validateFileEvidence(records, readRegular(path.join(workspace, filename), MAX_FILE_BYTES, 'file-size', MIN_FILE_BYTES), { workspace, scenario, writer });
 }
 

@@ -144,6 +144,38 @@ Existing protocol, recovery and timing assertions remain in place. These checks
 prove fixture integrity, not semantic software quality. The resumed shell case
 still checks growth and syntax, not a fivefold expansion or runtime behavior.
 
+`workspace-autonomous-large-file` is a separate case included in `all`. It uses
+the same final 420-line, 45-60 KiB numbered file requirement without specifying
+one mutation, a chunk size, a count or preseeded placeholders. The model chooses
+Write/Edit operations; file tools only, capability probing, exact replay of every
+successful mutation and full final Read coverage remain mandatory. Single-call
+success is accepted and reported as `single`, not misreported as successful
+chunking. Multiple edits report the mutation count and maximum mutation bytes.
+It is a synthetic file-tool task, not proof of unrestricted coding quality.
+Existing forced-single and forced-chunked cases and thresholds are unchanged.
+
+```bash
+bash scripts/client-e2e.sh --scenarios workspace-autonomous-large-file \
+  --model claude-sonnet-4-5 --agent-timeout 15m --agent-max-budget-usd 3.00 \
+  --artifact-dir /tmp/kiro-autonomous-test
+```
+
+From 1.2.95 the timing collector reports `argumentState` and `interrupted`.
+Absent deltas leave `jsonValid: null`, even if the CLI closes a block or gives
+its initial tool start `input: {}`. Explicit `{}` deltas are valid JSON, but this
+alone proves neither schema validity nor execution. Error events, failed results,
+unterminated blocks and synthetic message ends without a stop reason are retained
+as interrupted evidence. Acceptance still requires complete paired tools and
+file/readback results; no empty-argument MCP runtime behavior is changed.
+
+Admin request-detail attempts add optional `terminationCause`: EOF, unexpected
+EOF, reset, broken pipe, transport timeout, context cancellation/deadline and
+the configured watchdog categories. Unknown causes stay `unknown`; successful
+attempts omit the field. These are allowlisted classifications, not raw error
+strings or network peer addresses. EOF does not identify whether a provider,
+proxy or intermediate device closed the connection. Existing details without
+the field remain readable; rollback needs no data/configuration migration.
+
 For ordinary development tasks, see the optional
 [Claude Code workflow guide](claude-code-workflow.md). It prefers file tools for
 ordinary edits while preserving Bash for appropriate work. It is never injected

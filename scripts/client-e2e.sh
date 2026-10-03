@@ -29,7 +29,7 @@ Options:
 Scenario IDs:
   text-stream, skill-mcp, mcp-zero-arg, mcp-multi-call, file-tools,
   thinking, long-stream, cancel-recover, concurrent-clients,
-  workspace-multiturn, workspace-long-tools, workspace-large-write-progress, workspace-chunked-edit-progress, workspace-repo-loop,
+  workspace-multiturn, workspace-long-tools, workspace-large-write-progress, workspace-chunked-edit-progress, workspace-autonomous-large-file, workspace-repo-loop,
   workspace-error-recovery, workspace-parallel-tools, permission-plan,
   structured-output, mcp-large-result, mcp-error-recovery, web-search,
   workspace-image
@@ -238,7 +238,7 @@ if [[ "$SCENARIOS_RAW" == "all" ]]; then
   SCENARIO_LIST=(
     text-stream skill-mcp mcp-zero-arg mcp-multi-call file-tools
     thinking long-stream cancel-recover concurrent-clients
-    workspace-multiturn workspace-long-tools workspace-large-write-progress workspace-chunked-edit-progress workspace-repo-loop
+    workspace-multiturn workspace-long-tools workspace-large-write-progress workspace-chunked-edit-progress workspace-autonomous-large-file workspace-repo-loop
     workspace-error-recovery workspace-parallel-tools permission-plan
     structured-output mcp-large-result mcp-error-recovery web-search
     workspace-image
@@ -249,7 +249,7 @@ else
     scenario="${scenario//[[:space:]]/}"
     [[ -n "$scenario" ]] || die "--scenarios contains an empty value"
     case "$scenario" in
-      text-stream|skill-mcp|mcp-zero-arg|mcp-multi-call|file-tools|thinking|long-stream|cancel-recover|concurrent-clients|workspace-multiturn|workspace-long-tools|workspace-large-write-progress|workspace-chunked-edit-progress|workspace-repo-loop|workspace-error-recovery|workspace-parallel-tools|permission-plan|structured-output|mcp-large-result|mcp-error-recovery|web-search|workspace-image) ;;
+      text-stream|skill-mcp|mcp-zero-arg|mcp-multi-call|file-tools|thinking|long-stream|cancel-recover|concurrent-clients|workspace-multiturn|workspace-long-tools|workspace-large-write-progress|workspace-chunked-edit-progress|workspace-autonomous-large-file|workspace-repo-loop|workspace-error-recovery|workspace-parallel-tools|permission-plan|structured-output|mcp-large-result|mcp-error-recovery|web-search|workspace-image) ;;
       *) die "unknown client scenario: $scenario" ;;
     esac
     if [[ -z "${SCENARIO_SEEN[$scenario]:-}" ]]; then
@@ -935,7 +935,7 @@ case_workspace_large_write_progress() {
     CASE_DETAIL="large file evidence failed: $(file_evidence_failure_detail <<<"$file_evidence")"
     return 1
   fi
-  if ! jq -e --arg writer "$FILE_WRITER" '[.tools[] | select(.name == $writer and .bytes >= 40960 and .stopMs != null and .jsonValid == true)] | length == 1' "$timing" >/dev/null; then
+  if ! jq -e --arg writer "$FILE_WRITER" '[.tools[] | select(.name == $writer and .bytes >= 40960 and .stopMs != null and .jsonValid == true and .interrupted != true)] | length == 1' "$timing" >/dev/null; then
     CASE_DETAIL="missing large $FILE_WRITER partial-message evidence"
     return 1
   fi
@@ -977,7 +977,7 @@ case_workspace_chunked_edit_progress() {
   if ((status != 0 || size < 40960)) || rg -q 'CHUNK_[0-9][0-9]' "$workspace/chunked-stream.txt" ||
     ! assert_client_result "$output" CHUNKED_EDIT_PROGRESS_OK ||
     ! client_evidence "$output" | jq -e '.paired and .terminalSuccess and (.protocolError | not) and .unrecoveredErrors == 0' >/dev/null ||
-    ! jq -e '[.tools[] | select(.name == "Edit" and .stopMs != null and .jsonValid == true)] | length == 10 and all(.[]; .bytes < 12000)' "$timing" >/dev/null; then
+    ! jq -e '[.tools[] | select(.name == "Edit" and .stopMs != null and .jsonValid == true and .interrupted != true)] | length == 10 and all(.[]; .bytes < 12000)' "$timing" >/dev/null; then
     CASE_DETAIL="chunked editing failed content/tool integrity checks (status $status, bytes $size)"
     return 1
   fi
@@ -986,6 +986,33 @@ case_workspace_chunked_edit_progress() {
     return 1
   fi
   CASE_DETAIL="10 bounded Edit calls completed and placeholders removed (bytes $size); see chunked-edit-timing.json for progress"
+}
+
+case_workspace_autonomous_large_file() {
+  command -v node >/dev/null 2>&1 || { CASE_DETAIL="Node.js is required for file evidence"; return 1; }
+  local workspace="$TMP_DIR/autonomous-file" output="$TMP_DIR/workspace-autonomous-large-file.jsonl"
+  local timing="$TMP_DIR/autonomous-file-timing.json" status file_evidence instruction
+  mkdir -p "$workspace"
+  probe_file_tools "$workspace" "$TMP_DIR/autonomous-file-capabilities.jsonl" || return 1
+  [[ -n "$FILE_WRITER" ]] || return 0
+  instruction="Use the available $FILE_WRITER and Read tools."
+  if [[ "$FILE_WRITER" == Edit ]]; then instruction+=' When creating a nonexistent file, Edit uses old_string="".'; fi
+  set +e
+  CLI_TIMING_REPORT="$timing" run_cli_session "$AGENT_TIMEOUT" "$MODEL" "$workspace" "$output" \
+    "Create autonomous-stream.txt in the current directory. $instruction The final file must contain exactly 420 lines about ordinary software testing, numbered 0001: through 0420: followed by a space. Each line must have at least 105 printable ASCII characters; aim for 110-125 characters including the prefix. Total size must be 45-60 KiB. Choose your own file-editing workflow. Read all final lines to verify the result, using additional Read calls if truncated. Do not use Bash, shell scripts, loops or generated shortcuts. Finish with AUTONOMOUS_FILE_OK." \
+    --restricted --tools "Read,$FILE_WRITER,Edit" --allowedTools "Read,$FILE_WRITER,Edit" --permission-mode acceptEdits
+  status=$?
+  set -e
+  if ((status != 0)) || ! assert_client_result "$output" AUTONOMOUS_FILE_OK ||
+    ! client_evidence "$output" | jq -e '.paired and .terminalSuccess and (.protocolError | not) and .unrecoveredErrors == 0' >/dev/null; then
+    CASE_DETAIL="autonomous file workflow did not complete (status $status)"
+    return 1
+  fi
+  if ! file_evidence="$(node "$SCRIPT_DIR/client-file-evidence.js" "$output" "$workspace" autonomous "$FILE_WRITER")"; then
+    CASE_DETAIL="autonomous file evidence failed: $(file_evidence_failure_detail <<<"$file_evidence")"
+    return 1
+  fi
+  CASE_DETAIL="$(jq -r '"autonomous workflow verified: strategy=" + .strategy + ", mutations=" + (.mutations|tostring) + ", max mutation bytes=" + (.maxMutationBytes|tostring) + ", file bytes=" + (.bytes|tostring)' <<<"$file_evidence")"
 }
 
 case_workspace_repo_loop() {
@@ -1270,6 +1297,7 @@ for scenario in "${SCENARIO_LIST[@]}"; do
     workspace-long-tools) run_case "$scenario" case_workspace_long_tools ;;
     workspace-large-write-progress) run_case "$scenario" case_workspace_large_write_progress ;;
     workspace-chunked-edit-progress) run_case "$scenario" case_workspace_chunked_edit_progress ;;
+    workspace-autonomous-large-file) run_case "$scenario" case_workspace_autonomous_large_file ;;
     workspace-repo-loop) run_case "$scenario" case_workspace_repo_loop ;;
     workspace-error-recovery) run_case "$scenario" case_workspace_error_recovery ;;
     workspace-parallel-tools) run_case "$scenario" case_workspace_parallel_tools ;;
@@ -1288,6 +1316,7 @@ if ((KEEP_ARTIFACTS)); then
   cp -- "$AUDIT_PATH" "$ARTIFACT_DIR/mcp-audit.log" 2>/dev/null || true
   [[ ! -f "$TMP_DIR/large-write-timing.json" ]] || cp -- "$TMP_DIR/large-write-timing.json" "$ARTIFACT_DIR/"
   [[ ! -f "$TMP_DIR/chunked-edit-timing.json" ]] || cp -- "$TMP_DIR/chunked-edit-timing.json" "$ARTIFACT_DIR/"
+  [[ ! -f "$TMP_DIR/autonomous-file-timing.json" ]] || cp -- "$TMP_DIR/autonomous-file-timing.json" "$ARTIFACT_DIR/"
   find "$TMP_DIR" -maxdepth 1 -type f -name '*.jsonl' -exec cp -- {} "$ARTIFACT_DIR/" \;
   find "$ARTIFACT_DIR" -type f -exec chmod 600 {} \;
 fi

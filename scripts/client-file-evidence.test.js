@@ -30,6 +30,50 @@ function fixture(scenario = 'large', writer = 'Write') {
 
 function check(f) { return validateFileEvidence(f.records, f.content, f.options); }
 
+function autonomous(writer = 'Edit', multi = true) {
+  const f=fixture('large',writer);
+  f.options.scenario='autonomous';f.records.length=0;
+  const halfway=f.content.indexOf('0211:');
+  const first=multi?f.content.slice(0,halfway)+'TAIL':f.content;
+  f.pair('create',writer,writer==='Write'?{content:first}:{old_string:'',new_string:first});
+  if(multi) f.pair('append','Edit',{old_string:'TAIL',new_string:f.content.slice(halfway)});
+  f.pair('read','Read',{},f.content);
+  for(const r of f.records) for(const b of r.message.content) if(b.type==='tool_use')b.input.file_path='autonomous-stream.txt';
+  return f;
+}
+
+test('autonomous workflow permits one or multiple verified mutations without imposing chunks',()=>{
+  for(const writer of ['Write','Edit'])for(const multi of [false,true]){
+    const f=autonomous(writer,multi), r=check(f);
+    assert.equal(r.mutations,multi?2:1);assert.equal(r.strategy,multi?'multiple':'single');assert.equal(r.verifiedLines,420);
+    assert.ok(r.maxMutationBytes>6144);
+  }
+});
+
+test('autonomous edits require exact replay, valid matches, ordered results and final readback',()=>{
+  for(const [change,reason]of [
+    [f=>{f.records[2].message.content[0].input.old_string='missing';},/edit-match/],
+    [f=>{f.records[2].message.content[0].input.old_string='';},/creation-input/],
+    [f=>{f.records[2].message.content[0].input.new_string='wrong';},/disk-mismatch/],
+    [f=>{f.records[5].message.content[0].content='verified';},/readback-content/],
+    [f=>{f.records[2].message.content[0].name='Bash';},/unexpected-tool/],
+  ]){const f=autonomous();change(f);assert.throws(()=>check(f),reason);}
+});
+
+test('autonomous replace-all is bounded before expansion and preserves literal replacement text',()=>{
+  const oversized=autonomous();
+  oversized.records[2].message.content[0].input={file_path:'autonomous-stream.txt',old_string:'e',new_string:'x'.repeat(10000),replace_all:true};
+  assert.throws(()=>check(oversized),/replay-size/);
+  const ambiguous=autonomous();
+  ambiguous.records[2].message.content[0].input.old_string='e';
+  assert.throws(()=>check(ambiguous),/edit-match/);
+  const literal=autonomous();
+  literal.content=literal.content.replace('0211: Testing','0211: $&test');
+  literal.records[2].message.content[0].input.new_string=literal.content.slice(literal.content.indexOf('0211:'));
+  literal.records[5].message.content[0].content=literal.content;
+  assert.equal(check(literal).verifiedLines,420);
+});
+
 test('large Write, Edit creation and ten chunked edits prove actual file content', () => {
   for (const f of [fixture(), fixture('large', 'Edit'), fixture('chunked')]) {
     assert.deepEqual(check(f), { bytes: Buffer.byteLength(f.content), lines: 420,

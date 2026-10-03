@@ -33,6 +33,44 @@ test('client-generated stop on incomplete arguments does not prove a valid tool'
   assert.equal(t.arguments.size,0);
 });
 
+test('tool timing distinguishes absent input, explicit empty JSON and interruptions', () => {
+  const t=new ToolTiming(), event=(e,ms)=>t.record({type:'stream_event',event:e},ms);
+  const start=(index)=>({type:'content_block_start',index,content_block:{type:'tool_use',name:'Edit',input:{}}});
+  event(start(0),0);event({type:'content_block_stop',index:0},100);
+  assert.equal(t.tools[0].jsonValid,null);assert.equal(t.tools[0].argumentState,'absent');
+  event(start(1),110);
+  event({type:'content_block_delta',index:1,delta:{type:'input_json_delta',partial_json:'{}'}},120);
+  event({type:'content_block_stop',index:1},130);
+  assert.equal(t.tools[1].jsonValid,true);assert.equal(t.tools[1].argumentState,'valid');
+  event({type:'error'},140);
+  assert.equal(t.tools[0].interrupted,true);assert.equal(t.tools[1].interrupted,true);
+  event({type:'message_start'},150);event(start(0),160);
+  event({type:'message_start'},200);
+  assert.equal(t.tools[2].interrupted,true);assert.equal(t.tools[2].stopMs,null);
+  event(start(0),210);t.interrupt(220);
+  assert.equal(t.tools[3].interrupted,true);assert.equal(t.arguments.size,0);
+});
+
+test('invalid delta types and oversized input cannot become empty valid JSON', () => {
+  for(const value of [null, {}, 'x'.repeat(8*1024*1024+1)]){
+    const t=new ToolTiming();const event=e=>t.record({type:'stream_event',event:e},0);
+    event({type:'content_block_start',index:0,content_block:{type:'tool_use',name:'Edit'}});
+    event({type:'content_block_delta',index:0,delta:{type:'input_json_delta',partial_json:value}});
+    event({type:'content_block_stop',index:0});
+    assert.equal(t.tools[0].jsonValid,false);assert.equal(t.arguments.size,0);
+  }
+});
+
+test('client synthetic message end without stop reason cannot conceal an interrupted tool',()=>{
+  const t=new ToolTiming(), event=e=>t.record({type:'stream_event',event:e},10);
+  event({type:'message_start'});
+  event({type:'content_block_start',index:0,content_block:{type:'tool_use',name:'Edit',input:{}}});
+  event({type:'content_block_stop',index:0});
+  event({type:'message_delta',delta:{stop_reason:null}});event({type:'message_stop'});
+  event({type:'message_start'});
+  assert.equal(t.tools[0].argumentState,'absent');assert.equal(t.tools[0].jsonValid,null);assert.equal(t.tools[0].interrupted,true);
+});
+
 const evidencePath = path.join(__dirname, 'client-e2e-evidence.jq');
 const init = (tools = ['Read', 'Edit']) => ({ type: 'system', subtype: 'init', tools });
 const done = (result = 'OK', subtype = 'success') => ({ type: 'result', subtype, is_error: subtype !== 'success', result });
@@ -120,6 +158,21 @@ if (last.includes('CLIENT_CAPABILITY_PROBE_OK')) {
   emit({type:'system',subtype:'init',tools:mode==='capability-missing'?['Read']:mode==='multi-write'?['Read','Write']:['Read','Edit']});
   emit({type:'result',subtype:mode==='capability-auth'?'error_during_execution':'success',is_error:mode==='capability-auth',result:'CLIENT_CAPABILITY_PROBE_OK'});
   if(mode==='capability-auth') process.exit(1);
+} else if (last.includes('autonomous-stream.txt')) {
+  if(last.includes('42 lines') || last.includes('50 lines') || last.includes('exactly one') || last.includes('10 sequential')) process.exit(52);
+  emit({type:'system',subtype:'init',tools:['Read','Edit']});
+  const file=path.join(process.cwd(),'autonomous-stream.txt'), content=numbered(1,420)+'\\n';
+  const pieces=mode==='auto-single'?[content]:[content.slice(0,content.indexOf('0211:')),content.slice(content.indexOf('0211:'))];
+  let text='';
+  for(let i=0;i<pieces.length;i++){
+    const next= i===pieces.length-1 ? text.replace('TAIL',()=>pieces[i]) : pieces[i]+'TAIL';
+    const input={old_string:i===0?'':'TAIL',new_string:i===0?(pieces.length===1?content:next):pieces[i]};
+    call('w'+i,'Edit',file,input);reply('w'+i,'done');
+    text=pieces.length===1?content:next;
+  }
+  if(mode!=='auto-no-file') fs.writeFileSync(file,text);
+  call('read','Read',file);reply('read',mode==='auto-fake-read'?'verified':text);
+  emit({type:'result',subtype:'success',is_error:mode==='auto-error',result:'AUTONOMOUS_FILE_OK'});
 } else if (last.includes('large-stream.txt')) {
   if(mode==='capability-missing'||mode==='capability-auth') process.exit(49);
   if(!last.includes('one Edit call') || !args.includes('Read,Edit')) process.exit(50);
@@ -214,6 +267,14 @@ function runFixture(mode, scenario, options = []) {
       { env, encoding: 'utf8', timeout: 60000 });
   } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
 }
+test('autonomous scenario accepts model-chosen single or multiple writes but requires disk evidence',()=>{
+  for(const mode of ['auto-single','auto-multiple']){
+    const r=runFixture(mode,'workspace-autonomous-large-file');assert.equal(r.status,0,r.stdout+r.stderr);assert.match(r.stdout,/PASS/);
+  }
+  for(const mode of ['auto-no-file','auto-fake-read','auto-error']){
+    const r=runFixture(mode,'workspace-autonomous-large-file');assert.equal(r.status,1,r.stdout+r.stderr);
+  }
+});
 test('file scenario passes with Edit creation but fails if the disk content is wrong', () => {
   const ok = runFixture('file-ok', 'file-tools');
   assert.equal(ok.status, 0, ok.stdout + ok.stderr);

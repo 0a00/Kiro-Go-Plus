@@ -1,5 +1,5 @@
 {
-  "version": "1.2.94",
-  "changelog": "Announce real tool metadata in balanced Claude Code streams only after output is committed; keep arguments validated and silent attempts retryable. Add cancellation, truncation and interleaving regressions plus separate terminal-progress acceptance. Early metadata does not guarantee terminal rendering or fix upstream large-generation stalls.\n平衡模式下已输出的 Claude Code 请求提前发送真实工具开始信息，参数仍完整校验；补充取消、截断、多工具及终端进度验收，不放宽超时或伪造完成。",
+  "version": "1.2.95",
+  "changelog": "Distinguish absent tool arguments from valid JSON in client timing reports. Add autonomous large-file verification with exact mutation replay and readback. Record allowlisted terminal causes in admin request attempts without changing timeout, retry or completion behavior.\n修正测试采样器空参数误判；增加自主大文件工作流验收；管理员请求详情增加脱敏结束原因分类，不改变超时、重试或工具完成规则。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }

@@ -170,6 +170,7 @@ type requestDetailAttempt struct {
 	StatusCode           int    `json:"statusCode,omitempty"`
 	Error                string `json:"error,omitempty"`
 	RetryReason          string `json:"retryReason,omitempty"`
+	TerminationCause     string `json:"terminationCause,omitempty"`
 	RetryAcrossEndpoints bool   `json:"retryAcrossEndpoints,omitempty"`
 	RetryAcrossAccounts  bool   `json:"retryAcrossAccounts,omitempty"`
 }
@@ -934,16 +935,17 @@ func (t *requestDetailTrace) recordAttempt(accountID, accountEmail, endpoint, ho
 		return
 	}
 	attempt := requestDetailAttempt{
-		Sequence:     len(t.attempts) + 1,
-		AccountID:    accountID,
-		AccountEmail: redactRequestDetailText(accountEmail),
-		Endpoint:     endpoint,
-		Host:         host,
-		StartedMs:    t.elapsedMsLocked(startedAt),
-		DurationMs:   time.Since(startedAt).Milliseconds(),
-		Status:       status,
-		StatusCode:   statusCode,
-		RetryReason:  retryReason,
+		Sequence:         len(t.attempts) + 1,
+		AccountID:        accountID,
+		AccountEmail:     redactRequestDetailText(accountEmail),
+		Endpoint:         endpoint,
+		Host:             host,
+		StartedMs:        t.elapsedMsLocked(startedAt),
+		DurationMs:       time.Since(startedAt).Milliseconds(),
+		Status:           status,
+		StatusCode:       statusCode,
+		RetryReason:      retryReason,
+		TerminationCause: streamTerminationCause(err),
 	}
 	if attempt.DurationMs < 0 {
 		attempt.DurationMs = 0

@@ -188,3 +188,49 @@ assisted task prompts differ from the original failure case: they demonstrate
 the corrected test workflow, not a guarantee of autonomous model tool selection
 for arbitrary user requests. No additional live large-tool trial was run in this
 test-only change; the previously recorded production failures remain unresolved.
+
+## Autonomous Workflow and Terminal Causes in 1.2.95
+
+The 2026-10-03 sibling review confirmed unchanged remote heads: Go f8f6071 and
+7ee2ea4, Rust e09625c (CI only, stream code 5ca5703), Zhang 5aa7f56 (README),
+account-manager 844aac76, gateway a5292ca, AIClient2API 9a29d60 (reasoning-effort
+forwarding), and login-helper 8c280d7. Dirty comparison worktrees were inspected
+but not modified. References include Rust issue 49 and converter commit f25d986
+(50-line chunk guidance), gateway issues 56/153 (missing large content after a
+short argument prefix), and Go PR 146 (explicit stream-integrity errors).
+
+The new test adapts their preventative chunking approach by measuring whether
+the model chooses multiple valid writes without an explicit chunk-size or
+single-call instruction in the task. Existing Plus tool-description guidance is
+unchanged. Do not copy invalid-JSON fallback to `{}`, synthetic tool results or
+unconditional finalization from other implementations. Their reported 5KB/9KB/
+8K-token limits are observations, not universal limits established by this repo.
+
+One actual Claude Code 2.1.286 run against unchanged production 1.2.94 passed the
+autonomous case: 420 lines, 53,664 bytes, nine Edit calls (maximum new_string
+6,680 bytes), four Read calls, 399.170 seconds. All 13 calls had paired results,
+zero errors and zero automatic continuations. Exact replay and complete final
+readback passed. No production settings or client prompts were patched during
+the run. The request allows native file tools only; this proves that workflow,
+not arbitrary software semantics or a guaranteed success rate.
+
+Timing reports previously parsed missing arguments as `{}`. They now preserve
+`argumentState=absent` with `jsonValid=null` and distinguish interrupted CLI
+events from actual tool/result acceptance. Explicit `{}` remains parseable JSON,
+not evidence that an empty Edit or other schema-required call is valid. Runtime
+zero-argument handling is unchanged. A replay of the four previous failed CLI
+attempts now marks all four as absent/interrupted instead of claiming valid JSON.
+
+Admin detail attempts additionally classify the wrapped terminal error with an
+allowlisted `terminationCause`. This separates EOF/unexpected EOF/reset from local
+watchdogs without exposing raw transport messages or changing public errors,
+retry decisions, timers or execution. Source fixtures test wrapped failures,
+parser-to-admin propagation and unchanged status codes. Full offline quality
+gates and repeated focused race checks cover the change. Existing records remain
+compatible; rollback requires only the old binary and tests.
+
+The previous extended-wait trial still stands: two requests with a 600-second
+argument idle timer ended after roughly 240 seconds of upstream inactivity.
+Production still runs 1.2.94 in the autonomous test, so the new cause field has
+not yet classified that live ending. EOF alone would still not prove whether
+Kiro, an outbound proxy or a network middlebox closed the connection.
