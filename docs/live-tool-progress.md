@@ -6,7 +6,9 @@ Malformed or truncated tools terminate with an error, without a successful tool
 stop or a replay of already-visible content. Empty arguments remain supported
 at the existing explicit/schema-authorized completion boundaries.
 
-`balanced` still buffers complete tools. Both modes stream text; neither can
+`balanced` still buffers tool arguments. From 1.2.94, it may announce real tool
+metadata for recognized Claude Code clients after output is committed; silent
+attempts still hold the start. Both modes stream text; neither can
 manufacture progress when upstream stops producing events. SSE pings keep the
 connection alive but are not visible tool progress in Claude Code. Partial tool
 delivery does not guarantee a particular terminal rendering or reduce generation

@@ -112,9 +112,8 @@ func requiresStrictClaudeToolUse(req *ClaudeRequest) bool {
 	return req != nil && req.ToolUsePolicy == toolUsePolicyExplicit
 }
 
-// isClaudeCodeUserAgent recognizes the User-Agent variants emitted by Claude
-// Code releases. Claude Code needs tool argument deltas early in balanced mode
-// so a long-running tool turn remains visibly active to the client.
+// isClaudeCodeUserAgent recognizes transport variants emitted by Claude Code.
+// Tool argument delivery is controlled separately by the configured mode.
 func isClaudeCodeUserAgent(userAgent string) bool {
 	value := strings.ToLower(strings.TrimSpace(userAgent))
 	if value == "" {

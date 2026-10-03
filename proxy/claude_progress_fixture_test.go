@@ -1,12 +1,15 @@
 package proxy
 
 import (
+	"bytes"
 	"encoding/json"
+	"kiro-go/config"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -25,6 +28,10 @@ func TestClaudeCodeProgressUIFixture(t *testing.T) {
 		t.Fatal("fixture directory must exist")
 	}
 	workspace := filepath.Join(dir, "gateway")
+	outcome := os.Getenv("KIRO_DEV_UI_TOOL_OUTCOME")
+	if outcome != "" && outcome != "complete" && outcome != "truncated" {
+		t.Fatal("unsupported fixture tool outcome")
+	}
 	if err := os.MkdirAll(workspace, 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -68,6 +75,9 @@ func TestClaudeCodeProgressUIFixture(t *testing.T) {
 		if !wait(12 * time.Second) {
 			return
 		}
+		if outcome == "truncated" {
+			return
+		}
 		send("toolUseInputEvent", map[string]interface{}{"input": string(args[30:])})
 		send("toolUseStopEvent", map[string]interface{}{})
 		send("metadataEvent", map[string]interface{}{"stopReason": "tool_use"})
@@ -75,8 +85,33 @@ func TestClaudeCodeProgressUIFixture(t *testing.T) {
 	defer upstream.Close()
 	h := setupStreamIntegrityPathTest(t, upstream)
 	enableBalancedTestMode(t)
+	mode := os.Getenv("KIRO_DEV_UI_TOOL_STREAM_MODE")
+	if mode == config.ToolStreamModeLive {
+		enableLiveTestMode(t)
+	} else if mode != "" && mode != config.ToolStreamModeBalanced {
+		t.Fatal("unsupported fixture tool stream mode")
+	}
 	kiroHttpStore.Store(&http.Client{Timeout: 30 * time.Second, Transport: &http.Transport{}})
-	server := httptest.NewServer(h)
+	var wireMu sync.Mutex
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/messages" {
+			h.ServeHTTP(w, r)
+			return
+		}
+		wire := &progressFixtureWriter{ResponseWriter: w}
+		h.ServeHTTP(wire, r)
+		wireMu.Lock()
+		defer wireMu.Unlock()
+		f, err := os.OpenFile(filepath.Join(dir, "fixture-wire.sse"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer f.Close()
+		if _, err := f.Write(wire.body.Bytes()); err != nil {
+			t.Error(err)
+		}
+	}))
 	defer server.Close()
 	if err := os.WriteFile(filepath.Join(dir, "gateway-url.txt"), []byte(server.URL), 0600); err != nil {
 		t.Fatal(err)
@@ -96,3 +131,15 @@ func TestClaudeCodeProgressUIFixture(t *testing.T) {
 		}
 	}
 }
+
+type progressFixtureWriter struct {
+	http.ResponseWriter
+	body bytes.Buffer
+}
+
+func (w *progressFixtureWriter) Write(p []byte) (int, error) {
+	w.body.Write(p)
+	return w.ResponseWriter.Write(p)
+}
+
+func (w *progressFixtureWriter) Flush() { w.ResponseWriter.(http.Flusher).Flush() }

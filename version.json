@@ -1,5 +1,5 @@
 {
-  "version": "1.2.93",
-  "changelog": "Validate auto-refresh modes before configuration access and locking. Report precise file/chunk size failures without weakening acceptance limits. Add qualified recovery advice to incomplete file-tool errors; preserve JSON validation, timeout and retry semantics.\n修复自动刷新非法模式校验顺序与独立测试崩溃；精确报告文件和分段超限；工具停滞错误提供小块完整编辑建议，不放宽验收或改变超时重试规则。",
+  "version": "1.2.94",
+  "changelog": "Announce real tool metadata in balanced Claude Code streams only after output is committed; keep arguments validated and silent attempts retryable. Add cancellation, truncation and interleaving regressions plus separate terminal-progress acceptance. Early metadata does not guarantee terminal rendering or fix upstream large-generation stalls.\n平衡模式下已输出的 Claude Code 请求提前发送真实工具开始信息，参数仍完整校验；补充取消、截断、多工具及终端进度验收，不放宽超时或伪造完成。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }

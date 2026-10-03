@@ -329,6 +329,7 @@ type KiroPayload struct {
 	streamThinkingPrecommit     bool
 	streamToolUseDeltas         bool
 	streamTextWithBufferedTools bool
+	announceBufferedToolStarts  bool
 	clientOutputTokenLimit      int
 	enforceClientOutputLimit    bool
 	toolUsePolicy               string
@@ -758,9 +759,10 @@ type KiroStreamCallback struct {
 	OnCredits         func(credits float64)
 	OnContextUsage    func(percentage float64)
 	OnStopReason      func(reason string)
-	// End only already-delivered text/thinking when upstream starts assembling
-	// a buffered tool. This must not expose tool frames or commit a silent turn.
-	onBufferedToolStart func()
+	// Finish delivered text and optionally announce real tool metadata after
+	// output is committed. Return true only when a tool start was delivered.
+	// Arguments remain buffered; silent turns must stay retryable.
+	onBufferedToolStart func(toolUseID, name string) bool
 	// Internal observability hooks. They are invoked for semantic upstream
 	// events and tool fragments before any response buffering/translation.
 	onMeaningfulEvent      func()
@@ -990,7 +992,7 @@ func callKiroAPISingleModel(account *config.Account, payload *KiroPayload, callb
 	}
 
 	// Restore original tool names before callbacks leave the upstream layer.
-	if callback != nil && len(payload.ToolNameMap) > 0 && (callback.OnToolUse != nil || callback.OnToolUseStart != nil) {
+	if callback != nil && len(payload.ToolNameMap) > 0 && (callback.OnToolUse != nil || callback.OnToolUseStart != nil || callback.onBufferedToolStart != nil) {
 		nameMap := payload.ToolNameMap
 		wrapped := *callback
 		if callback.OnToolUse != nil {
@@ -1009,6 +1011,15 @@ func callKiroAPISingleModel(account *config.Account, payload *KiroPayload, callb
 					name = original
 				}
 				originalOnToolUseStart(toolUseID, name)
+			}
+		}
+		if callback.onBufferedToolStart != nil {
+			originalBufferedStart := callback.onBufferedToolStart
+			wrapped.onBufferedToolStart = func(toolUseID, name string) bool {
+				if original, ok := nameMap[name]; ok {
+					name = original
+				}
+				return originalBufferedStart(toolUseID, name)
 			}
 		}
 		callback = &wrapped

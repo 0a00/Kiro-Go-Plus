@@ -30,6 +30,10 @@ def stop(process):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--artifact-parent", help="Parent directory for a new private fixture directory")
+    parser.add_argument("--tool-stream-mode", choices=("balanced", "live"), default="balanced")
+    parser.add_argument("--outcome", choices=("complete", "truncated"), default="complete")
+    parser.add_argument("--require-tool-progress", action="store_true",
+                        help="Fail unless a tool line renders before the delayed arguments arrive")
     args = parser.parse_args()
     os.umask(0o077)
     root = Path(tempfile.mkdtemp(prefix="kiro-ui-progress-", dir=args.artifact_parent)).resolve()
@@ -52,7 +56,9 @@ def main():
     try:
         fixture = subprocess.Popen(
             ["go", "test", "./proxy", "-run", "^TestClaudeCodeProgressUIFixture$", "-count=1", "-timeout=3m"],
-            cwd=project, env={**env, "KIRO_DEV_UI_FIXTURE_DIR": str(root)},
+            cwd=project, env={**env, "KIRO_DEV_UI_FIXTURE_DIR": str(root),
+                             "KIRO_DEV_UI_TOOL_STREAM_MODE": args.tool_stream_mode,
+                             "KIRO_DEV_UI_TOOL_OUTCOME": args.outcome},
             stdout=log, stderr=log, start_new_session=True,
         )
         deadline = time.monotonic() + 60
@@ -118,15 +124,22 @@ def main():
                 if elapsed >= seconds and seconds not in answered:
                     answered.add(seconds)
                     visible = "expand the file" in display
-                    snapshots.append({"atSeconds": seconds, "textVisible": visible, "display": display})
-                    print(json.dumps({"seconds": seconds, "textVisible": visible}), flush=True)
-            if elapsed > 18 and "FIXTURE_COMPLETED" in display:
+                    tool_visible = "Create(" in display or "Edit(" in display or "Update(" in display
+                    snapshots.append({"atSeconds": seconds, "textVisible": visible,
+                                      "toolVisible": tool_visible, "display": display})
+                    print(json.dumps({"seconds": seconds, "textVisible": visible,
+                                      "toolVisible": tool_visible}), flush=True)
+            if args.outcome == "truncated" and "API Error:" in display:
+                snapshots.append({"atSeconds": elapsed, "errorVisible": True, "display": display})
+                success = not (workspace / "progress.txt").exists() and "FIXTURE_COMPLETED" not in display
+                break
+            if args.outcome == "complete" and elapsed > 18 and "FIXTURE_COMPLETED" in display:
                 expected = "progress fixture\n" * 10
                 success = (len(snapshots) == 4 and all(x["textVisible"] for x in snapshots)
                            and (workspace / "progress.txt").read_text() == expected)
                 break
         if not success:
-            error = "early text rendering or final file completion was not verified"
+            error = "expected file completion or explicit failure without execution was not verified"
     except Exception as exc:
         error = str(exc)
     finally:
@@ -145,9 +158,41 @@ def main():
             success = False
             error = error or "fixture exited unsuccessfully"
         log.close()
+        wire_path = root / "fixture-wire.sse"
+        if success and args.outcome == "truncated":
+            wire = wire_path.read_text()
+            events = [json.loads(line[6:]) for line in wire.splitlines() if line.startswith("data: ")]
+            tool_indexes = set()
+            tool_started = False
+            tool_stopped = False
+            for event in events:
+                if event.get("type") == "message_start":
+                    tool_indexes.clear()
+                if event.get("content_block", {}).get("type") == "tool_use":
+                    tool_indexes.add(event["index"])
+                    tool_started = True
+                if event.get("type") == "content_block_stop" and event.get("index") in tool_indexes:
+                    tool_stopped = True
+            success = (tool_started and not tool_stopped and any(e.get("type") == "error" for e in events)
+                       and not any(e.get("type") == "message_stop" for e in events)
+                       and not (workspace / "progress.txt").exists())
+            if args.tool_stream_mode == "balanced":
+                success = success and not any(e.get("delta", {}).get("type") == "input_json_delta" for e in events)
+            if not success:
+                error = "truncated tool lifecycle or nonexecution was not verified"
+        early_tool_visible = any(s.get("toolVisible") for s in snapshots if s["atSeconds"] < 14)
+        progress_status = "PASS" if early_tool_visible else "WARN"
+        if args.require_tool_progress and not early_tool_visible:
+            success = False
+            progress_status = "FAIL"
+            error = "tool line was not visible before the delayed arguments arrived"
         (root / "terminal.ansi").write_bytes(raw)
-        (root / "result.json").write_text(json.dumps({"version": version, "pass": success, "error": error, "snapshots": snapshots}, indent=2))
-        print(json.dumps({"pass": success, "error": error, "artifactDirectory": str(root)}), flush=True)
+        (root / "result.json").write_text(json.dumps({"version": version, "mode": args.tool_stream_mode,
+                                                     "outcome": args.outcome,
+                                                     "toolProgressStatus": progress_status,
+                                                     "pass": success, "error": error, "snapshots": snapshots}, indent=2))
+        print(json.dumps({"pass": success, "toolProgressStatus": progress_status,
+                          "error": error, "artifactDirectory": str(root)}), flush=True)
     return 0 if success else 1
 
 

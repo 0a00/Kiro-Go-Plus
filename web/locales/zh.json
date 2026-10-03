@@ -553,7 +553,7 @@
   "settings.toolStreamLive": "实时流",
   "settings.toolStreamBalanced": "平衡模式（推荐）",
   "settings.toolStreamSafe": "安全缓冲",
-  "settings.toolStreamModeHint": "平衡模式立即转发正文和可见思考，所有工具的 JSON 完整后才提交。安全/自适应保留高风险工具列表的请求缓冲；实时流立即发送工具参数分片。一旦正文、思考或完整工具已经发送，失败后不再自动重放整轮。已有模式设置保持不变。",
+  "settings.toolStreamModeHint": "平衡模式立即转发正文和可见思考，工具参数完整校验后才发送。已输出内容的 Claude Code 请求可提前收到真实工具开始信息，终端是否显示取决于客户端。安全/自适应保留高风险请求缓冲；实时流立即发送参数分片。已输出的轮次不自动重放，已有模式设置保持不变。",
   "settings.enforceAgentToolUse": "工作区操作强制调用工具",
   "settings.enforceAgentToolUseHint": "检测到创建文件、修改代码、运行命令等任务时，必须真正调用工具，不接受只输出代码或只描述下一步。",
   "settings.claudeCodeTransparentMode": "Claude Code 透明兼容模式",

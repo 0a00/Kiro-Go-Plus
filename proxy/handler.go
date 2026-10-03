@@ -2124,9 +2124,10 @@ func configureClaudeToolStreaming(payload *KiroPayload, req *ClaudeRequest, thin
 		return
 	}
 	payload.clientUserAgent = req.ClientUserAgent
+	payload.announceBufferedToolStarts = req.Stream && thinkingCfg.ToolStreamMode == config.ToolStreamModeBalanced && looksLikeClaudeCodeRequest(req)
 	if req.Stream && thinkingCfg.ToolStreamMode == config.ToolStreamModeBalanced {
-		// Stream text without waiting for the tool selected by the model. Only
-		// complete, validated tool_use objects may cross the client boundary.
+		// Stream text promptly; only validated arguments may cross the client
+		// boundary. Claude Code may see metadata after output is committed.
 		payload.streamTextWithBufferedTools = req.Stream
 		payload.requireActionableOutput = false
 		payload.requireToolUse = requiresStrictClaudeToolUse(req)
@@ -2810,15 +2811,11 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 				}
 
 				toolUses = append(toolUses, tu)
-				if streamedTools[tu.ToolUseID] != nil {
-					stopToolUse(tu.ToolUseID)
-					delete(streamedTools, tu.ToolUseID)
-					return
+				if streamedTools[tu.ToolUseID] == nil || payload.streamTextWithBufferedTools {
+					startToolUse(tu.ToolUseID, tu.Name)
+					inputJSON, _ := json.Marshal(tu.Input)
+					sendToolUseDelta(tu.ToolUseID, string(inputJSON))
 				}
-
-				startToolUse(tu.ToolUseID, tu.Name)
-				inputJSON, _ := json.Marshal(tu.Input)
-				sendToolUseDelta(tu.ToolUseID, string(inputJSON))
 				stopToolUse(tu.ToolUseID)
 				delete(streamedTools, tu.ToolUseID)
 			},
@@ -2861,12 +2858,20 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 			callback.OnToolUseDelta = sendToolUseDelta
 			callback.OnToolUseStop = stopToolUse
 		} else if payload.streamTextWithBufferedTools {
-			callback.onBufferedToolStart = func() {
+			callback.onBufferedToolStart = func(toolUseID, name string) bool {
 				// Claude Code may not render an open text block after thinking.
 				// Upstream has moved on to tool input; finish existing text now,
 				// while leaving tool arguments buffered and the message open.
 				processClaudeText("", false, true)
 				closeActiveBlock()
+				if !payload.announceBufferedToolStarts || !actionableCommitted.Load() ||
+					toolUseID == "" || name == "" || streamedTools[toolUseID] != nil {
+					return false
+				}
+				// Metadata is progress, not permission to execute an empty tool.
+				// Errors leave this block unfinished and never synthesize a stop.
+				startToolUse(toolUseID, name)
+				return true
 			}
 		}
 

@@ -553,7 +553,7 @@
   "settings.toolStreamLive": "Live",
   "settings.toolStreamBalanced": "Balanced (recommended)",
   "settings.toolStreamSafe": "Safe buffer",
-  "settings.toolStreamModeHint": "Balanced streams text and visible thinking immediately, and sends each tool call only after its JSON is complete. Safe/Adaptive retain request buffering for high-risk tool lists. Live sends tool argument fragments immediately. Once text, thinking or a complete tool reaches the client, a failed turn cannot be replayed automatically. Existing saved modes are preserved.",
+  "settings.toolStreamModeHint": "Balanced streams text and visible thinking immediately and buffers tool arguments until valid. Claude Code can receive real tool-start metadata after output is committed; terminal display depends on the client. Safe/Adaptive retain high-risk request buffering. Live sends argument fragments immediately. Committed turns are never automatically replayed. Existing saved modes are preserved.",
   "settings.enforceAgentToolUse": "Require tools for workspace actions",
   "settings.enforceAgentToolUseHint": "For detected file creation, code edits, or command execution, require a real tool call instead of code-only output or a description of the next step.",
   "settings.claudeCodeTransparentMode": "Claude Code transparent compatibility mode",

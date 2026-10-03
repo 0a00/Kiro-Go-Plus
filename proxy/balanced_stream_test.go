@@ -151,7 +151,7 @@ func TestBalancedTruncationAfterVisibleOutputNeverReplays(t *testing.T) {
 			rec := httptest.NewRecorder()
 			h.handleClaudeMessages(rec, balancedRequest("Write", ""))
 			body := rec.Body.String()
-			if calls.Load() != 1 || strings.Count(body, "visible once") != 1 || strings.Contains(body, "unfinished") || strings.Contains(body, `"type":"tool_use"`) || strings.Contains(body, "message_stop") || !strings.Contains(body, "event: error") {
+			if calls.Load() != 1 || strings.Count(body, "visible once") != 1 || strings.Contains(body, "unfinished") || strings.Count(body, `"id":"broken"`) != 1 || strings.Contains(body, "input_json_delta") || strings.Count(body, "event: content_block_stop") != 1 || strings.Contains(body, "message_stop") || !strings.Contains(body, "event: error") {
 				t.Fatalf("unsafe replay or tool output: calls=%d body=%s", calls.Load(), body)
 			}
 		})
@@ -191,7 +191,8 @@ func TestBalancedCompleteToolThenTruncationDoesNotDuplicateFirstTool(t *testing.
 	rec := httptest.NewRecorder()
 	h.handleClaudeMessages(rec, balancedRequest("Write", ""))
 	body := rec.Body.String()
-	if calls.Load() != 1 || strings.Count(body, "complete1") != 1 || strings.Contains(body, "incomplete2") ||
+	if calls.Load() != 1 || strings.Count(body, "complete1") != 1 || strings.Count(body, "incomplete2") != 1 ||
+		strings.Count(body, "input_json_delta") != 1 || strings.Count(body, "event: content_block_stop") != 1 ||
 		!strings.Contains(body, "event: error") || strings.Contains(body, "message_stop") {
 		t.Fatalf("complete tool duplicated or incomplete tool exposed: calls=%d body=%s", calls.Load(), body)
 	}

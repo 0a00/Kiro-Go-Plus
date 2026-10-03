@@ -149,7 +149,9 @@ func wrapMeaningfulStreamCallback(target *KiroStreamCallback, onActivity func(),
 			gate.markToolFragment()
 			gate.markActivity()
 			if !gate.streamToolFrames && gate.hasEmittedOutput() && target.onBufferedToolStart != nil {
-				target.onBufferedToolStart()
+				if target.onBufferedToolStart(toolUseID, name) {
+					gate.recordToolDispatch(toolUseID)
+				}
 			}
 			if gate.streamToolFrames {
 				gate.handleEvent(pendingStreamEvent{kind: pendingToolUseStart, toolUseID: toolUseID, toolName: name})

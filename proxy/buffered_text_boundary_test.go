@@ -139,7 +139,7 @@ func TestBalancedClosesDeliveredTextWhileToolIsStillIncomplete(t *testing.T) {
 func TestBufferedToolBoundaryDoesNotExposeOrCommitSilentAttempts(t *testing.T) {
 	var boundaries, toolCalls int
 	callback, gate := wrapMeaningfulStreamCallback(&KiroStreamCallback{
-		onBufferedToolStart: func() { boundaries++ }, OnText: func(string, bool) {}, OnToolUse: func(KiroToolUse) { toolCalls++ },
+		onBufferedToolStart: func(string, string) bool { boundaries++; return false }, OnText: func(string, bool) {}, OnToolUse: func(KiroToolUse) { toolCalls++ },
 	}, nil, false, false, false, false)
 	callback.OnToolUseStart("first", "Edit")
 	callback.OnToolUseDelta("first", `{"value":`)
@@ -156,7 +156,7 @@ func TestBufferedToolBoundaryDoesNotExposeOrCommitSilentAttempts(t *testing.T) {
 func TestBufferedToolBoundaryDoesNotFlushSafeModePendingText(t *testing.T) {
 	var boundaries int
 	callback, gate := wrapMeaningfulStreamCallback(&KiroStreamCallback{
-		onBufferedToolStart: func() { boundaries++ }, OnText: func(string, bool) {},
+		onBufferedToolStart: func(string, string) bool { boundaries++; return false }, OnText: func(string, bool) {},
 	}, nil, true, true, true, false)
 	callback.OnText("Let me edit the file.", false)
 	callback.OnToolUseStart("first", "Edit")
