@@ -335,6 +335,27 @@ Production recommendations:
 - `GET /health`: returns 200 while the process is alive; use for container liveness
 - `GET /ready`: returns 503 when available account count/ratio is below its configured threshold; use for load-balancer readiness
 
+From 1.2.96, public probes return status only. Version/uptime and account-pool
+details require admin authentication at `/admin/api/health`, `/admin/api/ready`
+or `/admin/api/version`. Customer stats no longer include the service version;
+customer log endpoints use the category `upstream`. Unauthenticated admin visits
+receive a minimal login page; dashboard bundles and legacy pages require a session.
+
+Check the running Compose binary without exposing a password:
+
+```bash
+sudo docker compose exec -T kiro-go ./kiro-go --version
+```
+
+Upstream failures sent to API callers contain generic actionable messages and
+request IDs; detailed causes remain in administrator logs. Unnecessary client
+request IDs are not forwarded to Kiro. Authentication uses a neutral fallback
+HTTP user agent and no legacy project labels. Credentials, device IDs and required
+Kiro protocol headers are unchanged. This minimizes information disclosure, not
+traffic fingerprinting or account-ban risk. Use HTTPS or a private tunnel for admin
+access: hiding product names does not protect credentials on plaintext HTTP.
+See [privacy boundaries](docs/privacy-boundaries.md) for compatibility and rollback.
+
 Compose uses `/health`, so account exhaustion does not cause a restart loop. Reverse proxies and load balancers should use `/ready` when deciding whether to route new requests.
 
 ## Environment Variables

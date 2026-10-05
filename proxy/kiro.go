@@ -1193,9 +1193,6 @@ endpointLoop:
 			if payload != nil && strings.TrimSpace(payload.ProfileArn) != "" {
 				req.Header.Set("x-amzn-kiro-profile-arn", strings.TrimSpace(payload.ProfileArn))
 			}
-			if requestID := requestIDFromContext(requestContext); requestID != "" {
-				req.Header.Set("X-Request-Id", requestID)
-			}
 			req.Header.Set("x-amzn-kiro-agent-mode", "vibe")
 			req.Header.Set("x-amzn-codewhisperer-optout", "true")
 			req.Header.Set("Amz-Sdk-Request", fmt.Sprintf("attempt=%d; max=%d", endpointAttempt+1, preOutputStreamRetries+1))

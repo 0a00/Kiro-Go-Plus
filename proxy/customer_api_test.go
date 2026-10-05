@@ -114,7 +114,7 @@ func TestCustomerStatsAndLegacyAliasAreKeyScoped(t *testing.T) {
 		if body["tokensUsed"] != float64(120) || body["creditsUsed"] != 12.5 {
 			t.Fatalf("%s returned non-scoped usage: %+v", path, body)
 		}
-		for _, forbidden := range []string{"accounts", "available", "totalRequests", "successRequests", "failedRequests", "totalCredits"} {
+		for _, forbidden := range []string{"version", "accounts", "available", "totalRequests", "successRequests", "failedRequests", "totalCredits"} {
 			if _, exists := body[forbidden]; exists {
 				t.Fatalf("%s exposed global field %q", path, forbidden)
 			}
@@ -166,7 +166,7 @@ func TestCustomerLogsAreIsolatedAndSanitized(t *testing.T) {
 	if body.Logs[1].ErrorCategory != "upstream" || body.Logs[1].FirstContentMs == nil || *body.Logs[1].FirstContentMs != 125 {
 		t.Fatalf("unexpected sanitized failure view: %+v", body.Logs[1])
 	}
-	if body.Logs[1].RequestID != "request-secret" || body.Logs[1].Endpoint != "runtime" {
+	if body.Logs[1].RequestID != "request-secret" || body.Logs[1].Endpoint != "upstream" {
 		t.Fatalf("missing safe request correlation fields: %+v", body.Logs[1])
 	}
 	response := recorder.Body.String()
@@ -191,10 +191,10 @@ func TestCustomerLogsRejectInvalidLimit(t *testing.T) {
 
 func TestCustomerEndpointClassIsAllowlisted(t *testing.T) {
 	tests := map[string]string{
-		"https://runtime.eu.example.invalid/generateAssistantResponse?token=secret": "runtime",
-		"CodeWhisperer":                "codewhisperer",
-		"amazon q":                     "amazonq",
-		"https://kiro.example.invalid": "kiro",
+		"https://runtime.eu.example.invalid/generateAssistantResponse?token=secret": "upstream",
+		"CodeWhisperer":                "upstream",
+		"amazon q":                     "upstream",
+		"https://kiro.example.invalid": "upstream",
 		"https://unknown.example.invalid/private": "",
 	}
 	for endpoint, want := range tests {

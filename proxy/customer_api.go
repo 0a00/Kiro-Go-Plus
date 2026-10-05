@@ -53,7 +53,7 @@ func (h *Handler) authenticateCustomerKey(w http.ResponseWriter, r *http.Request
 	if provided != "" && entry != nil {
 		return entry
 	}
-	w.Header().Set("WWW-Authenticate", `Bearer realm="kiro"`)
+	w.Header().Set("WWW-Authenticate", `Bearer realm="api"`)
 	w.WriteHeader(http.StatusUnauthorized)
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": "Invalid or missing API key"})
 	return nil
@@ -61,7 +61,6 @@ func (h *Handler) authenticateCustomerKey(w http.ResponseWriter, r *http.Request
 
 type customerStatsView struct {
 	Status           string  `json:"status"`
-	Version          string  `json:"version"`
 	KeyStatus        string  `json:"keyStatus"`
 	RequestsCount    int64   `json:"requestsCount"`
 	TokensUsed       int64   `json:"tokensUsed"`
@@ -80,7 +79,6 @@ func (h *Handler) handleCustomerStats(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = json.NewEncoder(w).Encode(customerStatsView{
 		Status:           "ok",
-		Version:          config.Version,
 		KeyStatus:        customerKeyStatus(*entry),
 		RequestsCount:    entry.RequestsCount,
 		TokensUsed:       entry.TokensUsed,
@@ -278,14 +276,9 @@ func customerRequestLog(entry requestLogEntry) customerRequestLogView {
 func customerEndpointClass(endpoint string) string {
 	endpoint = strings.ToLower(strings.TrimSpace(endpoint))
 	switch {
-	case strings.Contains(endpoint, "runtime"):
-		return "runtime"
-	case strings.Contains(endpoint, "codewhisperer"):
-		return "codewhisperer"
-	case strings.Contains(endpoint, "amazonq") || strings.Contains(endpoint, "amazon q"):
-		return "amazonq"
-	case strings.Contains(endpoint, "kiro"):
-		return "kiro"
+	case strings.Contains(endpoint, "runtime"), strings.Contains(endpoint, "codewhisperer"),
+		strings.Contains(endpoint, "amazonq"), strings.Contains(endpoint, "amazon q"), strings.Contains(endpoint, "kiro"):
+		return "upstream"
 	default:
 		return ""
 	}

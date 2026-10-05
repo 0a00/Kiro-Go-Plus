@@ -161,6 +161,7 @@ run_quick() {
   if command -v node >/dev/null 2>&1; then
     info "checking browser JavaScript"
     node --check web/app.js
+    node --check web/login.js
     node --check web/credential-import.js
     node scripts/credential-import.test.js
     node --test scripts/client-e2e.test.js

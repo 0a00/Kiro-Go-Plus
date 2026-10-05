@@ -33,6 +33,10 @@ import (
 )
 
 func main() {
+	if len(os.Args) == 2 && os.Args[1] == "--version" {
+		fmt.Println(config.Version)
+		return
+	}
 	// 配置文件路径，支持环境变量覆盖
 	configPath := "data/config.json"
 	if envPath := os.Getenv("CONFIG_PATH"); envPath != "" {

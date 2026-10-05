@@ -1318,9 +1318,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"status":  "ok",
-		"version": config.Version,
-		"uptime":  time.Now().Unix() - h.startTime,
+		"status": "ok",
 	})
 }
 
@@ -1345,6 +1343,10 @@ func (h *Handler) readinessSnapshot() (bool, int, int, float64, string) {
 }
 
 func (h *Handler) handleReady(w http.ResponseWriter, r *http.Request) {
+	h.writeReadiness(w, r, false)
+}
+
+func (h *Handler) writeReadiness(w http.ResponseWriter, r *http.Request, detailed bool) {
 	ready, total, available, ratio, reason := h.readinessSnapshot()
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	if !ready {
@@ -1355,15 +1357,15 @@ func (h *Handler) handleReady(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 	}
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"status":         map[bool]string{true: "ready", false: "not_ready"}[ready],
-		"ready":          ready,
-		"accounts":       total,
-		"available":      available,
-		"availableRatio": ratio,
-		"reason":         reason,
-		"version":        config.Version,
-	})
+	result := map[string]interface{}{
+		"status": map[bool]string{true: "ready", false: "not_ready"}[ready],
+		"ready":  ready,
+	}
+	if detailed {
+		result["accounts"], result["available"], result["availableRatio"] = total, available, ratio
+		result["reason"], result["version"] = reason, config.Version
+	}
+	json.NewEncoder(w).Encode(result)
 }
 
 // handleModels 模型列表
@@ -1388,9 +1390,9 @@ func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request) {
 
 	// 添加别名模型
 	models = append(models,
-		buildModelInfo("auto", "kiro-proxy", true),
-		buildModelInfo("gpt-4o", "kiro-proxy", true),
-		buildModelInfo("gpt-4", "kiro-proxy", true),
+		buildModelInfo("auto", "gateway", true),
+		buildModelInfo("gpt-4o", "gateway", true),
+		buildModelInfo("gpt-4", "gateway", true),
 	)
 	models = dedupeModelResponse(models)
 
@@ -2950,7 +2952,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 				Error:               err.Error(),
 			}
 			h.recordDiagnosticFailureForPayload("claude.messages.stream", model, account, mapped.Status, err, payload)
-			sendStreamError(mapped.Status, mapped.ClaudeType, publicErrorMessage(payloadContext(payload), err))
+			sendStreamError(mapped.Status, mapped.ClaudeType, clientErrorMessage(err))
 			entry.DurationMs = requestDurationMs(startedAt)
 			h.recordRequestLogForPayload(payload, entry)
 			return
@@ -3052,13 +3054,13 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 			}
 			h.recordDiagnosticFailureForPayload("claude.messages.stream", model, nil, 429, busyErr, payload)
 			w.Header().Set("Retry-After", retryAfterSeconds(upstreamBusyRetryAfter(busyErr)))
-			sendStreamError(429, "rate_limit_error", publicErrorMessage(payloadContext(payload), busyErr))
+			sendStreamError(429, "rate_limit_error", clientErrorMessage(busyErr))
 			entry.DurationMs = requestDurationMs(startedAt)
 			h.recordRequestLogForPayload(payload, entry)
 			return
 		}
 		h.recordNoAvailableAccounts(payload, "claude.messages.stream", model, startedAt, firstContent.Value())
-		sendStreamError(503, "api_error", "No available accounts")
+		sendStreamError(503, "api_error", "The service is temporarily unavailable. Please retry later.")
 		return
 	}
 
@@ -3077,7 +3079,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 	}
 	h.recordDiagnosticFailureForPayload("claude.messages.stream", model, nil, mapped.Status, lastErr, payload)
 	applyDownstreamErrorHeaders(w, mapped)
-	sendStreamError(mapped.Status, mapped.ClaudeType, publicErrorMessage(payloadContext(payload), lastErr))
+	sendStreamError(mapped.Status, mapped.ClaudeType, clientErrorMessage(lastErr))
 	entry.DurationMs = requestDurationMs(startedAt)
 	h.recordRequestLogForPayload(payload, entry)
 }
@@ -3451,11 +3453,11 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 			})
 			h.recordDiagnosticFailureForPayload("claude.messages", model, nil, 429, busyErr, payload)
 			w.Header().Set("Retry-After", retryAfterSeconds(upstreamBusyRetryAfter(busyErr)))
-			h.sendClaudeError(w, 429, "rate_limit_error", publicErrorMessage(payloadContext(payload), busyErr))
+			h.sendClaudeError(w, 429, "rate_limit_error", clientErrorMessage(busyErr))
 			return
 		}
 		h.recordNoAvailableAccounts(payload, "claude.messages", model, startedAt, firstContent.Value())
-		h.sendClaudeError(w, 503, "api_error", "No available accounts")
+		h.sendClaudeError(w, 503, "api_error", "The service is temporarily unavailable. Please retry later.")
 		return
 	}
 
@@ -3473,7 +3475,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 	})
 	h.recordDiagnosticFailureForPayload("claude.messages", model, nil, mapped.Status, lastErr, payload)
 	applyDownstreamErrorHeaders(w, mapped)
-	h.sendClaudeError(w, mapped.Status, mapped.ClaudeType, publicErrorMessage(payloadContext(payload), lastErr))
+	h.sendClaudeError(w, mapped.Status, mapped.ClaudeType, clientErrorMessage(lastErr))
 }
 
 func (h *Handler) sendClaudeError(w http.ResponseWriter, status int, errType, message string) {
@@ -4033,7 +4035,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 				Error:          err.Error(),
 			}
 			h.recordDiagnosticFailureForPayload("openai.chat.stream", model, account, mapped.Status, err, payload)
-			sendOpenAIStreamError(mapped.OpenAIType, publicErrorMessage(payloadContext(payload), err))
+			sendOpenAIStreamError(mapped.OpenAIType, clientErrorMessage(err))
 			entry.DurationMs = requestDurationMs(startedAt)
 			h.recordRequestLogForPayload(payload, entry)
 			return
@@ -4129,11 +4131,11 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 			})
 			h.recordDiagnosticFailureForPayload("openai.chat.stream", model, nil, 429, busyErr, payload)
 			w.Header().Set("Retry-After", retryAfterSeconds(upstreamBusyRetryAfter(busyErr)))
-			sendTerminalOpenAIStreamError("rate_limit_error", publicErrorMessage(payloadContext(payload), busyErr))
+			sendTerminalOpenAIStreamError("rate_limit_error", clientErrorMessage(busyErr))
 			return
 		}
 		h.recordNoAvailableAccounts(payload, "openai.chat.stream", model, startedAt, firstContent.Value())
-		sendTerminalOpenAIStreamError("server_error", "No available accounts")
+		sendTerminalOpenAIStreamError("server_error", "The service is temporarily unavailable. Please retry later.")
 		return
 	}
 
@@ -4151,7 +4153,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 	})
 	h.recordDiagnosticFailureForPayload("openai.chat.stream", model, nil, mapped.Status, lastErr, payload)
 	applyDownstreamErrorHeaders(w, mapped)
-	sendTerminalOpenAIStreamError(mapped.OpenAIType, publicErrorMessage(payloadContext(payload), lastErr))
+	sendTerminalOpenAIStreamError(mapped.OpenAIType, clientErrorMessage(lastErr))
 }
 
 // handleOpenAINonStream OpenAI 非流式响应
@@ -4330,11 +4332,11 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 			})
 			h.recordDiagnosticFailureForPayload("openai.chat", model, nil, 429, busyErr, payload)
 			w.Header().Set("Retry-After", retryAfterSeconds(upstreamBusyRetryAfter(busyErr)))
-			h.sendOpenAIError(w, 429, "rate_limit_error", publicErrorMessage(payloadContext(payload), busyErr))
+			h.sendOpenAIError(w, 429, "rate_limit_error", clientErrorMessage(busyErr))
 			return
 		}
 		h.recordNoAvailableAccounts(payload, "openai.chat", model, startedAt, firstContent.Value())
-		h.sendOpenAIError(w, 503, "server_error", "No available accounts")
+		h.sendOpenAIError(w, 503, "server_error", "The service is temporarily unavailable. Please retry later.")
 		return
 	}
 
@@ -4352,7 +4354,7 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 	})
 	h.recordDiagnosticFailureForPayload("openai.chat", model, nil, mapped.Status, lastErr, payload)
 	applyDownstreamErrorHeaders(w, mapped)
-	h.sendOpenAIError(w, mapped.Status, mapped.OpenAIType, publicErrorMessage(payloadContext(payload), lastErr))
+	h.sendOpenAIError(w, mapped.Status, mapped.OpenAIType, clientErrorMessage(lastErr))
 }
 
 func (h *Handler) sendOpenAIError(w http.ResponseWriter, status int, errType, message string) {
@@ -4658,6 +4660,10 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 		h.apiClearPromptCache(w, r)
 	case path == "/version" && r.Method == "GET":
 		h.apiGetVersion(w, r)
+	case path == "/health" && r.Method == "GET":
+		json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok", "version": config.Version, "uptime": time.Now().Unix() - h.startTime})
+	case path == "/ready" && r.Method == "GET":
+		h.writeReadiness(w, r, true)
 	case path == "/export" && r.Method == "POST":
 		h.apiExportAccounts(w, r)
 	case path == "/api-keys" && r.Method == "GET":
@@ -8041,12 +8047,15 @@ func (h *Handler) apiGetAccountModelsCached(w http.ResponseWriter, r *http.Reque
 // ==================== 静态文件服务 ====================
 
 func (h *Handler) serveAdminPage(w http.ResponseWriter, r *http.Request) {
-	http.ServeFile(w, r, "web/index.html")
+	if h.adminPageAuthenticated(r) {
+		http.ServeFile(w, r, "web/index.html")
+		return
+	}
+	http.ServeFile(w, r, "web/login.html")
 }
 
 func (h *Handler) serveStaticFile(w http.ResponseWriter, r *http.Request) {
-	path := strings.TrimPrefix(r.URL.Path, "/admin/")
-	http.ServeFile(w, r, "web/"+path)
+	h.serveAdminAsset(w, r)
 }
 
 // apiGetThinkingConfig 获取 thinking 配置

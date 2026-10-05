@@ -332,6 +332,23 @@ git diff --check
 
 Docker Compose 使用 `/health`，账号耗尽不会导致容器反复重启。反向代理或负载均衡器应使用 `/ready` 决定是否继续分发请求。
 
+1.2.96 起，公开探针仅返回状态。版本、运行时长和账号池详情需要管理员认证，
+通过 `/admin/api/health`、`/admin/api/ready` 或 `/admin/api/version` 查询。
+客户统计不再提供服务版本，客户日志的端点类别统一为 `upstream`。
+未登录仅显示精简登录页，后台资源和旧版页面需要有效会话。
+
+不暴露密码即可检查 Compose 容器内实际二进制版本：
+
+```bash
+sudo docker compose exec -T kiro-go ./kiro-go --version
+```
+
+API 上游错误仅返回可操作的通用描述及请求 ID，详细原因保留在管理员日志中。
+不再向 Kiro 透传客户端请求 ID；认证请求清理遗留项目标签并使用中性的兜底 HTTP 标识。
+账号凭据、设备 ID 和必需协议头保持不变。这是信息暴露收敛，不是无指纹或防封保证。
+后台请使用 HTTPS 或私有隧道，隐藏项目名称不能保护明文 HTTP 中的凭据。
+兼容性和回滚说明见[隐私边界](docs/privacy-boundaries.md)。
+
 ## 环境变量
 
 | 变量 | 说明 | 默认值 |

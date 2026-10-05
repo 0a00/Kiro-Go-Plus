@@ -145,8 +145,11 @@ func TestResponsesStoreRequiresMasterKey(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"test","input":"private","store":true}`))
 	(&Handler{}).handleOpenAIResponses(recorder, request)
-	if recorder.Code != http.StatusServiceUnavailable || !strings.Contains(recorder.Body.String(), "KIRO_MASTER_KEY") {
+	if recorder.Code != http.StatusServiceUnavailable || !strings.Contains(recorder.Body.String(), "Response storage is unavailable") {
 		t.Fatalf("expected storage key error, code=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if strings.Contains(recorder.Body.String(), "KIRO_") {
+		t.Fatal("storage error exposed deployment configuration")
 	}
 }
 

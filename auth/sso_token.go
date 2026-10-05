@@ -73,7 +73,7 @@ func ImportFromSsoToken(bearerToken, region string) (accessToken, refreshToken, 
 
 func registerDeviceClient(oidcBase, startUrl string) (clientID, clientSecret string, err error) {
 	payload := map[string]interface{}{
-		"clientName": "Kiro API Proxy",
+		"clientName": "API Client",
 		"clientType": "public",
 		"scopes":     scopes,
 		"grantTypes": []string{"urn:ietf:params:oauth:grant-type:device_code", "refresh_token"},
@@ -313,8 +313,8 @@ func GetUserInfo(accessToken string) (email, userID string, err error) {
 	req, _ := http.NewRequest("GET", url, nil)
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "aws-sdk-js/1.0.18 KiroAPIProxy")
-	req.Header.Set("x-amz-user-agent", "aws-sdk-js/1.0.18 KiroAPIProxy")
+	req.Header.Set("User-Agent", "aws-sdk-js/1.0.18")
+	req.Header.Set("x-amz-user-agent", "aws-sdk-js/1.0.18")
 
 	client := httpClient()
 	resp, err := client.Do(req)

@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>Sign In</title>
+  <link rel="stylesheet" href="/admin/login.css">
+  <script src="/admin/login.js" defer></script>
+</head>
+<body>
+  <main>
+    <h1 id="heading">Administration</h1>
+    <form id="loginForm">
+      <label for="password" id="passwordLabel">Password</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" required autofocus>
+      <label class="remember"><input id="remember" type="checkbox"><span id="rememberLabel">Remember this session</span></label>
+      <button id="submit" type="submit">Sign In</button>
+      <p id="error" role="alert" aria-live="polite"></p>
+    </form>
+  </main>
+</body>
+</html>

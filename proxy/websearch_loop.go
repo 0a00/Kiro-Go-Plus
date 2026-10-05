@@ -556,7 +556,7 @@ func (h *Handler) handleClaudeWebSearchLoop(
 		var err error
 		stream, err = newWebSearchSSESession(ctx, h, w, responseModel, estimatedInputTokens, firstContent)
 		if err != nil {
-			h.sendClaudeError(w, http.StatusInternalServerError, "api_error", publicErrorMessage(ctx, err))
+			h.sendClaudeError(w, http.StatusInternalServerError, "api_error", clientErrorMessage(err))
 			return
 		}
 		defer stream.close()
@@ -599,10 +599,10 @@ func (h *Handler) handleClaudeWebSearchLoop(
 			Status: "failed", StatusCode: mapped.Status, Error: publicErrorMessage(ctx, err),
 		}
 		if stream != nil {
-			stream.sendError(mapped.ClaudeType, publicErrorMessage(ctx, err))
+			stream.sendError(mapped.ClaudeType, clientErrorMessage(err))
 		} else {
 			applyDownstreamErrorHeaders(w, mapped)
-			h.sendClaudeError(w, mapped.Status, mapped.ClaudeType, publicErrorMessage(ctx, err))
+			h.sendClaudeError(w, mapped.Status, mapped.ClaudeType, clientErrorMessage(err))
 		}
 		entry.DurationMs = requestDurationMs(startedAt)
 		firstContent.Apply(&entry)

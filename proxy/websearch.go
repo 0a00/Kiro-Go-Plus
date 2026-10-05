@@ -263,7 +263,7 @@ func (h *Handler) handleClaudeWebSearch(ctx context.Context, w http.ResponseWrit
 			RequestSummary: query,
 		})
 		applyDownstreamErrorHeaders(w, mapped)
-		h.sendClaudeError(w, statusCode, mapped.ClaudeType, publicErrorMessage(ctx, err))
+		h.sendClaudeError(w, statusCode, mapped.ClaudeType, clientErrorMessage(err))
 		h.recordRequestLogForContext(ctx, requestLogEntry{
 			Timestamp:    time.Now().Unix(),
 			Protocol:     "claude.web_search",

@@ -51,7 +51,7 @@ func GetAuthClientForProxy(proxyURL string) (*http.Client, error) {
 	return authProxyClientCache.Get(proxyURL, func() *http.Client {
 		return &http.Client{
 			Timeout:   30 * time.Second,
-			Transport: transport,
+			Transport: authHeaderTransport{base: transport},
 		}
 	}), nil
 }
@@ -92,7 +92,7 @@ func GetAuthClientForAccount(account *config.Account) (*http.Client, error) {
 		return nil, err
 	}
 	return authProxyClientCache.Get(cacheKey, func() *http.Client {
-		return &http.Client{Timeout: 30 * time.Second, Transport: transport}
+		return &http.Client{Timeout: 30 * time.Second, Transport: authHeaderTransport{base: transport}}
 	}), nil
 }
 
@@ -156,7 +156,7 @@ func InitHttpClient(proxyURL string) error {
 	}
 	client := &http.Client{
 		Timeout:   30 * time.Second,
-		Transport: transport,
+		Transport: authHeaderTransport{base: transport},
 	}
 	httpClientStore.Store(client)
 	return nil

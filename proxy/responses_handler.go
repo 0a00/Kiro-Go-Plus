@@ -125,7 +125,8 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 		storeResponse = *req.Store
 	}
 	if storeResponse && !responsesStorageEncryptionEnabled() {
-		h.sendOpenAIError(w, http.StatusServiceUnavailable, "server_error", "Responses storage requires KIRO_MASTER_KEY or KIRO_MASTER_KEY_FILE")
+		logger.Warnf("request_id=%s Responses storage requires KIRO_MASTER_KEY or KIRO_MASTER_KEY_FILE", requestIDFromContext(r.Context()))
+		h.sendOpenAIError(w, http.StatusServiceUnavailable, "server_error", "Response storage is unavailable. Set store to false or contact the administrator.")
 		return
 	}
 
@@ -484,11 +485,11 @@ func (h *Handler) handleResponsesNonStream(
 			})
 			h.recordDiagnosticFailureForPayload("openai.responses", model, nil, 429, busyErr, payload)
 			w.Header().Set("Retry-After", retryAfterSeconds(upstreamBusyRetryAfter(busyErr)))
-			h.sendOpenAIError(w, 429, "rate_limit_error", publicErr)
+			h.sendOpenAIError(w, 429, "rate_limit_error", clientErrorMessage(busyErr))
 			return
 		}
 		h.recordNoAvailableAccounts(payload, "openai.responses", model, startedAt, firstContent.Value())
-		h.sendOpenAIError(w, 503, "server_error", "No available accounts")
+		h.sendOpenAIError(w, 503, "server_error", "The service is temporarily unavailable. Please retry later.")
 		return
 	}
 	mapped := mapDownstreamError(lastErr)
@@ -506,7 +507,7 @@ func (h *Handler) handleResponsesNonStream(
 	})
 	h.recordDiagnosticFailureForPayload("openai.responses", model, nil, mapped.Status, lastErr, payload)
 	applyDownstreamErrorHeaders(w, mapped)
-	h.sendOpenAIError(w, mapped.Status, mapped.OpenAIType, publicErr)
+	h.sendOpenAIError(w, mapped.Status, mapped.OpenAIType, clientErrorMessage(lastErr))
 }
 
 func buildResponsesObject(
@@ -1110,7 +1111,7 @@ func (h *Handler) handleResponsesStream(
 			}
 			mapped := mapDownstreamError(err)
 			publicErr := publicErrorMessage(payloadContext(payload), err)
-			sendFailure(mapped.OpenAIType, publicErr)
+			sendFailure(mapped.OpenAIType, clientErrorMessage(err))
 			h.recordFailure()
 			h.recordRequestLogForPayload(payload, requestLogEntry{
 				Timestamp:      time.Now().Unix(),
@@ -1228,13 +1229,13 @@ func (h *Handler) handleResponsesStream(
 			}
 			h.recordDiagnosticFailureForPayload("openai.responses.stream", model, nil, 429, busyErr, payload)
 			w.Header().Set("Retry-After", retryAfterSeconds(upstreamBusyRetryAfter(busyErr)))
-			sendFailure("rate_limit_error", publicErr)
+			sendFailure("rate_limit_error", clientErrorMessage(busyErr))
 			entry.DurationMs = requestDurationMs(startedAt)
 			h.recordRequestLogForPayload(payload, entry)
 			return
 		}
 		h.recordNoAvailableAccounts(payload, "openai.responses.stream", model, startedAt, firstContent.Value())
-		sendFailure("server_error", "No available accounts")
+		sendFailure("server_error", "The service is temporarily unavailable. Please retry later.")
 		return
 	}
 	mapped := mapDownstreamError(lastErr)
@@ -1251,7 +1252,7 @@ func (h *Handler) handleResponsesStream(
 		Error:          publicErr,
 	}
 	h.recordDiagnosticFailureForPayload("openai.responses.stream", model, nil, mapped.Status, lastErr, payload)
-	sendFailure(mapped.OpenAIType, publicErr)
+	sendFailure(mapped.OpenAIType, clientErrorMessage(lastErr))
 	entry.DurationMs = requestDurationMs(startedAt)
 	h.recordRequestLogForPayload(payload, entry)
 }
