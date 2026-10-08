@@ -147,7 +147,7 @@ func TestExecuteLoadClassifiesConcurrentUpstreamFaults(t *testing.T) {
 	}
 	execution := r.executeLoad(context.Background(), 5, 20, 32)
 	result := buildLoadExecutionResult("fault-load", r.model, 5, 20, execution)
-	if result.Successes == result.Requests || result.DistinctRequestIDs != 0 {
+	if result.Successes == result.Requests || result.DistinctRequestIDs != result.Requests {
 		t.Fatalf("faults were not represented correctly: %+v", result)
 	}
 	if !hasFailureSuffix(result.FailureCategories, "http_429") || !hasFailureSuffix(result.FailureCategories, "http_5xx") || !hasFailureSuffix(result.FailureCategories, "stream_protocol") || !hasFailureSuffix(result.FailureCategories, "marker_mismatch") {

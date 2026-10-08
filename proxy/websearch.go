@@ -309,10 +309,9 @@ func (h *Handler) handleClaudeWebSearch(ctx context.Context, w http.ResponseWrit
 		return
 	}
 	firstContent.Apply(&entry)
-	h.recordRequestLogForContext(ctx, entry)
 	resp := buildWebSearchClaudeResponse(responseModel, query, output, results, estimatedInputTokens, outputTokens)
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	json.NewEncoder(w).Encode(resp)
+	writeJSONWithDelivery(ctx, w, resp, &entry, startedAt)
+	h.recordRequestLogForContext(ctx, entry)
 }
 
 func (h *Handler) callWebSearchMCP(ctx context.Context, model, query string) (*webSearchResults, error) {

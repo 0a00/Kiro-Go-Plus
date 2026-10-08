@@ -71,10 +71,18 @@ func (w *requestDetailStatusWriter) Unwrap() http.ResponseWriter {
 }
 
 func (w *requestDetailFlushingWriter) Flush() {
+	_ = w.FlushError()
+}
+
+func (w *requestDetailFlushingWriter) FlushError() error {
 	if w.statusCode == 0 {
 		w.statusCode = http.StatusOK
 	}
+	if flusher, ok := w.flusher.(interface{ FlushError() error }); ok {
+		return flusher.FlushError()
+	}
 	w.flusher.Flush()
+	return nil
 }
 
 type requestDetail struct {
@@ -111,6 +119,7 @@ type requestDetail struct {
 	ToolSchemaRepairs        int                    `json:"toolSchemaRepairs,omitempty"`
 	Request                  requestDetailRequest   `json:"request"`
 	Response                 requestDetailResponse  `json:"response"`
+	Delivery                 *responseDelivery      `json:"delivery,omitempty"`
 	Attempts                 []requestDetailAttempt `json:"attempts,omitempty"`
 	Timeline                 []requestDetailEvent   `json:"timeline,omitempty"`
 	DroppedEvents            int                    `json:"droppedEvents,omitempty"`
@@ -1143,6 +1152,7 @@ func (t *requestDetailTrace) finalize(entry requestLogEntry) (requestDetail, boo
 		Status:                   entry.Status,
 		StatusCode:               entry.StatusCode,
 		DurationMs:               entry.DurationMs,
+		Delivery:                 entry.Delivery,
 		FirstMeaningfulEventMs:   entry.FirstMeaningfulEventMs,
 		FirstUpstreamHeadersMs:   entry.FirstUpstreamHeadersMs,
 		FirstUpstreamBodyByteMs:  entry.FirstUpstreamBodyByteMs,

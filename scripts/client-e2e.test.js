@@ -255,18 +255,25 @@ if (last.includes('CLIENT_CAPABILITY_PROBE_OK')) {
   emit({type:'result',subtype:'success',is_error:false,result:'<search_web>fake</search_web> CLAUDE_WEB_SEARCH_OK'});
 } else process.exit(47);
 `;
-function runFixture(mode, scenario, options = []) {
+function runFixture(mode, scenario, options = [], audit = '0') {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'kiro-client-script-test.'));
   try {
     fs.writeFileSync(path.join(tmp, 'claude'), fakeCLI, { mode: 0o700 });
     const env = { ...process.env, PATH: `${tmp}:${process.env.PATH}`, KIRO_E2E_FIXTURE: mode,
       KIRO_DEV_API_KEY: 'test-key', KIRO_DEV_BASE_URL: 'http://127.0.0.1:1',
-      ANTHROPIC_AUTH_TOKEN: 'inherited-test-token', CLAUDE_CODE_SIMPLE: '1', KIRO_DEV_CLIENT_FAIL_ON_WARNING: '0' };
+      ANTHROPIC_AUTH_TOKEN: 'inherited-test-token', CLAUDE_CODE_SIMPLE: '1', KIRO_DEV_CLIENT_FAIL_ON_WARNING: '0', KIRO_DEV_CLIENT_AUDIT: audit };
     delete env.KIRO_DEV_CLIENT_ARTIFACT_DIR;
     return spawnSync('bash', [path.join(__dirname, 'client-e2e.sh'), '--scenarios', scenario, '--model', 'fixture-model', '--timeout', '5s', ...options],
       { env, encoding: 'utf8', timeout: 60000 });
   } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
 }
+test('unavailable server audit cannot leave a clean PASS and honors strict warnings', () => {
+  const r = runFixture('file-ok', 'file-tools', [], '1');
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  assert.match(r.stdout, /file-tools\s+WARN.*server_audit_unexpected=0 incomplete=true/);
+  const strict = runFixture('file-ok', 'file-tools', ['--fail-on-warning'], '1');
+  assert.equal(strict.status, 1, strict.stdout + strict.stderr);
+});
 test('autonomous scenario accepts model-chosen single or multiple writes but requires disk evidence',()=>{
   for(const mode of ['auto-single','auto-multiple']){
     const r=runFixture(mode,'workspace-autonomous-large-file');assert.equal(r.status,0,r.stdout+r.stderr);assert.match(r.stdout,/PASS/);

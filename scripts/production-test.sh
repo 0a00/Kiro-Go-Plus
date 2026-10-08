@@ -36,7 +36,7 @@ Options:
   --client-concurrency N      Concurrent Claude Code clients (default: 2).
   --client-max-budget-usd N   Claude Code budget per client (default: 0.10).
   --client-agent-max-budget-usd N
-                              Budget for multi-turn/long-tool agent cases (default: 0.75).
+                              Budget for multi-turn/long-tool agent cases (default: 3.00).
   --client-cancel-after DURATION  Cancellation probe deadline (default: 8s).
   --client-require-web-search  Fail if the CLI does not expose native WebSearch.
   --report-dir DIR            Private report directory (default: /tmp/kiro-production-test-*).
@@ -106,7 +106,7 @@ CLIENT_SCENARIOS="${KIRO_PROD_CLIENT_SCENARIOS:-all}"
 CLIENT_REQUIRE_WEB_SEARCH=0
 CLIENT_CONCURRENCY="${KIRO_PROD_CLIENT_CONCURRENCY:-2}"
 CLIENT_MAX_BUDGET="${KIRO_PROD_CLIENT_MAX_BUDGET_USD:-${KIRO_DEV_MAX_BUDGET_USD:-0.10}}"
-CLIENT_AGENT_MAX_BUDGET="${KIRO_PROD_CLIENT_AGENT_MAX_BUDGET_USD:-${KIRO_DEV_AGENT_MAX_BUDGET_USD:-0.75}}"
+CLIENT_AGENT_MAX_BUDGET="${KIRO_PROD_CLIENT_AGENT_MAX_BUDGET_USD:-${KIRO_DEV_AGENT_MAX_BUDGET_USD:-3.00}}"
 CLIENT_CANCEL_AFTER="${KIRO_PROD_CLIENT_CANCEL_AFTER:-${KIRO_DEV_CLIENT_CANCEL_AFTER:-8s}}"
 
 while (($# > 0)); do
@@ -285,6 +285,7 @@ command -v curl >/dev/null 2>&1 || die "curl is required"
 command -v timeout >/dev/null 2>&1 || die "timeout is required"
 if ((RUN_CLIENT)); then
   command -v claude >/dev/null 2>&1 || die "Claude Code is required; use --skip-client-e2e to skip"
+  command -v node >/dev/null 2>&1 || die "Node.js is required for client request auditing"
 fi
 
 if [[ -z "$REPORT_DIR" ]]; then
@@ -318,6 +319,7 @@ chmod 600 "$DISCOVERED_MODEL_PATH"
 export KIRO_DEV_API_KEY="${KIRO_PROD_API_KEY}"
 export KIRO_DEV_BASE_URL="$BASE_URL"
 export KIRO_DEV_ALLOW_REMOTE="$ALLOW_REMOTE"
+export KIRO_DEV_CLIENT_AUDIT=1
 # Do not let inherited development model variables collide with the matrix
 # suite, which intentionally passes --models or --all-models.
 unset KIRO_DEV_MODEL KIRO_DEV_THINKING_MODEL KIRO_DEV_MODELS
@@ -383,6 +385,9 @@ run_phase() {
       record_phase "$name" PASS "$log" "$report"
     fi
   else
+    if ((status == 124 || status == 137)); then
+      printf 'PRODUCTION_WARNING: phase deadline reached; remaining cases were not verified\n' >>"$log"
+    fi
     record_phase "$name" FAIL "$log" "$report"
   fi
 }

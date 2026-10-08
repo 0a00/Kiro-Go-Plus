@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"kiro-go/config"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -109,6 +110,32 @@ func TestLogArchiveWritesJSONLWithSecurePermissions(t *testing.T) {
 		t.Fatalf("archive was not recoverable after restart: %+v", status)
 	}
 	restored.Close()
+}
+
+func TestLogArchiveCapacityWarningDoesNotChangeRetention(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "events-00000000000000000001.jsonl")
+	for _, size := range []int{0, 89, 90, 100, 110} {
+		if err := os.WriteFile(path, []byte(strings.Repeat("x", size)), 0600); err != nil {
+			t.Fatal(err)
+		}
+		a := &logArchive{dir: dir, cfg: config.LogArchiveConfig{Enabled: true, MaxBytes: 100, RetentionDays: 30}}
+		status := a.Status()
+		if status.CapacityWarning != (size >= 90) || math.Abs(status.CapacityUsedPercent-float64(size)) > 0.000001 {
+			t.Fatalf("wrong capacity: %+v", status)
+		}
+		if info, err := os.Stat(path); err != nil || info.Size() != int64(size) {
+			t.Fatal("status query changed files")
+		}
+		a.cfg.Enabled = false
+		if a.Status().CapacityWarning {
+			t.Fatal("disabled archive warned")
+		}
+		a.cfg.MaxBytes = 0
+		if a.Status().CapacityUsedPercent != 0 {
+			t.Fatal("invalid limit division")
+		}
+	}
 }
 
 func TestLogArchiveRetentionRemovesExpiredFiles(t *testing.T) {

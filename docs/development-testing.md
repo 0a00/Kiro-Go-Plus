@@ -4,6 +4,44 @@ The test tooling separates deterministic offline checks from opt-in live checks.
 Offline modes never contact Kiro. Live modes use configured accounts and consume
 quota, so use a dedicated API key and start with small limits.
 
+### 1.2.97 Acceptance Changes
+
+The full API suite includes `thinking-display-updates`, a direct single request
+that cannot conceal a validation failure behind Claude Code's automatic fallback.
+Every devcheck request generates a local correlation ID before sending it, so
+headerless EOF reports can still be matched to server logs.
+
+Production CLI tests enable `KIRO_DEV_CLIENT_AUDIT=1`. Each scenario compares
+key-scoped `/api/logs` snapshots, retaining only request IDs and fixed status
+fields. Recovered HTTP failures or incomplete/unavailable evidence change PASS
+to WARN (`--fail-on-warning` makes it fatal). Deliberate 499 cancellation is
+excluded. Use a dedicated key with no unrelated traffic and enable request
+details so early validation rejections are recorded. The audit observes retained
+logs, not packet delivery, and warns on retention rollover or log resets. It
+does not collect prompts, credentials or administrator logs. Standalone CLI
+auditing is opt-in; offline fake-client tests never contact a live service.
+
+Production agent cases now default to a **3.00 USD per-client ceiling**; explicit
+budgets still win. The standalone low-cost defaults are unchanged. This avoids
+mistaking a one-dollar client budget exhaustion for a gateway disconnect during
+large file/readback tests. Keep the default 90-minute phase cap for `all` or run
+small groups. Reaching a custom phase cap is a failed/incomplete run, not proof
+of a server timeout. No test timeout, production retry or operator setting is
+silently extended.
+
+Reference review (2026-10-08, read-only): Go f8f6071 and zsecducna 7ee2ea4
+retain the old display allowlist; Rust request code 5ca5703 and inspected local
+account-manager types ignore this field rather than proving update semantics.
+Zhang remote 5aa7f56, gateway a5292ca and login helper 8c280d7 provide no verified
+fix for this defect. AIClient2API remote advanced to 44d5782c; unreviewed contents
+were not copied. The official TypeScript SDK's beta messages types explicitly
+allow `updates` for enabled/adaptive thinking. We adapt the local validation and
+preserve real reasoning blocks; no synthetic progress, identity change, prompt
+rewrite, tool-JSON splitting or post-output retry is introduced. Writer failures
+use local observations, not assumptions about the provider. Focused fixtures
+exercise display variants, three-protocol write/flush failures, cancellation,
+correlation before headers, log-audit rollover/rejections and capacity warnings.
+
 ## Offline Quality Gates
 
 ```bash

@@ -480,6 +480,7 @@ var scenarioCatalog = map[string]string{
 	"anthropic-non-stream":     "Anthropic Messages JSON response",
 	"anthropic-stream":         "Anthropic Messages SSE and timing",
 	"thinking-stream":          "thinking/reasoning SSE visibility",
+	"thinking-display-updates": "Claude Code thinking.display=updates compatibility without client retries",
 	"thinking-protocols":       "Chat and Responses reasoning SSE visibility",
 	"skill-context":            "client-side Skill system instruction transport",
 	"anthropic-tool-roundtrip": "Anthropic forced tool call and tool_result continuation",

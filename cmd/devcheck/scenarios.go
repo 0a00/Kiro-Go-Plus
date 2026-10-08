@@ -53,6 +53,7 @@ func (r *runner) runSuite(ctx context.Context) {
 	r.runIf("anthropic-non-stream", ctx, r.runClaudeNonStream)
 	r.runIf("anthropic-stream", ctx, r.runClaudeStream)
 	r.runIf("thinking-stream", ctx, r.runThinkingStream)
+	r.runIf("thinking-display-updates", ctx, r.runThinkingDisplayUpdates)
 	r.runIf("thinking-protocols", ctx, r.runThinkingProtocols)
 	r.runIf("skill-context", ctx, r.runSkillContext)
 	r.runIf("anthropic-tool-roundtrip", ctx, r.runAnthropicFunction)
@@ -238,13 +239,27 @@ func (r *runner) runClaudeStream(parent context.Context) {
 }
 
 func (r *runner) runThinkingStream(parent context.Context) {
+	r.runThinkingDisplay(parent, "")
+}
+
+func (r *runner) runThinkingDisplayUpdates(parent context.Context) {
+	r.runThinkingDisplay(parent, "updates")
+}
+
+func (r *runner) runThinkingDisplay(parent context.Context, display string) {
 	ctx, cancel := r.scenarioContext(parent)
 	defer cancel()
 	prompt := "Calculate 137 * 43 carefully, then give the final number in one sentence."
 	payload := claudePayload(r.thinking, true, prompt, 4096)
-	payload["thinking"] = map[string]interface{}{"type": "enabled", "budget_tokens": 1024}
+	thinking := map[string]interface{}{"type": "enabled", "budget_tokens": 1024}
+	name := "thinking-stream"
+	if display != "" {
+		thinking["display"] = display
+		name = "thinking-display-updates"
+	}
+	payload["thinking"] = thinking
 	response := r.post(ctx, "/v1/messages", payload, true, true)
-	result := streamScenarioResult("thinking-stream", "anthropic", r.thinking, response)
+	result := streamScenarioResult(name, "anthropic", r.thinking, response)
 	if result.Status == statusPass && response.stream.thinkingDeltas == 0 {
 		result.Status = statusWarn
 		result.Detail += "; no thinking_delta observed (model or server setting may suppress reasoning)"

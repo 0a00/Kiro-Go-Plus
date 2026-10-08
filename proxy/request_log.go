@@ -104,6 +104,8 @@ type requestLogEntry struct {
 	Credits                  float64  `json:"credits,omitempty"`
 	Error                    string   `json:"error,omitempty"`
 	DetailAvailable          bool     `json:"detailAvailable,omitempty"`
+
+	Delivery *responseDelivery `json:"delivery,omitempty"`
 }
 
 // UnmarshalJSON accepts the fallback metadata written by versions before it

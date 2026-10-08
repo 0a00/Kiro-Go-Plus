@@ -44,6 +44,8 @@ clean_env=(
   -u KIRO_PROD_FAIL_ON_WARNING
   -u KIRO_PROD_ALLOW_REMOTE
   -u KIRO_PROD_CONFIRM
+  -u KIRO_PROD_CLIENT_AGENT_MAX_BUDGET_USD
+  -u KIRO_DEV_AGENT_MAX_BUDGET_USD
   -u KIRO_DEV_API_KEY
   -u KIRO_DEV_BASE_URL
   -u KIRO_DEV_ALLOW_REMOTE
@@ -56,6 +58,10 @@ clean_env=(
 "${clean_env[@]}" bash "$TEST_SCRIPT" --dry-run --skip-web-search --skip-matrix \
   --skip-load --skip-client-e2e --staircase --soak --fail-on-warning --client-require-web-search >/dev/null
 [[ ! -e "$NETWORK_MARKER" ]] || fail "dry-run invoked curl"
+plan="$("${clean_env[@]}" bash "$TEST_SCRIPT" --dry-run)"
+[[ "$plan" == *"agent=3.00"* ]] || fail "production agent budget default drifted"
+plan="$("${clean_env[@]}" bash "$TEST_SCRIPT" --dry-run --client-agent-max-budget-usd 0.50)"
+[[ "$plan" == *"agent=0.50"* ]] || fail "explicit client budget was overwritten"
 
 # Exercise discovery without invoking the production entry point or network.
 source <(sed -n '/^extract_first_claude_model()/,/^}/p' "$TEST_SCRIPT")

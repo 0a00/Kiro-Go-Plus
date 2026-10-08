@@ -62,6 +62,7 @@ ARTIFACT_DIR="${KIRO_DEV_CLIENT_ARTIFACT_DIR:-}"
 KEEP_ARTIFACTS=0
 FAIL_ON_WARNING="${KIRO_DEV_CLIENT_FAIL_ON_WARNING:-0}"
 REQUIRE_WEB_SEARCH=0
+AUDIT_REQUESTS="${KIRO_DEV_CLIENT_AUDIT:-0}"
 
 while (($# > 0)); do
   case "$1" in
@@ -217,6 +218,10 @@ is_positive_integer "$CLIENT_CONCURRENCY" || die "--concurrency must be a positi
 is_decimal "$MAX_BUDGET" || die "--max-budget-usd must be a non-negative decimal"
 is_decimal "$AGENT_MAX_BUDGET" || die "--agent-max-budget-usd must be a non-negative decimal"
 is_binary_flag "$FAIL_ON_WARNING" || die "--fail-on-warning must be 0 or 1"
+is_binary_flag "$AUDIT_REQUESTS" || die "KIRO_DEV_CLIENT_AUDIT must be 0 or 1"
+if ((AUDIT_REQUESTS)); then
+  command -v node >/dev/null 2>&1 || die "Node.js is required for request auditing"
+fi
 
 case "$BASE_URL" in
   *'?'*|*'#'*|*'@'*) die "base URL must not contain query, fragment, or userinfo" ;;
@@ -511,7 +516,19 @@ run_case() {
   CASE_OUTPUTS=()
   local status file evidence recoveries=0 stream_errors=0
   local -A inspected=()
+  local audit_before="$TMP_DIR/$name-audit-before.json" audit_after="$TMP_DIR/$name-audit-after.json" audit
+  if ((AUDIT_REQUESTS)); then
+    node "$SCRIPT_DIR/client-request-audit.js" snapshot >"$audit_before"
+  fi
   if "$@"; then status="$CASE_STATUS_HINT"; else status=FAIL; fi
+  if ((AUDIT_REQUESTS)); then
+    node "$SCRIPT_DIR/client-request-audit.js" snapshot >"$audit_after"
+    audit="$(node "$SCRIPT_DIR/client-request-audit.js" compare "$audit_before" "$audit_after")"
+    if [[ "$(jq -r '.warning' <<<"$audit")" == true ]]; then
+      [[ "$status" != PASS ]] || status=WARN
+      CASE_DETAIL+="; server_audit_unexpected=$(jq -r '.unexpected // 0' <<<"$audit") incomplete=$(jq -r '.incomplete == true' <<<"$audit")"
+    fi
+  fi
   for file in "${CASE_OUTPUTS[@]}"; do
     [[ -s "$file" && -z "${inspected[$file]:-}" ]] || continue
     inspected[$file]=1

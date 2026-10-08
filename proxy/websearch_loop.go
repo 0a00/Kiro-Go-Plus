@@ -634,8 +634,7 @@ func (h *Handler) handleClaudeWebSearchLoop(
 	} else {
 		markWebSearchFirstContent(firstContent, result.content)
 		response := buildWebSearchLoopResponse(responseModel, result)
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		_ = json.NewEncoder(w).Encode(response)
+		writeJSONWithDelivery(ctx, w, response, &entry, startedAt)
 	}
 	entry.DurationMs = requestDurationMs(startedAt)
 	firstContent.Apply(&entry)

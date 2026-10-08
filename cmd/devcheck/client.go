@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -149,6 +151,12 @@ func (r *runner) doWithSSEObserver(ctx context.Context, method, path string, bod
 		return apiResponse{err: err, errorStage: "build_request"}
 	}
 	req.Header.Set("User-Agent", r.userAgent)
+	var correlation [16]byte
+	if _, err := rand.Read(correlation[:]); err != nil {
+		return apiResponse{err: err, errorStage: "build_request"}
+	}
+	requestID := "devcheck_" + hex.EncodeToString(correlation[:])
+	req.Header.Set("X-Request-Id", requestID)
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
@@ -162,13 +170,16 @@ func (r *runner) doWithSSEObserver(ctx context.Context, method, path string, bod
 
 	resp, err := r.client.Do(req)
 	if err != nil {
-		return apiResponse{total: time.Since(startedAt), err: err, errorStage: "request_headers"}
+		return apiResponse{total: time.Since(startedAt), requestID: requestID, err: err, errorStage: "request_headers"}
 	}
 	defer resp.Body.Close()
 	result := apiResponse{
 		statusCode: resp.StatusCode,
 		headers:    time.Since(startedAt),
 		requestID:  strings.TrimSpace(resp.Header.Get("X-Request-Id")),
+	}
+	if result.requestID == "" {
+		result.requestID = requestID
 	}
 	if stream && resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		result.stream, result.err = consumeSSEWithObserver(resp.Body, startedAt, onEvent)

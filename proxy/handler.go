@@ -265,8 +265,8 @@ func validateClaudeThinkingConfig(thinking *ClaudeThinkingConfig, maxTokens int)
 	}
 
 	display := strings.ToLower(strings.TrimSpace(thinking.Display))
-	if display != "" && display != "summarized" && display != "omitted" {
-		return "thinking.display must be one of: summarized, omitted"
+	if display != "" && display != "summarized" && display != "omitted" && display != "updates" {
+		return "thinking.display must be one of: summarized, omitted, updates"
 	}
 	if kind == "disabled" && display != "" {
 		return "thinking.display is not supported when thinking.type is disabled"
@@ -291,7 +291,9 @@ func resolveClaudeThinkingResponseOptions(thinking *ClaudeThinkingConfig, defaul
 
 	display := strings.ToLower(strings.TrimSpace(thinking.Display))
 	switch display {
-	case "summarized":
+	case "summarized", "updates":
+		// Kiro supplies reasoning deltas, not a separate progress-summary feed.
+		// Preserve those real deltas in native thinking blocks; never invent updates.
 		opts.Format = "thinking"
 	case "omitted":
 		opts.Format = "thinking"
@@ -3375,7 +3377,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
 		h.promptCache.Update(cacheScope, cacheProfile)
 		h.promptCache.RecordDecision(cacheUsage, cacheDiagnostic)
-		h.recordRequestLogForPayload(payload, requestLogEntry{
+		entry := requestLogEntry{
 			Timestamp:                time.Now().Unix(),
 			Protocol:                 "claude.messages",
 			Model:                    model,
@@ -3395,7 +3397,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 			ToolUseCount:             len(toolUses),
 			StopReason:               stopReason,
 			Credits:                  credits,
-		})
+		}
 
 		responseThinkingContent := rawThinkingContent
 		includeEmptyThinkingBlock := thinking && thinkingOpts.OmitDisplay && rawThinkingContent != ""
@@ -3426,8 +3428,8 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 				Ephemeral1hInputTokens: cacheUsage.CacheCreation1hInputTokens,
 			}
 		}
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		json.NewEncoder(w).Encode(resp)
+		writeJSONWithDelivery(payloadContext(payload), w, resp, &entry, startedAt)
+		h.recordRequestLogForPayload(payload, entry)
 		return
 	}
 
@@ -4281,7 +4283,7 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
 		h.promptCache.Update(cacheScope, cacheProfile)
 		h.promptCache.RecordDecision(cacheUsage, cacheDiagnostic)
-		h.recordRequestLogForPayload(payload, requestLogEntry{
+		entry := requestLogEntry{
 			Timestamp:                time.Now().Unix(),
 			Protocol:                 "openai.chat",
 			Model:                    model,
@@ -4300,13 +4302,13 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 			ThinkingOutputChars:      outputCharCount(reasoningContent),
 			ToolUseCount:             len(toolUses),
 			Credits:                  credits,
-		})
+		}
 
 		thinkingFormat := config.GetThinkingConfig().OpenAIFormat
 		resp := KiroToOpenAIResponseWithReasoning(finalContent, reasoningContent, toolUses, inputTokens, outputTokens, responseModel, thinkingFormat, upstreamStopReason)
 		resp["usage"] = buildOpenAIUsageMap(inputTokens, outputTokens, thinkingTokens, cacheUsage)
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		json.NewEncoder(w).Encode(resp)
+		writeJSONWithDelivery(payloadContext(payload), w, resp, &entry, startedAt)
+		h.recordRequestLogForPayload(payload, entry)
 		return
 	}
 

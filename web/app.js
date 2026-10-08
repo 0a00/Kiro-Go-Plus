@@ -911,7 +911,7 @@
         '<td>' + escapeHtml(item.model || '-') + '</td>' +
         '<td>' + escapeHtml(maskEmail(account)) + '</td>' +
 		'<td>' + escapeHtml(item.endpoint || '-') + '</td>' +
-        '<td><span class="badge ' + statusClass + '">' + escapeHtml(String(item.statusCode || '')) + '</span></td>' +
+        '<td><span class="badge ' + statusClass + '">' + escapeHtml(item.status === 'delivery_failed' ? t('requests.deliveryFailed') : String(item.statusCode || '')) + '</span></td>' +
         '<td title="' + escapeAttr(tokensTitle) + '">' + escapeHtml(tokens) + (item.thinkingTokens ? '<div class="request-cell-meta">' + escapeHtml(t('requests.thinkingShort', item.thinkingTokens)) + '</div>' : '') + '</td>' +
         '<td title="' + escapeAttr(cacheTitle) + '">' + escapeHtml(cache) + (cacheStatus ? '<div class="request-cell-meta">' + escapeHtml(cacheStatus) + '</div>' : '') + '</td>' +
         '<td title="' + escapeAttr(outcomeTitle) + '">' + escapeHtml(outcome) + '</td>' +
@@ -3024,6 +3024,9 @@
       dropped
     );
     if (status.lastError) message += ' | ' + t('settings.logArchiveLastError', String(status.lastError));
+    if (status.capacityWarning === true) {
+      message += ' | ' + t('settings.logArchiveCapacityWarning', (Number(status.capacityUsedPercent) || 0).toFixed(1));
+    }
     $('logArchiveStatus').textContent = message;
   }
 

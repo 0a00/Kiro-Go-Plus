@@ -438,9 +438,6 @@ func (h *Handler) handleResponsesNonStream(
 			ToolUseCount:             len(toolUses),
 			Credits:                  credits,
 		}
-		entry.DurationMs = requestDurationMs(startedAt)
-		h.recordRequestLogForPayload(payload, entry)
-
 		respObj := buildResponsesObject(respID, responseModel, finalContent, reasoningContent, toolUses, inputTokens, outputTokens, thinkingTokens, cacheUsage, req, customTools)
 		if responseStopReasonIsIncomplete(upstreamStopReason) {
 			markResponseIncomplete(respObj)
@@ -457,8 +454,8 @@ func (h *Handler) handleResponsesNonStream(
 			}
 		}
 
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		_ = json.NewEncoder(w).Encode(respObj)
+		writeJSONWithDelivery(payloadContext(payload), w, respObj, &entry, startedAt)
+		h.recordRequestLogForPayload(payload, entry)
 		return
 	}
 

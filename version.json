@@ -1,5 +1,5 @@
 {
-  "version": "1.2.96",
-  "changelog": "Minimize public health and error metadata, protect admin assets behind session authentication, remove legacy project labels from authentication requests and stop forwarding client request IDs upstream. Preserve credentials, machine IDs, streaming behavior and private diagnostics. Add --version for local deployment verification.\n收紧公开探针、错误和管理资源的信息暴露，清理认证请求遗留标识，停止上游透传客户端请求 ID；保留认证、设备标识与后台诊断。",
+  "version": "1.2.97",
+  "changelog": "Accept thinking.display=updates with real reasoning deltas. Record non-stream JSON delivery/flush failures without replaying upstream work. Audit recovered Claude Code HTTP failures, preserve request IDs on connection EOF, and warn near archive capacity.\n兼容新思考显示参数，增加非流式响应交付诊断、客户端测试服务端日志核验及归档容量预警；不改超时和重试策略。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }

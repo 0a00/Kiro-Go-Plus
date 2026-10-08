@@ -71,6 +71,8 @@ type LogArchiveStatus struct {
 	Directory                string                  `json:"directory"`
 	FileCount                int                     `json:"fileCount"`
 	TotalBytes               int64                   `json:"totalBytes"`
+	CapacityUsedPercent      float64                 `json:"capacityUsedPercent"`
+	CapacityWarning          bool                    `json:"capacityWarning"`
 	OldestFileAt             int64                   `json:"oldestFileAt,omitempty"`
 	NewestFileAt             int64                   `json:"newestFileAt,omitempty"`
 	QueuedRecords            int                     `json:"queuedRecords"`
@@ -605,11 +607,17 @@ func (a *logArchive) Status() LogArchiveStatus {
 	a.statusMu.RLock()
 	lastError := a.lastError
 	a.statusMu.RUnlock()
+	percent := 0.0
+	if cfg.MaxBytes > 0 {
+		percent = float64(total) / float64(cfg.MaxBytes) * 100
+	}
 	return LogArchiveStatus{
 		Config:                   cfg,
 		Directory:                a.dir,
 		FileCount:                len(files),
 		TotalBytes:               total,
+		CapacityUsedPercent:      percent,
+		CapacityWarning:          cfg.Enabled && percent >= 90,
 		OldestFileAt:             oldest,
 		NewestFileAt:             newest,
 		QueuedRecords:            len(a.queue),

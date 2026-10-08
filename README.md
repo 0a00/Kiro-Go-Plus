@@ -356,6 +356,23 @@ traffic fingerprinting or account-ban risk. Use HTTPS or a private tunnel for ad
 access: hiding product names does not protect credentials on plaintext HTTP.
 See [privacy boundaries](docs/privacy-boundaries.md) for compatibility and rollback.
 
+In 1.2.97, `thinking.display: "updates"` is accepted for enabled/adaptive thinking
+and represented by actual upstream reasoning in native thinking blocks. Kiro
+does not provide a separate progress-summary feed; this is compatibility, not
+fabricated progress or exact equivalence to Anthropic's update generation.
+Non-stream inference and WebSearch logs include `delivery` (write/flush result,
+byte counts and fixed error categories). `delivery_failed` means the local HTTP
+writer failed, even if its status was already 200; it never replays generation or
+penalizes the account. Usage counters still describe completed upstream work.
+Successful flush does not prove remote receipt. Detailed logging is optional for
+these counters. Stream delivery behavior and timeouts are unchanged.
+
+Archive status warns at 90% of its configured capacity. Capacity rotation can
+remove records before their age limit; the warning does not resize or delete
+anything. No settings or credential migration is required. Rollback to 1.2.96
+restores the prior validation/logging and removes the warning; old data remains
+readable. See [test changes](docs/development-testing.md#1297-acceptance-changes).
+
 Compose uses `/health`, so account exhaustion does not cause a restart loop. Reverse proxies and load balancers should use `/ready` when deciding whether to route new requests.
 
 ## Environment Variables
