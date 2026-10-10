@@ -5,78 +5,25 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Kiro-Go Plus</title>
+  <script src="/admin/appearance.js"></script>
+  <script src="/admin/admin-boot.js"></script>
+  <link rel="stylesheet" href="/admin/appearance.css" />
+  <link rel="stylesheet" href="/admin/login.css" />
+  <style>#mainPage.hidden { display: none !important; }</style>
   <link rel="icon" type="image/x-icon" href="/admin/favicon.ico" />
-  <script src="/admin/vendor/tailwindcss-browser/index.global.js"></script>
+  <script src="/admin/vendor/tailwindcss-browser/index.global.js" defer></script>
   <link rel="stylesheet" href="/admin/vendor/fontawesome/css/all.min.css" />
   <link rel="stylesheet" href="/admin/styles.css" />
   <link rel="stylesheet" href="/admin/toast.css" />
 </head>
 
 <body>
-  <!-- Login -->
-  <div id="loginPage" class="login-wrapper">
-    <div class="ghost-bg" aria-hidden="true">
-      <i class="fa-solid fa-ghost ghost ghost-1"></i>
-      <i class="fa-solid fa-ghost ghost ghost-2"></i>
-      <i class="fa-solid fa-ghost ghost ghost-3"></i>
-      <i class="fa-solid fa-ghost ghost ghost-4"></i>
-      <i class="fa-solid fa-ghost ghost ghost-5"></i>
-      <i class="fa-solid fa-ghost ghost ghost-6"></i>
-      <i class="fa-solid fa-ghost ghost ghost-7"></i>
-      <i class="fa-solid fa-ghost ghost ghost-8"></i>
-      <i class="fa-solid fa-ghost ghost ghost-9"></i>
-      <i class="fa-solid fa-ghost ghost ghost-10"></i>
-      <i class="fa-solid fa-ghost ghost ghost-11"></i>
-      <i class="fa-solid fa-ghost ghost ghost-12"></i>
-    </div>
-    <header class="login-topbar">
-      <div class="login-topbar-inner">
-        <div class="brand" aria-label="Kiro-Go Plus" data-i18n-aria-label="app.title">
-          <img class="brand-icon" src="/admin/favicon.ico" alt="" />
-          <span class="brand-text">Kiro-Go Plus</span>
-        </div>
-        <div class="topbar-actions">
-          <div class="lang-switch" id="loginLangSwitch" role="group" aria-label="" data-i18n-aria-label="lang.label">
-            <button class="lang-btn" data-lang="zh" type="button" data-i18n="lang.zh"></button>
-            <button class="lang-btn" data-lang="en" type="button" data-i18n="lang.en"></button>
-          </div>
-          <span class="divider" aria-hidden="true"></span>
-          <button id="loginThemeToggle" class="icon-btn theme-toggle" type="button" aria-label=""
-            data-i18n-title="theme.toggle" data-i18n-aria-label="theme.toggle" data-theme="system">
-            <i class="fa-solid fa-circle-half-stroke theme-ico-system"></i>
-            <i class="fa-solid fa-sun theme-ico-light"></i>
-            <i class="fa-solid fa-moon theme-ico-dark"></i>
-          </button>
-        </div>
-      </div>
-    </header>
-    <main class="login-main">
-      <div class="login-box">
-        <h1 class="login-title" data-i18n="login.title"></h1>
-        <p class="login-subtitle" data-i18n="login.subtitle"></p>
-        <div class="form-group">
-          <label data-i18n="login.password"></label>
-          <div class="input-affix">
-            <i class="fa-solid fa-lock affix-icon"></i>
-            <input type="password" id="pwdField" data-i18n-placeholder="login.passwordPlaceholder" autocomplete="off" />
-            <button type="button" class="affix-btn" id="pwdToggle" aria-label=""
-              data-i18n-aria-label="login.showPassword" data-shown="false">
-              <i class="fa-solid fa-eye"></i>
-            </button>
-          </div>
-        </div>
-        <label class="remember-row" for="rememberPwd">
-          <input type="checkbox" id="rememberPwd" />
-          <span class="remember-box" aria-hidden="true"><i class="fa-solid fa-check"></i></span>
-          <span class="remember-label" data-i18n="login.remember"></span>
-        </label>
-        <button type="button" class="btn btn-primary btn-lg w-full" id="loginBtn">
-          <i class="fa-solid fa-arrow-right-to-bracket"></i>
-          <span data-i18n="login.submit"></span>
-        </button>
-
-      </div>
-    </main>
+  <div id="bootScreen" class="boot-screen" role="status" aria-live="polite">
+    <span class="boot-spinner" aria-hidden="true"></span>
+    <p id="bootMessage">Loading...</p>
+    <a id="bootRetry" href="/admin/">Retry</a>
+    <a id="bootLogin" href="/admin/login.html">Sign In</a>
+    <noscript>JavaScript is required to open the console.</noscript>
   </div>
 
   <!-- Main app -->

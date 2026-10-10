@@ -162,6 +162,10 @@ run_quick() {
     info "checking browser JavaScript"
     node --check web/app.js
     node --check web/login.js
+    node --check web/appearance.js
+    node --check web/admin-boot.js
+    node --check scripts/admin-ui-e2e.cjs
+    node --test scripts/admin-ui.test.js
     node --check web/credential-import.js
     node scripts/credential-import.test.js
     node --test scripts/client-e2e.test.js

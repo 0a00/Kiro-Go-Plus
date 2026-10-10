@@ -868,6 +868,7 @@
   "common.disabled": "Disabled",
   "common.saveFailed": "Save failed",
   "common.logout": "Logout",
+  "common.loadFailed": "Unable to load. Please retry.",
   "models.refreshAll": "Refresh Models",
   "models.confirmRefreshAll": "Refresh models for all enabled accounts?",
   "models.refreshAllDone": "Models refreshed, {0} models available",

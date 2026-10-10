@@ -66,7 +66,7 @@ func TestAdminAssetsRequireSessionAndConfinePaths(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(dir, "web"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"index.html", "login.html", "login.css", "login.js", "app.js", "index-legacy.html"} {
+	for _, name := range []string{"index.html", "login.html", "login.css", "login.js", "appearance.css", "appearance.js", "admin-boot.js", "app.js", "index-legacy.html"} {
 		if err := os.WriteFile(filepath.Join(dir, "web", name), []byte(name), 0600); err != nil {
 			t.Fatal(err)
 		}
@@ -85,19 +85,24 @@ func TestAdminAssetsRequireSessionAndConfinePaths(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer os.Chdir(old)
-	for _, p := range []string{"/admin", "/admin/", "/admin/login.js", "/admin/login.css"} {
+	for _, p := range []string{"/admin", "/admin/", "/admin/login.js", "/admin/login.css", "/admin/appearance.js", "/admin/appearance.css"} {
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, httptest.NewRequest("GET", p, nil))
 		if rec.Code != 200 {
 			t.Fatalf("public login %s: %d", p, rec.Code)
 		}
 	}
-	for _, p := range []string{"/admin/app.js", "/admin/index.html", "/admin/index-legacy.html", "/admin/../private", "/admin/escape.js", "/admin/vendor/"} {
+	for _, p := range []string{"/admin/app.js", "/admin/index.html", "/admin/admin-boot.js", "/admin/../private", "/admin/escape.js", "/admin/vendor/"} {
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, httptest.NewRequest("GET", p, nil))
 		if rec.Code != 404 {
 			t.Fatalf("anonymous asset %s: %d", p, rec.Code)
 		}
+	}
+	legacy := httptest.NewRecorder()
+	h.ServeHTTP(legacy, httptest.NewRequest("GET", "/admin/index-legacy.html", nil))
+	if legacy.Code != http.StatusFound || legacy.Header().Get("Location") != "/admin/" {
+		t.Fatal("legacy page does not use the canonical login flow")
 	}
 	login := httptest.NewRecorder()
 	if err := h.issueAdminSession(login, httptest.NewRequest("POST", "/admin/api/login", nil), time.Hour, false); err != nil {
@@ -129,6 +134,19 @@ func TestAdminAssetsRequireSessionAndConfinePaths(t *testing.T) {
 	h.ServeHTTP(rec, r)
 	if rec.Code != 404 {
 		t.Fatal("expired session served bundle")
+	}
+}
+
+func TestPublicAppearanceAssetsAreExplicitlyAllowlisted(t *testing.T) {
+	for _, name := range []string{"appearance.js", "appearance.css", "login.js", "login.css", "login.html", "vendor/fontawesome/css/all.min.css", "vendor/fontawesome/webfonts/fa-solid-900.woff2"} {
+		if !publicAdminAsset(name) {
+			t.Fatalf("missing public asset %s", name)
+		}
+	}
+	for _, name := range []string{"app.js", "admin-boot.js", "styles.css", "locales/zh.json", "index.html", "index-legacy.html", "vendor/fontawesome/webfonts/../../app.js", "vendor/fontawesome/webfonts/private.key", "vendor/tailwindcss-browser/index.global.js"} {
+		if publicAdminAsset(name) {
+			t.Fatalf("private asset public: %s", name)
+		}
 	}
 }
 

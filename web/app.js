@@ -6,21 +6,19 @@
 
   // State
   const baseUrl = location.origin;
-  sessionStorage.removeItem('admin_password');
-  sessionStorage.removeItem('admin_login_time');
-  localStorage.removeItem('admin_password');
-  localStorage.removeItem('admin_login_time');
-  localStorage.removeItem('kiro_remembered_pwd');
-  let currentLang = localStorage.getItem('kiro_lang') || 'zh';
+  const appearance = window.AdminAppearance;
+  const boot = window.AdminBoot;
+  let currentLang = appearance.language();
+  let initialLoadSignal;
   const dict = { en: null, zh: null };
   let accountsData = [];
   const selectedAccounts = new Set();
   let filterKeyword = '';
   let filterStatus = 'all';
-  let accountViewMode = localStorage.getItem('kiro_account_view') || 'compact';
+  let accountViewMode = appearance.read('kiro_account_view') || 'compact';
   if (!['compact', 'detailed'].includes(accountViewMode)) accountViewMode = 'compact';
-  let accountSortMode = localStorage.getItem('kiro_account_sort') || 'status';
-  let accountPageSize = Number(localStorage.getItem('kiro_account_page_size')) || 50;
+  let accountSortMode = appearance.read('kiro_account_sort') || 'status';
+  let accountPageSize = Number(appearance.read('kiro_account_page_size')) || 50;
   if (![25, 50, 100, 200].includes(accountPageSize)) accountPageSize = 50;
   let accountPage = 1;
   let privacyModeEnabled = true;
@@ -51,7 +49,7 @@
   let credentialImportController = null;
   let credentialImportActive = false;
   const settingsGroups = ['access', 'routing', 'generation', 'cache', 'diagnostics', 'integrations', 'security'];
-  let settingsGroup = localStorage.getItem('kiro_settings_group') || 'access';
+  let settingsGroup = appearance.read('kiro_settings_group') || 'access';
   if (!settingsGroups.includes(settingsGroup)) settingsGroup = 'access';
 
   // DOM helpers
@@ -170,13 +168,17 @@
   // i18n
   async function loadLocale(lang) {
     if (dict[lang]) return dict[lang];
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 10000);
     try {
-      const res = await fetch('/admin/locales/' + lang + '.json?v=' + Date.now(), { cache: 'no-store' });
-      dict[lang] = await res.json();
-    } catch (e) {
-      dict[lang] = {};
-    }
-    return dict[lang];
+      const res = await fetch('/admin/locales/' + lang + '.json', { cache: 'no-store', credentials: 'same-origin', signal: controller.signal });
+      if (res.status === 401) boot.expired();
+      if (!res.ok) throw new Error('Locale unavailable');
+      const value = await res.json();
+      if (!value || typeof value['app.title'] !== 'string') throw new Error('Invalid locale');
+      dict[lang] = value;
+      return value;
+    } finally { clearTimeout(timer); }
   }
   function t(key, ...args) {
     const active = dict[currentLang] || {};
@@ -198,9 +200,10 @@
     refreshCustomSelects();
   }
   async function setLang(lang) {
+    if (!['zh', 'en'].includes(lang)) return;
+    try { await loadLocale(lang); } catch { toast(t('common.loadFailed'), 'error'); return; }
     currentLang = lang;
-    localStorage.setItem('kiro_lang', lang);
-    await loadLocale(lang);
+    appearance.setLanguage(lang);
     applyTranslations();
     renderVersionBadge();
     renderAccounts();
@@ -453,17 +456,9 @@
 
   // Theme
   const THEME_ORDER = ['system', 'light', 'dark'];
-  const themeMQ = window.matchMedia('(prefers-color-scheme: dark)');
-  function resolveTheme(pref) {
-    if (pref === 'dark') return 'dark';
-    if (pref === 'light') return 'light';
-    return themeMQ.matches ? 'dark' : 'light';
-  }
-  function applyTheme(pref) {
-    const resolved = resolveTheme(pref);
-    const root = document.documentElement;
-    root.classList.toggle('dark', resolved === 'dark');
-    root.dataset.themePref = pref;
+  function applyTheme() {
+    appearance.apply();
+    const pref = appearance.theme();
     qsa('.theme-toggle').forEach(btn => {
       btn.dataset.theme = pref;
       const themeLabel = t('theme.status', t('theme.' + pref));
@@ -472,25 +467,21 @@
     });
   }
   function getThemePref() {
-    const saved = localStorage.getItem('kiro_theme');
-    return THEME_ORDER.includes(saved) ? saved : 'system';
+    return appearance.theme();
   }
   function initTheme() {
     applyTheme(getThemePref());
-    themeMQ.addEventListener('change', () => {
-      if (getThemePref() === 'system') applyTheme('system');
-    });
+    window.addEventListener('appearancechange', applyTheme);
   }
   function toggleTheme() {
     const cur = getThemePref();
     const next = THEME_ORDER[(THEME_ORDER.indexOf(cur) + 1) % THEME_ORDER.length];
-    localStorage.setItem('kiro_theme', next);
-    applyTheme(next);
+    appearance.setTheme(next);
   }
 
   // Privacy and email mask
   function initPrivacyMode() {
-    const saved = localStorage.getItem('privacyMode');
+    const saved = appearance.read('privacyMode');
     privacyModeEnabled = saved === null ? true : saved === 'true';
     const toggle = $('privacyModeToggle');
     if (toggle) toggle.checked = privacyModeEnabled;
@@ -652,59 +643,31 @@
   }
 
   // Fetch wrapper
-  function api(path, opts) {
+  async function api(path, opts) {
     opts = opts || {};
+    if (!opts.signal && initialLoadSignal && (!opts.method || opts.method === 'GET')) opts.signal = initialLoadSignal;
     opts.headers = Object.assign({}, opts.headers || {});
     opts.credentials = 'same-origin';
     if (opts.body && !opts.headers['Content-Type']) opts.headers['Content-Type'] = 'application/json';
-    return fetch('/admin/api' + path, opts);
+    const response = await fetch('/admin/api' + path, opts);
+    if (response.status === 401) {
+      boot.expired();
+      throw new Error('Session expired');
+    }
+    if (initialLoadSignal && (!opts.method || opts.method === 'GET') && !response.ok) throw new Error('Initial data unavailable');
+    return response;
   }
 
-  // Login
-  async function tryAutoLogin() {
-    try {
-      const res = await api('/status');
-      if (res.ok) { showMain(); loadData(); }
-    } catch (e) { }
-  }
-  async function login() {
-    const password = $('pwdField').value;
-    const remember = $('rememberPwd');
-    try {
-      const res = await api('/login', {
-        method: 'POST',
-        body: JSON.stringify({ password, remember: !!(remember && remember.checked) })
-      });
-      if (res.ok) {
-        localStorage.setItem('kiro_remember', remember && remember.checked ? '1' : '0');
-        $('pwdField').value = '';
-        showMain(); loadData();
-      } else {
-        const body = await res.json().catch(() => ({}));
-        toast(body.error || t('login.error'), 'error');
-      }
-    } catch (e) {
-      toast(t('login.connectError'), 'error');
-    }
-  }
-  function initRememberMe() {
-    const remember = $('rememberPwd');
-    const field = $('pwdField');
-    if (!remember || !field) return;
-    if (localStorage.getItem('kiro_remember') === '1') {
-      remember.checked = true;
-    }
-  }
+  // A server-authenticated page never embeds another password form.
   async function logout() {
     try {
-      await api('/logout', { method: 'POST' });
-    } finally {
-      location.reload();
-    }
+      const res = await api('/logout', { method: 'POST' });
+      if (!res.ok) throw new Error('Logout failed');
+      location.replace('/admin/login.html');
+    } catch { toast(t('common.loadFailed'), 'error'); }
   }
   function showMain() {
-    $('loginPage').classList.add('hidden');
-    $('mainPage').classList.remove('hidden');
+    if (boot.ready()) $('mainPage').classList.remove('hidden');
   }
 
   // Data loaders
@@ -5117,7 +5080,7 @@
   function switchSettingsGroup(group) {
     if (!settingsGroups.includes(group)) group = 'access';
     settingsGroup = group;
-    localStorage.setItem('kiro_settings_group', group);
+    appearance.write('kiro_settings_group', group);
     qsa('.settings-nav-button').forEach(button => {
       const active = button.dataset.settingsGroup === group;
       button.classList.toggle('active', active);
@@ -5155,24 +5118,6 @@
   }
 
   // Event wiring
-  function bindLoginEvents() {
-    $('loginBtn').addEventListener('click', login);
-    $('pwdField').addEventListener('keypress', e => { if (e.key === 'Enter') login(); });
-
-    const pwdToggle = $('pwdToggle');
-    if (pwdToggle) {
-      pwdToggle.addEventListener('click', () => {
-        const f = $('pwdField');
-        const willShow = f.type === 'password';
-        f.type = willShow ? 'text' : 'password';
-        pwdToggle.dataset.shown = String(willShow);
-        pwdToggle.setAttribute('aria-label', willShow ? t('login.hidePassword') : t('login.showPassword'));
-        pwdToggle.innerHTML = willShow
-          ? '<i class="fa-solid fa-eye-slash"></i>'
-          : '<i class="fa-solid fa-eye"></i>';
-      });
-    }
-  }
 
   function bindShellEvents() {
     const checkUpdateBtn = $('checkUpdateBtn');
@@ -5188,7 +5133,6 @@
     window.addEventListener('resize', positionOpenCustomSelects);
     window.addEventListener('scroll', positionOpenCustomSelects, true);
 
-    $('loginThemeToggle').addEventListener('click', toggleTheme);
     $('mainThemeToggle').addEventListener('click', toggleTheme);
     $('logoutBtn').addEventListener('click', logout);
 
@@ -5225,7 +5169,7 @@
   function bindAccountEvents() {
     $('privacyModeToggle').addEventListener('change', e => {
       privacyModeEnabled = e.target.checked;
-      localStorage.setItem('privacyMode', privacyModeEnabled);
+      appearance.write('privacyMode', privacyModeEnabled);
       renderAccounts();
     });
 
@@ -5248,20 +5192,20 @@
       if (mode !== 'compact' && mode !== 'detailed') return;
       accountViewMode = mode;
       accountPage = 1;
-      localStorage.setItem('kiro_account_view', mode);
+      appearance.write('kiro_account_view', mode);
       renderAccounts();
     }));
     $('accountSortSelect').addEventListener('change', e => {
       accountSortMode = e.target.value || 'status';
       accountPage = 1;
-      localStorage.setItem('kiro_account_sort', accountSortMode);
+      appearance.write('kiro_account_sort', accountSortMode);
       renderAccounts();
     });
     $('accountPageSizeSelect').addEventListener('change', e => {
       const requested = Number(e.target.value);
       accountPageSize = [25, 50, 100, 200].includes(requested) ? requested : 50;
       accountPage = 1;
-      localStorage.setItem('kiro_account_page_size', String(accountPageSize));
+      appearance.write('kiro_account_page_size', String(accountPageSize));
       renderAccounts();
     });
     $('accountPagePrevious').addEventListener('click', () => {
@@ -5444,7 +5388,6 @@
   }
 
   function wireEvents() {
-    bindLoginEvents();
     bindShellEvents();
     bindAccountEvents();
     bindSettingsEvents();
@@ -5457,20 +5400,32 @@
 
   // Init
   async function init() {
-    initTheme();
-    await loadLocale(currentLang);
-    if (currentLang !== 'zh') await loadLocale('zh');
-    applyTranslations();
-    initCustomSelectObserver();
-    initPrivacyMode();
-    initRememberMe();
-    const yr = $('footerYear');
-    if (yr) yr.textContent = new Date().getFullYear();
-    wireEvents();
-    tryAutoLogin();
-    setInterval(() => {
-      if (!$('mainPage').classList.contains('hidden')) loadStats();
-    }, 10000);
+    const controller = new AbortController();
+    initialLoadSignal = controller.signal;
+    const timer = setTimeout(() => controller.abort(), 20000);
+    try {
+      initTheme();
+      await Promise.all([
+        loadLocale(currentLang),
+        ...(currentLang !== 'zh' ? [loadLocale('zh')] : []),
+        api('/version', { signal: controller.signal }).then(res => {
+          if (!res.ok) throw new Error('Session check unavailable');
+          return res.json();
+        }).then(value => { if (!value || !value.version) throw new Error('Invalid session response'); })
+      ]);
+      applyTranslations();
+      initCustomSelectObserver();
+      initPrivacyMode();
+      const yr = $('footerYear');
+      if (yr) yr.textContent = new Date().getFullYear();
+      wireEvents();
+      showMain();
+      await loadData();
+      setInterval(() => {
+        if (!$('mainPage').classList.contains('hidden')) loadStats().catch(() => toast(t('common.loadFailed'), 'error'));
+      }, 10000);
+    } catch { boot.fail(); }
+    finally { clearTimeout(timer); initialLoadSignal = undefined; }
   }
 
   if (document.readyState === 'loading') {

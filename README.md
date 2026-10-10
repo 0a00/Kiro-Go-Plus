@@ -375,6 +375,11 @@ readable. See [test changes](docs/development-testing.md#1297-acceptance-changes
 
 Compose uses `/health`, so account exhaustion does not cause a restart loop. Reverse proxies and load balancers should use `/ready` when deciding whether to route new requests.
 
+1.2.98 shares login/console appearance and preferences, removes the duplicate
+login form, and adds bounded startup with retry/session-expiry handling. No
+settings migration is required; deploy the binary and `web/` together.
+See [admin login flow](docs/admin-login-flow.md) for verification and rollback.
+
 ## Environment Variables
 
 | Variable | Description | Default |

@@ -1300,6 +1300,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 管理端点
 	case path == "/admin" || path == "/admin/":
 		h.serveAdminPage(w, r)
+	case path == "/admin/index-legacy.html":
+		http.Redirect(w, r, "/admin/", http.StatusFound)
 	case strings.HasPrefix(path, "/admin/api/"):
 		h.handleAdminAPI(w, r)
 	case strings.HasPrefix(path, "/admin/"):

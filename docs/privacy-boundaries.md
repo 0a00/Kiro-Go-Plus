@@ -13,9 +13,12 @@ No TLS fingerprint spoofing, device rotation or credential rewriting is introduc
   administrator access. Customer statistics omit the service version; customer
   logs retain a generic `upstream` endpoint class and their timing/error categories.
 - Anonymous `/admin` visits receive a minimal bilingual login page. Only its HTML,
-  JavaScript and CSS are public. Dashboard, legacy HTML, locale and vendor assets
+  JavaScript and CSS are public. Dashboard, locale and application vendor assets
   require the existing HTTP-only session. Logout/session expiry prevents fresh
   bundle downloads. Previously downloaded browser content cannot be recalled.
+  In 1.2.98 shared appearance CSS/JS and the exact Font Awesome CSS/solid font
+  paths used by the login controls are also public. No wildcard vendor access
+  is allowed. The legacy HTML route redirects to the canonical `/admin/` flow.
 - Asset lookup rejects traversal, directories and symlinks resolving outside web/.
   Deployment-owned asset files must not be writable by untrusted local users;
   pathname checks do not defend against an attacker replacing files concurrently.

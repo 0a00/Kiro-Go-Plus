@@ -22,7 +22,7 @@ func (h *Handler) serveAdminAsset(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	public := name == "login.html" || name == "login.js" || name == "login.css"
+	public := publicAdminAsset(name)
 	if !public && !h.adminPageAuthenticated(r) {
 		http.NotFound(w, r)
 		return
@@ -56,4 +56,14 @@ func (h *Handler) serveAdminAsset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.ServeContent(w, r, name, info.ModTime(), file)
+}
+
+func publicAdminAsset(name string) bool {
+	switch name {
+	case "login.html", "login.js", "login.css", "appearance.js", "appearance.css",
+		"vendor/fontawesome/css/all.min.css", "vendor/fontawesome/webfonts/fa-solid-900.woff2":
+		return true
+	default:
+		return false
+	}
 }

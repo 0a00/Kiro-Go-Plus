@@ -4,20 +4,41 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="robots" content="noindex, nofollow">
-  <title>Sign In</title>
+  <title>Administration</title>
+  <script src="/admin/appearance.js"></script>
+  <link rel="stylesheet" href="/admin/appearance.css">
   <link rel="stylesheet" href="/admin/login.css">
+  <link rel="stylesheet" href="/admin/vendor/fontawesome/css/all.min.css">
   <script src="/admin/login.js" defer></script>
 </head>
-<body>
-  <main>
-    <h1 id="heading">Administration</h1>
-    <form id="loginForm">
-      <label for="password" id="passwordLabel">Password</label>
-      <input id="password" name="password" type="password" autocomplete="current-password" required autofocus>
-      <label class="remember"><input id="remember" type="checkbox"><span id="rememberLabel">Remember this session</span></label>
-      <button id="submit" type="submit">Sign In</button>
-      <p id="error" role="alert" aria-live="polite"></p>
-    </form>
+<body class="access-page">
+  <header class="access-header">
+    <div class="access-brand"><i class="fa-solid fa-shield-halved" aria-hidden="true"></i><span id="brandLabel">Administration</span></div>
+    <div class="access-controls">
+      <div class="access-languages" role="group" aria-label="Language">
+        <button type="button" data-lang="zh" aria-pressed="false">&#20013;&#25991;</button>
+        <button type="button" data-lang="en" aria-pressed="false">EN</button>
+      </div>
+      <button id="themeToggle" class="access-icon" type="button" aria-label="Theme" title="Theme"><i class="fa-solid fa-circle-half-stroke" aria-hidden="true"></i></button>
+    </div>
+  </header>
+  <main class="access-main">
+    <section class="access-form" aria-labelledby="heading">
+      <h1 id="heading">Sign In</h1>
+      <form id="loginForm" method="post" action="/admin/api/login">
+        <label for="password" id="passwordLabel" class="access-field-label">Password</label>
+        <div class="access-input">
+          <i class="fa-solid fa-lock" aria-hidden="true"></i>
+          <input id="password" name="password" type="password" autocomplete="current-password" required autofocus>
+          <button id="passwordToggle" class="access-icon" type="button" aria-label="Show password" title="Show password" aria-pressed="false"><i class="fa-solid fa-eye" aria-hidden="true"></i></button>
+        </div>
+        <label class="access-remember"><input id="remember" type="checkbox"><span id="rememberLabel">Remember this session</span></label>
+        <button id="submit" class="access-submit" type="submit"><i class="fa-solid fa-arrow-right-to-bracket" aria-hidden="true"></i><span id="submitLabel">Sign In</span></button>
+        <p id="error" class="access-error" role="alert" aria-live="polite"></p>
+      </form>
+      <noscript>JavaScript is required to sign in.</noscript>
+    </section>
   </main>
+  <footer class="access-footer" id="footerLabel">Management Console</footer>
 </body>
 </html>

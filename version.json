@@ -1,5 +1,5 @@
 {
-  "version": "1.2.97",
-  "changelog": "Accept thinking.display=updates with real reasoning deltas. Record non-stream JSON delivery/flush failures without replaying upstream work. Audit recovered Claude Code HTTP failures, preserve request IDs on connection EOF, and warn near archive capacity.\n兼容新思考显示参数，增加非流式响应交付诊断、客户端测试服务端日志核验及归档容量预警；不改超时和重试策略。",
+  "version": "1.2.98",
+  "changelog": "Unify the standalone admin login with console styling, language and theme preferences. Remove the embedded duplicate login, add bounded initialization with retry and session-expiry handling, and preserve HTTP-only sessions and private admin bundles.\n登录页统一控制台主题与排版，移除重复登录页；增加加载失败重试、会话过期处理和浏览器回归测试，不改变账号与 API 配置。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }
