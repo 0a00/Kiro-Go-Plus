@@ -249,6 +249,7 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 	kiroPayload := OpenAIToKiro(openaiReq, thinking)
 	kiroPayload.requestContext = r.Context()
 	kiroPayload.contextWindowTokens = contextWindowTokens
+	kiroPayload.reportingContextWindowTokens = resolveReportingContextWindowTokens(actualModel)
 	kiroPayload.clientOutputTokenLimit = openaiReq.MaxTokens
 	kiroPayload.enforceClientOutputLimit = openaiReq.MaxTokens > 0 && len(openaiReq.Tools) == 0
 	if fallbackDecision.TargetModel != "" {
@@ -351,7 +352,7 @@ func (h *Handler) handleResponsesNonStream(
 			OnStopReason: func(reason string) { upstreamStopReason = reason },
 			OnCredits:    func(c float64) { credits = c },
 			OnContextUsage: func(pct float64) {
-				realInputTokens = int(pct * float64(getPayloadContextWindowSize(payload, model)) / 100.0)
+				realInputTokens = int(pct * float64(getPayloadReportingContextWindowSize(payload, model)) / 100.0)
 			},
 		}
 
@@ -1057,7 +1058,7 @@ func (h *Handler) handleResponsesStream(
 			OnStopReason: func(reason string) { upstreamStopReason = reason },
 			OnCredits:    func(c float64) { credits = c },
 			OnContextUsage: func(pct float64) {
-				realInputTokens = int(pct * float64(getPayloadContextWindowSize(payload, model)) / 100.0)
+				realInputTokens = int(pct * float64(getPayloadReportingContextWindowSize(payload, model)) / 100.0)
 			},
 		}
 

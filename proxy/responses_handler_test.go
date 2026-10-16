@@ -616,8 +616,8 @@ func TestResponsesTokenBudgetDefaultsAndClientOverrides(t *testing.T) {
 	}
 
 	explicit, explicitPayload := run(`{"model":"claude-sonnet-4.5","input":"explicit","max_output_tokens":12000,"context_window":300000,"store":false}`)
-	if explicitPayload.InferenceConfig == nil || explicitPayload.InferenceConfig.MaxTokens != 12000 || explicit.Usage.InputTokens != 30000 {
-		t.Fatalf("client overrides did not win: inference=%+v usage=%+v", explicitPayload.InferenceConfig, explicit.Usage)
+	if explicitPayload.InferenceConfig == nil || explicitPayload.InferenceConfig.MaxTokens != 12000 || explicit.Usage.InputTokens != 50000 {
+		t.Fatalf("client output override or upstream usage denominator failed: inference=%+v usage=%+v", explicitPayload.InferenceConfig, explicit.Usage)
 	}
 }
 

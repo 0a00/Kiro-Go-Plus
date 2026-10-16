@@ -2295,6 +2295,7 @@ func (h *Handler) handleClaudeMessages(w http.ResponseWriter, r *http.Request) {
 	}
 	kiroPayload.requestContext = r.Context()
 	kiroPayload.contextWindowTokens = contextWindowTokens
+	kiroPayload.reportingContextWindowTokens = resolveReportingContextWindowTokens(actualModel)
 	kiroPayload.clientOutputTokenLimit = req.MaxTokens
 	kiroPayload.enforceClientOutputLimit = req.MaxTokens > 0 && len(req.Tools) == 0
 	if fallbackDecision.TargetModel != "" {
@@ -2856,7 +2857,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 				credits = c
 			},
 			OnContextUsage: func(pct float64) {
-				realInputTokens = int(pct * float64(getPayloadContextWindowSize(payload, model)) / 100.0)
+				realInputTokens = int(pct * float64(getPayloadReportingContextWindowSize(payload, model)) / 100.0)
 			},
 		}
 		if payload.streamToolUseDeltas {
@@ -3312,7 +3313,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 				credits = c
 			},
 			OnContextUsage: func(pct float64) {
-				realInputTokens = int(pct * float64(getPayloadContextWindowSize(payload, model)) / 100.0)
+				realInputTokens = int(pct * float64(getPayloadReportingContextWindowSize(payload, model)) / 100.0)
 			},
 		}
 
@@ -3570,6 +3571,7 @@ func (h *Handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 	kiroPayload := OpenAIToKiro(&req, thinking)
 	kiroPayload.requestContext = r.Context()
 	kiroPayload.contextWindowTokens = contextWindowTokens
+	kiroPayload.reportingContextWindowTokens = resolveReportingContextWindowTokens(actualModel)
 	kiroPayload.clientOutputTokenLimit = req.MaxTokens
 	kiroPayload.enforceClientOutputLimit = req.MaxTokens > 0 && len(req.Tools) == 0
 	if fallbackDecision.TargetModel != "" {
@@ -3976,7 +3978,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 				credits = c
 			},
 			OnContextUsage: func(pct float64) {
-				realInputTokens = int(pct * float64(getPayloadContextWindowSize(payload, model)) / 100.0)
+				realInputTokens = int(pct * float64(getPayloadReportingContextWindowSize(payload, model)) / 100.0)
 			},
 		}
 
@@ -4223,7 +4225,7 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 			OnStopReason: func(reason string) { upstreamStopReason = reason },
 			OnCredits:    func(c float64) { credits = c },
 			OnContextUsage: func(pct float64) {
-				realInputTokens = int(pct * float64(getPayloadContextWindowSize(payload, model)) / 100.0)
+				realInputTokens = int(pct * float64(getPayloadReportingContextWindowSize(payload, model)) / 100.0)
 			},
 		}
 

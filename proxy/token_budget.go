@@ -87,6 +87,26 @@ func resolveContextWindowTokens(model string, explicitValues ...int) int {
 	return getContextWindowSize(model)
 }
 
+// resolveReportingContextWindowTokens selects the model window used for
+// upstream context-percentage accounting. It is resolved once when the
+// request payload is built, so a client admission override cannot change the
+// billing/usage denominator later in the stream.
+func resolveReportingContextWindowTokens(model string) int {
+	if discovered, ok := getDiscoveredModelTokenLimits(model); ok && discovered.MaxInputTokens > 0 {
+		return discovered.MaxInputTokens
+	}
+	if entry, ok := resolveConfiguredModelBudget(model); ok && entry.ContextWindow > 0 {
+		return entry.ContextWindow
+	}
+	if isLargeContextModel(model) {
+		return 1_000_000
+	}
+	if configured := config.GetThinkingConfig().DefaultContextWindowTokens; configured > 0 {
+		return configured
+	}
+	return 200_000
+}
+
 func resolveConfiguredModelBudget(model string) (config.ModelEntry, bool) {
 	model = strings.TrimSpace(model)
 	thinkingSuffix := config.GetThinkingConfig().Suffix

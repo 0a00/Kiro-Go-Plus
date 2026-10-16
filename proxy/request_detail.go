@@ -177,6 +177,7 @@ type requestDetailAttempt struct {
 	DurationMs           int64  `json:"durationMs"`
 	Status               string `json:"status"`
 	StatusCode           int    `json:"statusCode,omitempty"`
+	ErrorKind            string `json:"errorKind,omitempty"`
 	Error                string `json:"error,omitempty"`
 	RetryReason          string `json:"retryReason,omitempty"`
 	TerminationCause     string `json:"terminationCause,omitempty"`
@@ -960,6 +961,9 @@ func (t *requestDetailTrace) recordAttempt(accountID, accountEmail, endpoint, ho
 		attempt.DurationMs = 0
 	}
 	if err != nil {
+		if upstreamErr, ok := asUpstreamError(err); ok {
+			attempt.ErrorKind = string(upstreamErr.Kind)
+		}
 		attempt.Error = truncateDiagnosticText(redactRequestDetailText(diagnosticErrorMessage(err)), 2000)
 		attempt.RetryAcrossEndpoints = shouldRetryAcrossEndpoints(err)
 		attempt.RetryAcrossAccounts = shouldRetryAcrossAccounts(err)

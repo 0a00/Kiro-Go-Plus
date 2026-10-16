@@ -403,6 +403,7 @@ func (h *Handler) callClaudeWebSearchRound(
 	payload := ClaudeToKiro(&roundReq, thinking)
 	payload.requestContext = ctx
 	payload.contextWindowTokens = contextWindowTokens
+	payload.reportingContextWindowTokens = resolveReportingContextWindowTokens(req.Model)
 	payload.attemptBudget = attemptBudget
 	truncatePayloadToLimit(payload, payload.hasSystemPriming)
 	if finalInputTokens := estimateKiroPayloadTokens(payload); finalInputTokens > 0 {

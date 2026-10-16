@@ -316,38 +316,39 @@ type KiroPayload struct {
 	allowCoolingEndpointRetry bool
 	// Model fallback state is request-local and intentionally excluded from the
 	// upstream JSON payload.
-	modelFallbackInProgress     bool
-	modelFallbackApplied        bool
-	modelFallbackFrom           string
-	modelFallbackTo             string
-	modelFallbackRuleID         string
-	contextWindowTokens         int
-	hasSystemPriming            bool
-	requireActionableOutput     bool
-	requireToolUse              bool
-	deferTextUntilComplete      bool
-	streamThinkingPrecommit     bool
-	streamToolUseDeltas         bool
-	streamTextWithBufferedTools bool
-	announceBufferedToolStarts  bool
-	clientOutputTokenLimit      int
-	enforceClientOutputLimit    bool
-	toolUsePolicy               string
-	tokenRefreshMu              sync.Mutex
-	tokenRefreshAttempts        map[string]int
-	apiKeyRegionAttempts        map[string]int
-	streamMetricsMu             sync.Mutex
-	streamMetricsEnabled        bool
-	streamMetricsStartedAt      time.Time
-	firstUpstreamActivityMs     int64
-	maxToolAssemblyMs           int64
-	maxToolArgumentBytes        int
-	maxToolFragmentCount        int
-	toolTruncationCount         int
-	toolRecoveryAttempts        int
-	toolResultRepairs           int
-	toolSchemaRepairs           int
-	toolRecoveryHintApplied     bool
+	modelFallbackInProgress      bool
+	modelFallbackApplied         bool
+	modelFallbackFrom            string
+	modelFallbackTo              string
+	modelFallbackRuleID          string
+	contextWindowTokens          int
+	reportingContextWindowTokens int
+	hasSystemPriming             bool
+	requireActionableOutput      bool
+	requireToolUse               bool
+	deferTextUntilComplete       bool
+	streamThinkingPrecommit      bool
+	streamToolUseDeltas          bool
+	streamTextWithBufferedTools  bool
+	announceBufferedToolStarts   bool
+	clientOutputTokenLimit       int
+	enforceClientOutputLimit     bool
+	toolUsePolicy                string
+	tokenRefreshMu               sync.Mutex
+	tokenRefreshAttempts         map[string]int
+	apiKeyRegionAttempts         map[string]int
+	streamMetricsMu              sync.Mutex
+	streamMetricsEnabled         bool
+	streamMetricsStartedAt       time.Time
+	firstUpstreamActivityMs      int64
+	maxToolAssemblyMs            int64
+	maxToolArgumentBytes         int
+	maxToolFragmentCount         int
+	toolTruncationCount          int
+	toolRecoveryAttempts         int
+	toolResultRepairs            int
+	toolSchemaRepairs            int
+	toolRecoveryHintApplied      bool
 	// promptCacheTTL preserves an explicit Claude cache-control TTL across
 	// translation. It is intentionally not serialized to the Kiro API.
 	promptCacheTTL        time.Duration
@@ -955,6 +956,9 @@ func callKiroAPISingleModel(account *config.Account, payload *KiroPayload, callb
 	// final in-memory payload immediately before every marshal so an orphaned,
 	// duplicate, or stale tool_result never reaches Kiro.
 	repairKiroPayloadToolResults(payload)
+	if historyErr := validateKiroPayloadToolHistory(payload); historyErr != nil {
+		return historyErr
+	}
 
 	if _, err := json.Marshal(payload); err != nil {
 		return err
@@ -1371,6 +1375,7 @@ endpointLoop:
 				if shouldFallbackTransparentHistory(payload, lastErr) {
 					payload.transparentHistoryFallbackUsed = true
 					payload.ConversationState.History = sanitizeKiroHistory(payload.ConversationState.History, nil)
+					payload.recordToolResultRepair()
 					logger.Warnf("[ClaudeCodeTransparent] structured history rejected by %s; retrying once with compatibility sanitization", ep.Name)
 					return callKiroAPISingleModel(account, payload, callback)
 				}
@@ -1598,7 +1603,17 @@ func shouldFallbackTransparentHistory(payload *KiroPayload, err error) bool {
 		return false
 	}
 	message := strings.ToLower(upstreamErr.Error())
-	return strings.Contains(message, "tool_use") || strings.Contains(message, "tool_result") || strings.Contains(message, "improperly formed")
+	if strings.Contains(message, "tool_use") || strings.Contains(message, "tool_result") || strings.Contains(message, "improperly formed") {
+		return true
+	}
+	// Some Kiro surfaces collapse REQUEST_BODY_INVALID and tool-history
+	// validation into a generic 400. When the payload still contains structured
+	// Claude Code history, one compatibility rebuild is safer than replaying the
+	// same malformed wire shape across accounts or endpoints. Model and auth
+	// errors do not carry structured tool history and therefore do not enter
+	// this path.
+	return strings.Contains(message, "request was rejected by the upstream service") &&
+		historyHasStructuredToolData(payload.ConversationState.History)
 }
 
 func waitForPreOutputStreamRetry(ctx context.Context, delay time.Duration) error {
@@ -2509,6 +2524,18 @@ func getPayloadContextWindowSize(payload *KiroPayload, model string) int {
 		return payload.contextWindowTokens
 	}
 	return getContextWindowSize(model)
+}
+
+// getPayloadReportingContextWindowSize returns the upstream model window used
+// to turn contextUsagePercentage into an absolute input-token count. A client
+// supplied context_window/max_input_tokens value is an admission and trimming
+// hint; it must not inflate usage accounting when the upstream reports a
+// percentage against its own model window.
+func getPayloadReportingContextWindowSize(payload *KiroPayload, model string) int {
+	if payload != nil && payload.reportingContextWindowTokens > 0 {
+		return payload.reportingContextWindowTokens
+	}
+	return resolveReportingContextWindowTokens(model)
 }
 
 // claudeVersionExtractor matches both bare major versions and major/minor

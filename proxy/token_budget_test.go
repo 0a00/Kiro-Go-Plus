@@ -143,6 +143,18 @@ func TestPayloadContextWindowOverridesModelDefault(t *testing.T) {
 	}
 }
 
+func TestReportingContextWindowIgnoresClientAdmissionOverride(t *testing.T) {
+	initTokenBudgetTestConfig(t, 0, 200000)
+	rememberDiscoveredModelTokenLimits([]ModelInfo{{
+		ModelId:     "auto",
+		TokenLimits: &ModelTokenLimits{MaxInputTokens: 1000000},
+	}})
+	payload := &KiroPayload{contextWindowTokens: 200000, reportingContextWindowTokens: 1000000}
+	if got := getPayloadReportingContextWindowSize(payload, "auto"); got != 1000000 {
+		t.Fatalf("reporting window = %d, want upstream discovered window 1000000", got)
+	}
+}
+
 func TestModelInfoAdvertisesGlobalTokenDefaults(t *testing.T) {
 	initTokenBudgetTestConfig(t, 64000, 500000)
 	model := buildModelInfoWithLimits("unknown-budget-model", "test", false, 200000, 8000)

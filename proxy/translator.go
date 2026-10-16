@@ -2738,6 +2738,59 @@ func repairKiroPayloadToolResults(payload *KiroPayload) {
 	}
 }
 
+// validateKiroPayloadToolHistory is the last invariant check before the
+// payload is marshaled. Repair functions may intentionally remove orphaned
+// entries, but they must never leave a structured result which Kiro cannot
+// associate with the immediately preceding assistant tool turn.
+func validateKiroPayloadToolHistory(payload *KiroPayload) *UpstreamError {
+	if payload == nil {
+		return nil
+	}
+	current := &payload.ConversationState.CurrentMessage.UserInputMessage
+	context := current.UserInputMessageContext
+	if context == nil || len(context.ToolResults) == 0 {
+		return nil
+	}
+
+	if _, ok := orderToolResultsForLastAssistant(payload.ConversationState.History, context.ToolResults); !ok {
+		return &UpstreamError{
+			Kind:                 UpstreamErrorClientRequest,
+			StatusCode:           400,
+			Reason:               "TOOL_HISTORY_INVALID",
+			Message:              "structured tool results do not match the previous assistant tool use",
+			RetryAcrossEndpoints: false,
+			RetryAcrossAccounts:  false,
+		}
+	}
+
+	seen := make(map[string]struct{}, len(context.ToolResults))
+	for _, result := range context.ToolResults {
+		id := strings.TrimSpace(result.ToolUseID)
+		if id == "" {
+			return &UpstreamError{
+				Kind:                 UpstreamErrorClientRequest,
+				StatusCode:           400,
+				Reason:               "TOOL_HISTORY_INVALID",
+				Message:              "structured tool result is missing tool_use_id",
+				RetryAcrossEndpoints: false,
+				RetryAcrossAccounts:  false,
+			}
+		}
+		if _, exists := seen[id]; exists {
+			return &UpstreamError{
+				Kind:                 UpstreamErrorClientRequest,
+				StatusCode:           400,
+				Reason:               "TOOL_HISTORY_INVALID",
+				Message:              "structured tool results contain a duplicate tool_use_id",
+				RetryAcrossEndpoints: false,
+				RetryAcrossAccounts:  false,
+			}
+		}
+		seen[id] = struct{}{}
+	}
+	return nil
+}
+
 // repairStructuredKiroPayloadToolResults validates the transparent path
 // without flattening valid completed turns. It is intentionally separate from
 // repairKiroPayloadToolResults because the legacy sanitizer changes the model's
