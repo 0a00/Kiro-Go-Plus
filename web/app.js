@@ -32,6 +32,7 @@
   let kiroSsoStartController = null;
   let exportSelectedIds = new Set();
   let currentVersion = '';
+  let currentBuildCommit = '';
   let ipv6DiagnosticReport = null;
   let testLogs = [];
   let testModalAccountId = '';
@@ -4955,13 +4956,17 @@
   // Version and update
   function renderVersionBadge() {
     const badge = $('versionBadge');
-    if (badge && currentVersion) badge.textContent = currentVersion.replace(/^v/i, '');
+    if (!badge || !currentVersion) return;
+    const version = currentVersion.replace(/^v/i, '');
+    badge.textContent = currentBuildCommit ? version + ' · ' + currentBuildCommit : version;
+    if (currentBuildCommit) badge.title = 'Build ' + currentBuildCommit;
   }
   async function loadVersion() {
     try {
       const res = await api('/version');
       const d = await res.json();
       currentVersion = d.version || '';
+      currentBuildCommit = d.buildCommit || '';
       renderVersionBadge();
     } catch (e) { }
   }
