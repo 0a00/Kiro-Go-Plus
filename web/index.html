@@ -19,10 +19,22 @@
 
 <body>
   <div id="bootScreen" class="boot-screen" role="status" aria-live="polite">
-    <span class="boot-spinner" aria-hidden="true"></span>
-    <p id="bootMessage">Loading...</p>
-    <a id="bootRetry" href="/admin/">Retry</a>
-    <a id="bootLogin" href="/admin/login.html">Sign In</a>
+    <section class="boot-card" aria-labelledby="bootTitle">
+      <div class="boot-brand">
+        <img src="/admin/favicon.ico" alt="" />
+        <span>Kiro-Go Plus</span>
+        <span class="boot-status"><i class="fa-solid fa-shield-halved" aria-hidden="true"></i><span id="bootAdminLabel">Admin</span></span>
+      </div>
+      <div class="boot-divider"></div>
+      <div class="boot-icon" aria-hidden="true"><i class="fa-solid fa-arrow-right-to-bracket"></i></div>
+      <h1 id="bootTitle">Opening console...</h1>
+      <p id="bootMessage">Checking your session and preparing the workspace.</p>
+      <div class="boot-progress" aria-hidden="true"><span></span></div>
+      <div class="boot-actions">
+        <a id="bootRetry" class="boot-action boot-action-primary" href="/admin/"><i class="fa-solid fa-rotate-right" aria-hidden="true"></i><span id="bootRetryLabel">Retry</span></a>
+        <a id="bootLogin" class="boot-action boot-action-secondary" href="/admin/login.html"><i class="fa-solid fa-arrow-right-to-bracket" aria-hidden="true"></i><span id="bootLoginLabel">Sign In</span></a>
+      </div>
+    </section>
     <noscript>JavaScript is required to open the console.</noscript>
   </div>
 

@@ -38,7 +38,7 @@ test('blocked browser storage does not break login or preference controls', () =
 
 function boot() {
   const listeners = {}, timers = new Map(), redirects = [];
-  const nodes = Object.fromEntries(['bootScreen', 'bootMessage', 'bootRetry', 'bootLogin', 'mainPage'].map(k => [k, { hidden: false, dataset: {}, classList: { add() {} } }]));
+  const nodes = Object.fromEntries(['bootScreen', 'bootTitle', 'bootMessage', 'bootRetry', 'bootRetryLabel', 'bootLogin', 'bootLoginLabel', 'bootAdminLabel', 'mainPage'].map(k => [k, { hidden: false, dataset: {}, textContent: '', classList: { add() {} } }]));
   let id = 0;
   const window = { AdminAppearance: { language: () => 'en' }, addEventListener: (k, v) => { listeners[k] = v; } };
   vm.runInNewContext(source('admin-boot.js'), { window, location: { replace: p => redirects.push(p), reload: () => redirects.push('reload') },
