@@ -276,6 +276,8 @@ BUILD_ARGS=()
 if [[ "$PULL_BASE_IMAGES" -eq 1 ]]; then
   BUILD_ARGS+=(--pull)
 fi
+export BUILD_COMMIT="${TARGET_COMMIT:0:12}"
+info "build commit: $BUILD_COMMIT"
 "${COMPOSE[@]}" build "${BUILD_ARGS[@]}"
 
 info "starting updated service"

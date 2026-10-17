@@ -1,6 +1,9 @@
 services:
   kiro-go:
-    build: .
+    build:
+      context: .
+      args:
+        BUILD_COMMIT: ${BUILD_COMMIT:-unknown}
     init: true
     user: "${PUID:-1000}:${PGID:-1000}"
     ports:

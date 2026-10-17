@@ -137,6 +137,12 @@ fi
 [[ -d "$SOURCE_DIR/web" ]] || die "source does not look like Kiro-Go: missing web/"
 [[ "$SOURCE_DIR" != "$TARGET_DIR" ]] || die "source and target are the same directory"
 
+BUILD_COMMIT="unknown"
+if git -C "$SOURCE_DIR" rev-parse --verify HEAD >/dev/null 2>&1; then
+  BUILD_COMMIT="$(git -C "$SOURCE_DIR" rev-parse --short=12 HEAD)"
+fi
+export BUILD_COMMIT
+
 COMPOSE_CMD=()
 if docker compose version >/dev/null 2>&1; then
   COMPOSE_CMD=(docker compose)

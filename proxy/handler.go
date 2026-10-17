@@ -8618,7 +8618,8 @@ func (h *Handler) apiTestOutboundIPv6(w http.ResponseWriter, r *http.Request) {
 // apiGetVersion 获取版本信息
 func (h *Handler) apiGetVersion(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{
-		"version": config.Version,
+		"version":     config.Version,
+		"buildCommit": config.BuildCommit,
 	})
 }
 

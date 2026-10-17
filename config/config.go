@@ -652,6 +652,10 @@ const (
 // Version current version
 const Version = "1.2.98"
 
+// BuildCommit is injected by Docker/CI builds so operators can verify the
+// exact source revision running in production. Local builds use "unknown".
+var BuildCommit = "unknown"
+
 var (
 	cfg           *Config
 	cfgLock       sync.RWMutex
