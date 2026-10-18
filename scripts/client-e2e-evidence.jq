@@ -55,6 +55,7 @@ def workspace_file:
   errors: ($errors | length), recoveredErrors: (($errors | length) - ($unrecovered | length)),
   unrecoveredErrors: ($unrecovered | length),
   paired: (
+    ($calls | length) > 0 and
     ($calls | length) == ($replies | length) and
     all($calls[]; (.id | type) == "string" and (.id | length) > 0) and
     ($calls | map(.id) | unique | length) == ($calls | length) and

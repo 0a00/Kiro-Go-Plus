@@ -171,9 +171,11 @@ remain opt-in and quota-consuming.
 
 The `workspace-large-write-progress` and `workspace-chunked-edit-progress` cases
 also replay successful file mutations against the fixed fixture and compare the
-result to disk. They require 420 globally numbered printable ASCII lines,
-45-60 KiB, correct targets, and successful final Read results covering every
-line (pagination is accepted). Chunked edits must replace each of ten seeded
+result to disk. They target 45-60 KiB of 420 globally numbered printable ASCII
+lines, correct targets, and successful final Read results covering every line
+(pagination is accepted). Single-write evidence accepts a bounded model overshoot
+up to 80 KiB and reports it as a warning; this avoids treating complete content
+as transport loss. Chunked edits remain strictly bounded and must replace each of ten seeded
 placeholders exactly once with 42 lines and 4-6 KiB per replacement. Filler bytes,
 completion markers, or a tool result that merely says "verified" cannot pass.
 The JSONL validator rejects symlinks and limits trace input to 32 MiB; summaries
@@ -183,7 +185,8 @@ prove fixture integrity, not semantic software quality. The resumed shell case
 still checks growth and syntax, not a fivefold expansion or runtime behavior.
 
 `workspace-autonomous-large-file` is a separate case included in `all`. It uses
-the same final 420-line, 45-60 KiB numbered file requirement without specifying
+the same final 420-line, 45-60 KiB target (with the same 80 KiB hard evidence
+bound) without specifying
 one mutation, a chunk size, a count or preseeded placeholders. The model chooses
 Write/Edit operations; file tools only, capability probing, exact replay of every
 successful mutation and full final Read coverage remain mandatory. Single-call

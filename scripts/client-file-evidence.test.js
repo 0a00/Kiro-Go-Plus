@@ -81,6 +81,21 @@ test('large Write, Edit creation and ten chunked edits prove actual file content
   }
 });
 
+test('large file evidence warns on bounded model overshoot without weakening chunk limits', () => {
+  const f = fixture();
+  const extra = 'x'.repeat(61440 - Buffer.byteLength(f.content) + 1);
+  f.content = f.content.replace(/^0001: /, match => match + extra);
+  f.records[0].message.content[0].input.content = f.content;
+  f.records.at(-1).message.content[0].content = f.content;
+  const result = check(f);
+  assert.equal(result.oversized, true);
+  assert.equal(result.targetMaxBytes, 61440);
+  assert.ok(result.bytes > 61440 && result.bytes <= 80 * 1024);
+  const chunked = fixture('chunked');
+  chunked.content += 'x'.repeat(61440);
+  assert.throws(() => check(chunked), /file-size/);
+});
+
 test('final readback accepts paginated text blocks and Claude Code line prefixes', () => {
   const f = fixture();
   f.records.splice(-2);
@@ -204,10 +219,10 @@ test('CLI bounds inputs, rejects symlinks, and never prints private parse errors
 
 test('file and chunk size failures include bounded numeric evidence', () => {
   const file = fixture();
-  file.content = 'x'.repeat(61440 + 323);
+  file.content = 'x'.repeat(80 * 1024 + 1);
   assert.throws(() => check(file), error => {
     assert.equal(error.message, 'file-size');
-    assert.deepEqual(error.metrics, { actualBytes: 61763, minBytes: 46080, maxBytes: 61440, overBytes: 323, underBytes: 0 });
+    assert.deepEqual(error.metrics, { actualBytes: 81921, minBytes: 46080, maxBytes: 81920, overBytes: 1, underBytes: 0 });
     return true;
   });
   const chunk = fixture('chunked');
@@ -225,14 +240,14 @@ test('CLI reports oversized output separately from oversized trace and non-file 
     const f = fixture();
     const trace = path.join(dir, 'events.jsonl'), file = path.join(dir, 'large-stream.txt');
     fs.writeFileSync(trace, f.records.map(r => JSON.stringify(r)).join('\n'));
-    fs.writeFileSync(file, 'x'.repeat(61440 + 323));
+    fs.writeFileSync(file, 'x'.repeat(80 * 1024 + 1));
     const result = spawnSync(process.execPath, [path.join(__dirname, 'client-file-evidence.js'), trace, dir, 'large', 'Write'], { encoding: 'utf8' });
     assert.equal(result.status, 1);
     const report = JSON.parse(result.stdout);
     assert.equal(report.reason, 'file-size');
-    assert.equal(report.metrics.actualBytes, 61763);
-    assert.equal(report.metrics.overBytes, 323);
-    assert.equal(report.metrics.maxBytes, 61440);
+    assert.equal(report.metrics.actualBytes, 81921);
+    assert.equal(report.metrics.overBytes, 1);
+    assert.equal(report.metrics.maxBytes, 81920);
     assert.doesNotMatch(result.stdout, /kiro-file-size-evidence|events\.jsonl/);
     assert.equal(result.stderr, '');
     fs.unlinkSync(file);

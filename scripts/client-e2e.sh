@@ -433,6 +433,30 @@ client_result_subtype() {
   jq -r 'select(.type == "result") | .subtype // "unknown"' "$1" | tail -n 1
 }
 
+client_failure_detail() {
+  local output="$1" status="$2"
+  local subtype calls results tool_errors evidence
+  subtype="$(client_result_subtype "$output" 2>/dev/null || true)"
+  [[ -n "$subtype" ]] || subtype=missing
+  calls="$(client_tool_use_count "$output" 2>/dev/null || printf '?')"
+  results="$(client_tool_result_count "$output" 2>/dev/null || printf '?')"
+  tool_errors="$(client_tool_error_count "$output" 2>/dev/null || printf '?')"
+  if evidence="$(client_evidence "$output" 2>/dev/null)" && [[ -n "$evidence" ]]; then
+    jq -r --arg status "$status" --arg subtype "$subtype" --arg calls "$calls" \
+      --arg results "$results" --arg toolErrors "$tool_errors" \
+      '"status=" + $status + ", subtype=" + $subtype +
+       ", calls=" + $calls + ", results=" + $results +
+       ", tool_errors=" + $toolErrors +
+       ", paired=" + ((.paired // false) | tostring) +
+       ", terminal=" + ((.terminalSuccess // false) | tostring) +
+       ", protocol_error=" + ((.protocolError // false) | tostring) +
+       ", continuations=" + ((.automaticContinuations // 0) | tostring)' <<<"$evidence"
+  else
+    printf 'status=%s, subtype=%s, calls=%s, results=%s, tool_errors=%s, evidence=invalid\n' \
+      "$status" "$subtype" "$calls" "$results" "$tool_errors"
+  fi
+}
+
 client_init_present() {
   jq -e 'select(.type == "system" and .subtype == "init")' "$1" >/dev/null 2>&1
 }
@@ -620,11 +644,11 @@ case_file_tools() {
   status=$?
   set -e
   if ! client_init_present "$output"; then
-    CASE_DETAIL="Claude Code did not emit an initialization record"
+    CASE_DETAIL="Claude Code did not emit an initialization record ($(client_failure_detail "$output" "$status"))"
     return 1
   fi
   if ((status != 0)) || ! has_client_success_result "$output"; then
-    CASE_DETAIL="file-tool client did not complete successfully (status ${status})"
+    CASE_DETAIL="file-tool client did not complete successfully ($(client_failure_detail "$output" "$status"))"
     return 1
   fi
   if ! client_has_tool "$output" Read || ! client_has_tool "$output" Edit; then
@@ -925,7 +949,7 @@ file_evidence_failure_detail() {
 case_workspace_large_write_progress() {
   command -v node >/dev/null 2>&1 || { CASE_DETAIL="Node.js is required for partial-message timing"; return 1; }
   local workspace="$TMP_DIR/large-write" output="$TMP_DIR/workspace-large-write-progress.jsonl"
-  local timing="$TMP_DIR/large-write-timing.json" status evidence size spread gap instruction file_evidence
+  local timing="$TMP_DIR/large-write-timing.json" status evidence size spread gap instruction file_evidence size_note
   mkdir -p "$workspace"
   probe_file_tools "$workspace" "$TMP_DIR/large-write-capabilities.jsonl" || return 1
   [[ -n "$FILE_WRITER" ]] || return 0
@@ -933,7 +957,7 @@ case_workspace_large_write_progress() {
   if [[ "$FILE_WRITER" == Edit ]]; then instruction+=' Use old_string="" and put all file content in new_string.'; fi
   set +e
   CLI_TIMING_REPORT="$timing" run_cli_session "$AGENT_TIMEOUT" "$MODEL" "$workspace" "$output" \
-    "Create large-stream.txt in the current directory. $instruction Then use Read to verify all lines, with additional Read calls if truncated. The file must contain exactly 420 lines about ordinary software testing, numbered with prefixes 0001: through 0420: followed by a space. Each line must have at least 105 printable ASCII characters. Target 45-60 KiB. Do not use Bash, loops, shell scripts, generated shortcuts, or multiple mutations. Do not stop to ask permission. Finish with LARGE_WRITE_PROGRESS_OK." \
+    "Create large-stream.txt in the current directory. $instruction Then use Read to verify all lines, with additional Read calls if truncated. The file must contain exactly 420 lines about ordinary software testing, numbered with prefixes 0001: through 0420: followed by a space. Each line must have at least 105 printable ASCII characters. Target 45-60 KiB and stay below 80 KiB. Do not use Bash, loops, shell scripts, generated shortcuts, or multiple mutations. Do not stop to ask permission. Finish with LARGE_WRITE_PROGRESS_OK." \
     --restricted --tools "Read,$FILE_WRITER" --allowedTools "Read,$FILE_WRITER" --permission-mode acceptEdits
   status=$?
   set -e
@@ -952,6 +976,12 @@ case_workspace_large_write_progress() {
     CASE_DETAIL="large file evidence failed: $(file_evidence_failure_detail <<<"$file_evidence")"
     return 1
   fi
+  if [[ "$(jq -r '.oversized // false' <<<"$file_evidence")" == true ]]; then
+    CASE_STATUS_HINT=WARN
+    size_note="; model output exceeded the 60 KiB target but stayed within the 80 KiB evidence bound"
+  else
+    size_note=""
+  fi
   if ! jq -e --arg writer "$FILE_WRITER" '[.tools[] | select(.name == $writer and .bytes >= 40960 and .stopMs != null and .jsonValid == true and .interrupted != true)] | length == 1' "$timing" >/dev/null; then
     CASE_DETAIL="missing large $FILE_WRITER partial-message evidence"
     return 1
@@ -960,15 +990,15 @@ case_workspace_large_write_progress() {
   gap="$(jq --arg writer "$FILE_WRITER" '[.tools[] | select(.name == $writer and .bytes >= 40960) | .maxDeltaGapMs] | max // 0' "$timing")"
   if ! jq -e --arg writer "$FILE_WRITER" '[.tools[] | select(.name == $writer and .bytes >= 40960 and .deltaCount > 1 and (.stopMs - .firstDeltaMs) >= 1000)] | length == 1' "$timing" >/dev/null; then
     CASE_STATUS_HINT=WARN
-    CASE_DETAIL="large $FILE_WRITER completed, but arguments arrived buffered/bursty (bytes $size, start-to-stop ${spread}ms)"
+    CASE_DETAIL="large $FILE_WRITER completed, but arguments arrived buffered/bursty (bytes $size, start-to-stop ${spread}ms)${size_note}"
     return 0
   fi
   if ((gap > 30000)); then
     CASE_STATUS_HINT=WARN
-    CASE_DETAIL="large file completed with early tool progress but a ${gap}ms argument gap; inspect upstream read/frame metrics"
+    CASE_DETAIL="large file completed with early tool progress but a ${gap}ms argument gap; inspect upstream read/frame metrics${size_note}"
     return 0
   fi
-  CASE_DETAIL="large $FILE_WRITER completed with early partial messages (bytes $size, start-to-stop ${spread}ms, max argument gap ${gap}ms); terminal rendering is client-dependent"
+  CASE_DETAIL="large $FILE_WRITER completed with early partial messages (bytes $size, start-to-stop ${spread}ms, max argument gap ${gap}ms); terminal rendering is client-dependent${size_note}"
 }
 
 case_workspace_chunked_edit_progress() {
@@ -1008,7 +1038,7 @@ case_workspace_chunked_edit_progress() {
 case_workspace_autonomous_large_file() {
   command -v node >/dev/null 2>&1 || { CASE_DETAIL="Node.js is required for file evidence"; return 1; }
   local workspace="$TMP_DIR/autonomous-file" output="$TMP_DIR/workspace-autonomous-large-file.jsonl"
-  local timing="$TMP_DIR/autonomous-file-timing.json" status file_evidence instruction
+  local timing="$TMP_DIR/autonomous-file-timing.json" status file_evidence instruction size_note
   mkdir -p "$workspace"
   probe_file_tools "$workspace" "$TMP_DIR/autonomous-file-capabilities.jsonl" || return 1
   [[ -n "$FILE_WRITER" ]] || return 0
@@ -1016,7 +1046,7 @@ case_workspace_autonomous_large_file() {
   if [[ "$FILE_WRITER" == Edit ]]; then instruction+=' When creating a nonexistent file, Edit uses old_string="".'; fi
   set +e
   CLI_TIMING_REPORT="$timing" run_cli_session "$AGENT_TIMEOUT" "$MODEL" "$workspace" "$output" \
-    "Create autonomous-stream.txt in the current directory. $instruction The final file must contain exactly 420 lines about ordinary software testing, numbered 0001: through 0420: followed by a space. Each line must have at least 105 printable ASCII characters; aim for 110-125 characters including the prefix. Total size must be 45-60 KiB. Choose your own file-editing workflow. Read all final lines to verify the result, using additional Read calls if truncated. Do not use Bash, shell scripts, loops or generated shortcuts. Finish with AUTONOMOUS_FILE_OK." \
+    "Create autonomous-stream.txt in the current directory. $instruction The final file must contain exactly 420 lines about ordinary software testing, numbered 0001: through 0420: followed by a space. Each line must have at least 105 printable ASCII characters; aim for 110-125 characters including the prefix. Target 45-60 KiB and stay below 80 KiB. Choose your own file-editing workflow. Read all final lines to verify the result, using additional Read calls if truncated. Do not use Bash, shell scripts, loops or generated shortcuts. Finish with AUTONOMOUS_FILE_OK." \
     --restricted --tools "Read,$FILE_WRITER,Edit" --allowedTools "Read,$FILE_WRITER,Edit" --permission-mode acceptEdits
   status=$?
   set -e
@@ -1029,7 +1059,13 @@ case_workspace_autonomous_large_file() {
     CASE_DETAIL="autonomous file evidence failed: $(file_evidence_failure_detail <<<"$file_evidence")"
     return 1
   fi
-  CASE_DETAIL="$(jq -r '"autonomous workflow verified: strategy=" + .strategy + ", mutations=" + (.mutations|tostring) + ", max mutation bytes=" + (.maxMutationBytes|tostring) + ", file bytes=" + (.bytes|tostring)' <<<"$file_evidence")"
+  if [[ "$(jq -r '.oversized // false' <<<"$file_evidence")" == true ]]; then
+    CASE_STATUS_HINT=WARN
+    size_note="; model output exceeded the 60 KiB target but stayed within the 80 KiB evidence bound"
+  else
+    size_note=""
+  fi
+  CASE_DETAIL="$(jq -r '"autonomous workflow verified: strategy=" + .strategy + ", mutations=" + (.mutations|tostring) + ", max mutation bytes=" + (.maxMutationBytes|tostring) + ", file bytes=" + (.bytes|tostring)' <<<"$file_evidence")${size_note}"
 }
 
 case_workspace_repo_loop() {

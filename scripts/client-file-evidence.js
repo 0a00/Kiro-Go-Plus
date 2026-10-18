@@ -2,7 +2,10 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const MIN_FILE_BYTES = 45 * 1024;
-const MAX_FILE_BYTES = 60 * 1024;
+const TARGET_MAX_FILE_BYTES = 60 * 1024;
+// Model-generated line content can overshoot the target without indicating a
+// transport failure. Keep a separate hard bound so evidence remains finite.
+const HARD_MAX_FILE_BYTES = 80 * 1024;
 const MIN_CHUNK_BYTES = 4 * 1024;
 const MAX_CHUNK_BYTES = 6 * 1024;
 
@@ -51,7 +54,9 @@ function validateFileEvidence(records, content, { workspace, scenario, writer = 
   const autonomous = scenario === 'autonomous';
   const target = path.resolve(workspace, `${scenario === 'large' ? 'large' : scenario}-stream.txt`);
   const bytes = Buffer.byteLength(content);
-  requireEvidence(bytes >= MIN_FILE_BYTES && bytes <= MAX_FILE_BYTES, 'file-size', sizeMetrics(bytes, MIN_FILE_BYTES, MAX_FILE_BYTES));
+  const maxBytes = chunked ? TARGET_MAX_FILE_BYTES : HARD_MAX_FILE_BYTES;
+  requireEvidence(bytes >= MIN_FILE_BYTES && bytes <= maxBytes, 'file-size', sizeMetrics(bytes, MIN_FILE_BYTES, maxBytes));
+  const overTarget = bytes > TARGET_MAX_FILE_BYTES;
   const rows = numberedLines(content, 420);
   const calls = [], replies = new Map();
   let position = 0;
@@ -148,6 +153,7 @@ function validateFileEvidence(records, content, { workspace, scenario, writer = 
   requireEvidence(reads.length > 0, 'missing-final-read');
   requireEvidence(observed.size === expected.size, 'readback-content');
   return { bytes, lines: rows.length, mutations: mutations.length, verifiedLines: observed.size,
+    ...(overTarget ? { oversized: true, targetMaxBytes: TARGET_MAX_FILE_BYTES } : {}),
     ...(autonomous ? { strategy: mutations.length === 1 ? 'single' : 'multiple', maxMutationBytes } : {}) };
 }
 
@@ -170,7 +176,8 @@ function checkFileEvidence(trace, workspace, scenario, writer) {
   const records = readRegular(trace, 32 * 1024 * 1024, 'trace-size').split('\n').filter(row => row.trim()).map(row => JSON.parse(row));
   requireEvidence(records.every(record => record && typeof record === 'object' && !Array.isArray(record)), 'invalid-record');
   const filename = `${scenario}-stream.txt`;
-  return validateFileEvidence(records, readRegular(path.join(workspace, filename), MAX_FILE_BYTES, 'file-size', MIN_FILE_BYTES), { workspace, scenario, writer });
+  const maxBytes = scenario === 'chunked' ? TARGET_MAX_FILE_BYTES : HARD_MAX_FILE_BYTES;
+  return validateFileEvidence(records, readRegular(path.join(workspace, filename), maxBytes, 'file-size', MIN_FILE_BYTES), { workspace, scenario, writer });
 }
 
 if (require.main === module) {

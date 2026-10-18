@@ -208,6 +208,11 @@ if (last.includes('CLIENT_CAPABILITY_PROBE_OK')) {
 } else if (last.includes('claude-file-e2e.txt')) {
   if (!args.includes('--bare')) process.exit(45);
   emit({type:'system',subtype:'init',tools:['Read','Edit']});
+  if(mode==='file-failure'){
+    emit({type:'stream_event',event:{type:'error'}});
+    emit({type:'result',subtype:'error_during_execution',is_error:true,result:'CLIENT_FILE_TOOLS_FAILED'});
+    process.exit(1);
+  }
   const file = path.join(process.cwd(),'claude-file-e2e.txt');
   fs.writeFileSync(file,mode==='file-wrong'||mode==='file-recovered-fail'?'WRONG':'FILE_EDIT_OK');
   call('create','Edit',file);reply('create','created');
@@ -288,6 +293,12 @@ test('file scenario passes with Edit creation but fails if the disk content is w
   assert.match(ok.stdout, /file-tools\s+PASS/);
   const bad = runFixture('file-wrong', 'file-tools');
   assert.equal(bad.status, 1, bad.stdout + bad.stderr);
+});
+
+test('file scenario reports structured diagnostics for an early client failure', () => {
+  const failed = runFixture('file-failure', 'file-tools');
+  assert.equal(failed.status, 1, failed.stdout + failed.stderr);
+  assert.match(failed.stdout, /file-tools\s+FAIL.*status=1, subtype=error_during_execution, calls=0, results=0, tool_errors=0, paired=false, terminal=false, protocol_error=true/);
 });
 
 test('automatic stream continuation cannot be reported as uninterrupted success', () => {
