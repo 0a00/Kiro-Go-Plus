@@ -51,10 +51,10 @@ function boot() {
 test('boot cannot reveal a late or expired application; network error does not log out', () => {
   const b = boot(); assert.equal(b.nodes.bootScreen.dataset.state, 'loading');
   [...b.timers.values()][0](); assert.equal(b.nodes.bootScreen.dataset.state, 'error');
-  assert.equal(b.api.ready(), false); assert.deepEqual(b.redirects, []);
+  assert.equal(b.api.ready(), true); assert.equal(b.nodes.bootScreen.hidden, true); assert.deepEqual(b.redirects, []);
   b.api.expired(); b.api.expired(); assert.deepEqual(b.redirects, ['/admin/login.html?expired=1']);
   const ok = boot(); assert.equal(ok.api.ready(), true); assert.equal(ok.nodes.bootScreen.hidden, true);
-  ok.api.fail(); assert.equal(ok.nodes.bootScreen.hidden, false);
+  ok.api.fail(); assert.equal(ok.nodes.bootScreen.hidden, true);
   const expired = boot(); expired.api.expired(); assert.equal(expired.api.ready(), false);
 });
 

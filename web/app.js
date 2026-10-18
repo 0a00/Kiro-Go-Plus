@@ -673,12 +673,15 @@
 
   // Data loaders
   async function loadData() {
-    await Promise.all([loadStats(), loadAccounts(), loadSettings(), loadVersion()]);
+    const results = await Promise.allSettled([loadStats(), loadAccounts(), loadSettings(), loadVersion()]);
     renderEndpointCode('claudeEndpoint', baseUrl + '/v1/messages');
     renderEndpointCode('openaiEndpoint', baseUrl + '/v1/chat/completions');
     renderEndpointCode('openaiResponsesEndpoint', baseUrl + '/v1/responses');
     renderEndpointCode('modelsEndpoint', baseUrl + '/v1/models');
     renderEndpointCode('statsEndpoint', baseUrl + '/v1/stats');
+    const failures = results.filter(result => result.status === 'rejected');
+    const sessionExpired = failures.some(result => result.reason && result.reason.message === 'Session expired');
+    if (failures.length && !sessionExpired) toast(t('common.loadFailed'), 'error');
     setTimeout(checkUpdate, 2000);
   }
   async function loadStats() {
@@ -1971,7 +1974,7 @@
     const d = await res.json();
     $('requireApiKey').checked = d.requireApiKey;
     $('allowOverUsage').checked = d.allowOverUsage || false;
-    await Promise.all([
+    const results = await Promise.allSettled([
       loadRuntimeConfig(),
 	  loadIPv6Config(),
       loadRoutingConfig(),
@@ -1999,6 +2002,10 @@
       loadApiKeys()
     ]);
     refreshCustomSelects();
+    if (results.some(result => result.status === 'rejected' && result.reason && result.reason.message === 'Session expired')) {
+      throw new Error('Session expired');
+    }
+    if (results.some(result => result.status === 'rejected')) throw new Error('Settings partially unavailable');
   }
   async function loadRuntimeConfig() {
     const res = await api('/runtime-config');
@@ -5425,6 +5432,10 @@
       if (yr) yr.textContent = new Date().getFullYear();
       wireEvents();
       showMain();
+      // The session check has completed. Do not let its short startup signal
+      // abort optional dashboard data and turn a partial load into a full-screen
+      // boot failure.
+      initialLoadSignal = undefined;
       await loadData();
       setInterval(() => {
         if (!$('mainPage').classList.contains('hidden')) loadStats().catch(() => toast(t('common.loadFailed'), 'error'));

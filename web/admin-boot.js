@@ -21,11 +21,15 @@
   }
   const timer = setTimeout(() => fail(), 20000);
   function fail() {
-    if (redirecting) return;
+    // Once the shell is usable, a late data/API failure must not cover the
+    // authenticated console. Individual loaders report their own errors.
+    if (redirecting || state === 'ready') return;
     state = 'error'; clearTimeout(timer); render();
   }
   function ready() {
-    if (redirecting || state !== 'loading') return false;
+    // A slow script or session probe may trip the soft boot deadline before
+    // the application finishes. Let a later successful session check recover.
+    if (redirecting || state === 'ready') return false;
     state = 'ready'; clearTimeout(timer); render(); return true;
   }
   function expired() {
