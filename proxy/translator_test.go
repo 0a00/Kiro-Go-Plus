@@ -632,6 +632,11 @@ func TestParseModelAndThinking(t *testing.T) {
 		{"existing opus dot form", "claude-opus-4.7", "claude-opus-4.7", false},
 		{"sonnet dash form", "claude-sonnet-4-6", "claude-sonnet-4.6", false},
 		{"sonnet dot form", "claude-sonnet-4.6", "claude-sonnet-4.6", false},
+		{"fable dash form", "claude-fable-5-1", "claude-fable-5.1", false},
+		{"fable dot form", "claude-fable-5.1", "claude-fable-5.1", false},
+		{"fable major alias", "claude-fable-5", "claude-fable-5.1", false},
+		{"opus 5.5 dash form", "claude-opus-5-5", "claude-opus-5.5", false},
+		{"sonnet 5.5 dash form", "claude-sonnet-5-5", "claude-sonnet-5.5", false},
 		{"haiku dash form", "claude-haiku-4-5", "claude-haiku-4.5", false},
 		{"haiku dot form", "claude-haiku-4.5", "claude-haiku-4.5", false},
 		{"future major bump", "claude-sonnet-5-0", "claude-sonnet-5.0", false},
@@ -672,6 +677,8 @@ func TestParseModelAndThinking(t *testing.T) {
 		{"thinking suffix on dash form", "claude-opus-4-8-thinking", "claude-opus-4.8", true},
 		{"thinking suffix on dot form", "claude-sonnet-4.5-thinking", "claude-sonnet-4.5", true},
 		{"thinking suffix on opus 5", "claude-opus-5-thinking", "claude-opus-5", true},
+		{"thinking suffix on fable", "claude-fable-5-1-thinking", "claude-fable-5.1", true},
+		{"thinking suffix on opus 5.5", "claude-opus-5-5-thinking", "claude-opus-5.5", true},
 		{"thinking suffix on legacy alias", "claude-3-5-sonnet-thinking", "claude-sonnet-4.5", true},
 
 		// Unknown models pass through unchanged.

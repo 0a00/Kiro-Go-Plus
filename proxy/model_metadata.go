@@ -219,10 +219,16 @@ func isClaudeSonnet5Model(model string) bool {
 	return model == "claude-sonnet-5" || strings.HasPrefix(model, "claude-sonnet-5.")
 }
 
+func isClaudeFableModel(model string) bool {
+	model = strings.ToLower(strings.TrimSpace(model))
+	model = strings.TrimSuffix(model, "-thinking")
+	return model == "claude-fable-5.1"
+}
+
 func supportsAdaptiveThinking(model string) bool {
 	model = normalizeKnownModelID(model)
 	model = strings.ToLower(strings.TrimSpace(strings.TrimSuffix(model, "-thinking")))
-	if isClaudeOpus5Model(model) || isClaudeSonnet5Model(model) {
+	if isClaudeOpus5Model(model) || isClaudeSonnet5Model(model) || isClaudeFableModel(model) {
 		return true
 	}
 	switch model {

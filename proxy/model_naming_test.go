@@ -15,6 +15,9 @@ func TestModelIDForAPI(t *testing.T) {
 		expected string
 	}{
 		{name: "minor version", model: "claude-opus-4.8", enabled: true, expected: "claude-opus-4-8"},
+		{name: "fable minor version", model: "claude-fable-5.1", enabled: true, expected: "claude-fable-5-1"},
+		{name: "opus 5.5", model: "claude-opus-5.5", enabled: true, expected: "claude-opus-5-5"},
+		{name: "sonnet 5.5 thinking", model: "claude-sonnet-5.5-thinking", enabled: true, expected: "claude-sonnet-5-5-thinking"},
 		{name: "thinking suffix", model: "claude-sonnet-4.6-thinking", enabled: true, expected: "claude-sonnet-4-6-thinking"},
 		{name: "dated snapshot", model: "claude-haiku-4.5-20251001", enabled: true, expected: "claude-haiku-4-5-20251001"},
 		{name: "latest suffix", model: "claude-opus-4.8-latest", enabled: true, expected: "claude-opus-4-8-latest"},
@@ -24,6 +27,7 @@ func TestModelIDForAPI(t *testing.T) {
 		{name: "disabled", model: "claude-opus-4.8", enabled: false, expected: "claude-opus-4.8"},
 		{name: "official disabled", model: "claude-opus-4-8", enabled: false, expected: "claude-opus-4.8"},
 		{name: "official thinking disabled", model: "claude-sonnet-4-6-thinking", enabled: false, expected: "claude-sonnet-4.6-thinking"},
+		{name: "official fable disabled", model: "claude-fable-5-1", enabled: false, expected: "claude-fable-5.1"},
 	}
 
 	for _, test := range tests {

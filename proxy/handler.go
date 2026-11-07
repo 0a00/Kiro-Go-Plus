@@ -1446,9 +1446,23 @@ func buildAnthropicModelsResponse(cached []ModelInfo, thinkingSuffix string, use
 }
 
 func fallbackAnthropicModels(thinkingSuffix string, useOfficialNames bool) []map[string]interface{} {
+	fable51 := buildModelInfoWithFixedLimits("claude-fable-5.1", "anthropic", true, 1_000_000, 128_000)
+	fable51Thinking := buildModelInfoWithFixedLimits("claude-fable-5.1"+thinkingSuffix, "anthropic", true, 1_000_000, 128_000)
+	for _, model := range []map[string]interface{}{fable51, fable51Thinking} {
+		model["upstream_context_window"] = 1_000_000
+		model["upstream_max_output_tokens"] = 128_000
+	}
 	opus5 := buildModelInfoWithFixedLimits("claude-opus-5", "anthropic", true, 1_000_000, 128_000)
 	opus5Thinking := buildModelInfoWithFixedLimits("claude-opus-5"+thinkingSuffix, "anthropic", true, 1_000_000, 128_000)
 	for _, model := range []map[string]interface{}{opus5, opus5Thinking} {
+		model["effort_levels"] = []string{effortLow, effortMedium, effortHigh, effortXHigh, effortMax}
+		model["prompt_cache_min_tokens"] = 512
+		model["upstream_context_window"] = 1_000_000
+		model["upstream_max_output_tokens"] = 128_000
+	}
+	opus55 := buildModelInfoWithFixedLimits("claude-opus-5.5", "anthropic", true, 1_000_000, 128_000)
+	opus55Thinking := buildModelInfoWithFixedLimits("claude-opus-5.5"+thinkingSuffix, "anthropic", true, 1_000_000, 128_000)
+	for _, model := range []map[string]interface{}{opus55, opus55Thinking} {
 		model["effort_levels"] = []string{effortLow, effortMedium, effortHigh, effortXHigh, effortMax}
 		model["prompt_cache_min_tokens"] = 512
 		model["upstream_context_window"] = 1_000_000
@@ -1461,11 +1475,24 @@ func fallbackAnthropicModels(thinkingSuffix string, useOfficialNames bool) []map
 		model["upstream_context_window"] = 1_000_000
 		model["upstream_max_output_tokens"] = 128_000
 	}
+	sonnet55 := buildModelInfoWithFixedLimits("claude-sonnet-5.5", "anthropic", true, 1_000_000, 128_000)
+	sonnet55Thinking := buildModelInfoWithFixedLimits("claude-sonnet-5.5"+thinkingSuffix, "anthropic", true, 1_000_000, 128_000)
+	for _, model := range []map[string]interface{}{sonnet55, sonnet55Thinking} {
+		model["effort_levels"] = []string{effortHigh}
+		model["upstream_context_window"] = 1_000_000
+		model["upstream_max_output_tokens"] = 128_000
+	}
 	models := []map[string]interface{}{
+		fable51,
+		fable51Thinking,
 		opus5,
 		opus5Thinking,
+		opus55,
+		opus55Thinking,
 		sonnet5,
 		sonnet5Thinking,
+		sonnet55,
+		sonnet55Thinking,
 		buildModelInfoWithoutInferredLimits("gpt-5.6-sol", "openai", false),
 		buildModelInfoWithoutInferredLimits("gpt-5.6-terra", "openai", false),
 		buildModelInfoWithoutInferredLimits("gpt-5.6-luna", "openai", false),

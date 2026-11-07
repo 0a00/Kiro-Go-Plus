@@ -8,8 +8,8 @@ import (
 )
 
 var (
-	kiroClaudeMinorModelPattern     = regexp.MustCompile(`^claude-(opus|sonnet|haiku)-(\d+)\.(\d{1,2})((?:-(?:\d{8}|latest))?(?:-thinking)?)$`)
-	officialClaudeMinorModelPattern = regexp.MustCompile(`^claude-(opus|sonnet|haiku)-(\d+)-(\d{1,2})((?:-(?:\d{8}|latest))?(?:-thinking)?)$`)
+	kiroClaudeMinorModelPattern     = regexp.MustCompile(`^claude-(opus|sonnet|haiku|fable)-(\d+)\.(\d{1,2})((?:-(?:\d{8}|latest))?(?:-thinking)?)$`)
+	officialClaudeMinorModelPattern = regexp.MustCompile(`^claude-(opus|sonnet|haiku|fable)-(\d+)-(\d{1,2})((?:-(?:\d{8}|latest))?(?:-thinking)?)$`)
 )
 
 // modelIDForAPI selects the external representation of Claude minor versions

@@ -25,6 +25,9 @@ type modelMapping struct {
 }
 
 var modelAliases = []modelMapping{
+	// Kiro currently exposes only Fable 5.1. Keep public Fable aliases on the
+	// supported Kiro ID instead of forwarding an unsupported major-only ID.
+	{"claude-fable", "claude-fable-5.1"},
 	{"claude-sonnet-latest", "claude-sonnet-5"},
 	{"claude-sonnet-4-20250514", "claude-sonnet-4"},
 	{"claude-3-5-sonnet", "claude-sonnet-4.5"},
@@ -42,9 +45,9 @@ var modelAliases = []modelMapping{
 
 var (
 	clientContextSuffixPattern = regexp.MustCompile(`(?i)\s*\[\d+(?:k|m)\]\s*$`)
-	claudeDashVersionPattern   = regexp.MustCompile(`^claude-(opus|sonnet|haiku)-(\d+)-(\d{1,2})(?:-(?:\d{8}|latest))?$`)
-	claudeDotVersionPattern    = regexp.MustCompile(`^claude-(opus|sonnet|haiku)-(\d+)\.(\d{1,2})(?:-(?:\d{8}|latest))?$`)
-	claudeMajorSnapshotPattern = regexp.MustCompile(`^claude-(opus|sonnet|haiku)-(\d+)(?:-(?:\d{8}|latest))?$`)
+	claudeDashVersionPattern   = regexp.MustCompile(`^claude-(opus|sonnet|haiku|fable)-(\d+)-(\d{1,2})(?:-(?:\d{8}|latest))?$`)
+	claudeDotVersionPattern    = regexp.MustCompile(`^claude-(opus|sonnet|haiku|fable)-(\d+)\.(\d{1,2})(?:-(?:\d{8}|latest))?$`)
+	claudeMajorSnapshotPattern = regexp.MustCompile(`^claude-(opus|sonnet|haiku|fable)-(\d+)(?:-(?:\d{8}|latest))?$`)
 )
 
 const (

@@ -23,6 +23,11 @@ func TestRequestedModelAvailabilityUsesCurrentCache(t *testing.T) {
 	if !h.requestedModelAvailable("claude-opus-5-thinking", "claude-opus-5") {
 		t.Fatal("Opus 5 thinking variant was rejected")
 	}
+	for _, model := range []string{"claude-fable-5-1", "claude-opus-5-5-thinking", "claude-sonnet-5-5"} {
+		if !h.requestedModelAvailable(model, MapModel(model)) {
+			t.Fatalf("new upstream model %q was rejected", model)
+		}
+	}
 	if h.requestedModelAvailable("claude-sonnet-4.8", "claude-sonnet-4.8") {
 		t.Fatal("model absent from a populated cache was accepted")
 	}

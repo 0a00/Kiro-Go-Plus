@@ -2540,7 +2540,7 @@ func getPayloadReportingContextWindowSize(payload *KiroPayload, model string) in
 
 // claudeVersionExtractor matches both bare major versions and major/minor
 // versions in dot or dash form.
-var claudeVersionExtractor = regexp.MustCompile(`claude-(?:opus|sonnet|haiku)-(\d+)(?:[.-](\d+))?`)
+var claudeVersionExtractor = regexp.MustCompile(`claude-(?:opus|sonnet|haiku|fable)-(\d+)(?:[.-](\d+))?`)
 
 func isLargeContextModel(model string) bool {
 	m := strings.ToLower(model)

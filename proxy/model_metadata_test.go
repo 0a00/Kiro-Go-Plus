@@ -48,7 +48,8 @@ func TestResolveSupportedEffortUsesClosestAdvertisedLevel(t *testing.T) {
 func TestAdaptiveThinkingModelFallbacks(t *testing.T) {
 	for _, model := range []string{
 		"claude-opus-4.6", "claude-opus-4.7", "claude-opus-4.8",
-		"claude-sonnet-5", "claude-opus-5",
+		"claude-sonnet-5", "claude-opus-5", "claude-opus-5.5", "claude-sonnet-5.5",
+		"claude-fable-5.1",
 	} {
 		if !supportsAdaptiveThinking(model) {
 			t.Errorf("model %q should support adaptive thinking", model)
@@ -169,6 +170,37 @@ func TestClaudeSonnet5UsesNativeAdaptiveFallback(t *testing.T) {
 	}
 }
 
+func TestClaude55UsesNativeAdaptiveFallback(t *testing.T) {
+	for _, tc := range []struct {
+		model  string
+		effort string
+	}{
+		{model: "claude-opus-5.5", effort: effortHigh},
+		{model: "claude-sonnet-5.5", effort: effortHigh},
+	} {
+		req := &ClaudeRequest{
+			Model:     tc.model,
+			MaxTokens: 4096,
+			Thinking:  &ClaudeThinkingConfig{Type: "adaptive"},
+		}
+		(&Handler{}).prepareClaudeNativeEffort(req, true)
+		if req.NativeEffort != tc.effort || req.NativeEffortPath != "output_config" {
+			t.Fatalf("model %q native effort = %q/%q, want %q/output_config", tc.model, req.NativeEffort, req.NativeEffortPath, tc.effort)
+		}
+	}
+}
+
+func TestClaudeFableUsesAdaptiveThinkingFallback(t *testing.T) {
+	if !supportsAdaptiveThinking("claude-fable-5-1") {
+		t.Fatal("Fable 5.1 should support adaptive thinking")
+	}
+	req := &ClaudeRequest{Model: "claude-fable-5.1", MaxTokens: 4096}
+	prompt := claudeThinkingPrompt(req, true)
+	if prompt != "<thinking_mode>adaptive</thinking_mode>\n<thinking_effort>high</thinking_effort>" {
+		t.Fatalf("unexpected Fable thinking prompt: %q", prompt)
+	}
+}
+
 func TestOpenAIReasoningEffortUsesNativeKiroField(t *testing.T) {
 	h := &Handler{}
 	req := &OpenAIRequest{
@@ -189,7 +221,11 @@ func TestFallbackModelsAdvertiseGeneration5Limits(t *testing.T) {
 		t.Fatalf("config.Init: %v", err)
 	}
 	models := fallbackAnthropicModels("-thinking", true)
-	for _, id := range []string{"claude-opus-5", "claude-opus-5-thinking", "claude-sonnet-5", "claude-sonnet-5-thinking"} {
+	for _, id := range []string{
+		"claude-fable-5-1", "claude-fable-5-1-thinking",
+		"claude-opus-5", "claude-opus-5-thinking", "claude-opus-5-5", "claude-opus-5-5-thinking",
+		"claude-sonnet-5", "claude-sonnet-5-thinking", "claude-sonnet-5-5", "claude-sonnet-5-5-thinking",
+	} {
 		var found map[string]interface{}
 		for _, model := range models {
 			if model["id"] == id {
