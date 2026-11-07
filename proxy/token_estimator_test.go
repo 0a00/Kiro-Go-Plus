@@ -98,3 +98,29 @@ func TestPromptCacheImageAccountingUsesDigestAndFixedTokens(t *testing.T) {
 		t.Fatal("different image bytes must produce different cache fingerprints")
 	}
 }
+
+func TestResolveOutputTokenCountPrefersUpstreamUsage(t *testing.T) {
+	got := resolveOutputTokenCount(1, KiroTokenUsage{
+		OutputTokens:    87,
+		hasOutputTokens: true,
+	}, 3)
+	if got != 87 {
+		t.Fatalf("output token count = %d, want upstream value 87", got)
+	}
+}
+
+func TestResolveOutputTokenCountUsesCompletionCallbackWhenUsageMissing(t *testing.T) {
+	got := resolveOutputTokenCount(42, KiroTokenUsage{}, 3)
+	if got != 42 {
+		t.Fatalf("output token count = %d, want completion callback value 42", got)
+	}
+}
+
+func TestResolveOutputTokenCountFallsBackToEstimate(t *testing.T) {
+	if got := resolveOutputTokenCount(0, KiroTokenUsage{}, 9); got != 9 {
+		t.Fatalf("output token count = %d, want estimate 9", got)
+	}
+	if got := resolveOutputTokenCount(0, KiroTokenUsage{}, 0); got != 0 {
+		t.Fatalf("empty output token count = %d, want 0", got)
+	}
+}

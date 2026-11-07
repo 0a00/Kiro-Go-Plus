@@ -375,6 +375,11 @@ readable. See [test changes](docs/development-testing.md#1297-acceptance-changes
 
 Compose uses `/health`, so account exhaustion does not cause a restart loop. Reverse proxies and load balancers should use `/ready` when deciding whether to route new requests.
 
+1.2.99 preserves upstream output-token usage across Claude, OpenAI, and Responses
+handlers and falls back to local estimation only when upstream usage is absent.
+This prevents completed responses with substantial content from being reported as
+one output token. No settings or credential migration is required.
+
 1.2.98 shares login/console appearance and preferences, removes the duplicate
 login form, and adds bounded startup with retry/session-expiry handling. No
 settings migration is required; deploy the binary and `web/` together.

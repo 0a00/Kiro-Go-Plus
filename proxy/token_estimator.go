@@ -121,6 +121,23 @@ func estimateClaudeOutputTokens(content, thinkingContent string, toolUses []Kiro
 	return total
 }
 
+// resolveOutputTokenCount preserves a token count reported by Kiro. The
+// rendered response is not always a lossless copy of the upstream stream:
+// thinking blocks may be hidden, tool arguments may be buffered, and streaming
+// callbacks can finish before the final response is assembled. Use local
+// estimation only when neither the upstream usage event nor the completion
+// callback supplied a positive count.
+func resolveOutputTokenCount(callbackOutputTokens int, upstream KiroTokenUsage, estimatedOutputTokens int) int {
+	upstream = normalizeKiroTokenUsage(upstream)
+	if upstream.OutputTokens > 0 {
+		return upstream.OutputTokens
+	}
+	if callbackOutputTokens > 0 {
+		return callbackOutputTokens
+	}
+	return maxInt(estimatedOutputTokens, 0)
+}
+
 func estimateClaudeValueTokens(v interface{}) int {
 	switch value := v.(type) {
 	case nil:

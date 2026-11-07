@@ -79,6 +79,50 @@ func writeIntegrityText(t *testing.T, w http.ResponseWriter, text string, comple
 	}
 }
 
+func writeIntegrityTextWithUsage(t *testing.T, w http.ResponseWriter, text string, inputTokens, outputTokens int) {
+	t.Helper()
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{
+		"content": text,
+		"usage": map[string]interface{}{
+			"input_tokens":  inputTokens,
+			"output_tokens": outputTokens,
+		},
+	}))
+	_, _ = w.Write(awsEventStreamFrame(t, "metadataEvent", map[string]interface{}{"stopReason": "end_turn"}))
+}
+
+func TestClaudeNonStreamPreservesUpstreamOutputTokenUsage(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeIntegrityTextWithUsage(t, w, "ok", 23, 97)
+	}))
+	defer upstream.Close()
+	h := setupStreamIntegrityPathTest(t, upstream)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{
+		"model":"claude-sonnet-4.5",
+		"max_tokens":128,
+		"messages":[{"role":"user","content":"hello"}]
+	}`))
+	h.handleClaudeMessages(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var response ClaudeResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v body=%s", err, rec.Body.String())
+	}
+	if response.Usage.OutputTokens != 97 {
+		t.Fatalf("response output_tokens = %d, want upstream value 97", response.Usage.OutputTokens)
+	}
+	entries := h.requestLog.list(1)
+	if len(entries) != 1 || entries[0].OutputTokens != 97 {
+		t.Fatalf("request log output tokens = %+v, want 97", entries)
+	}
+}
+
 func TestClaudeNonStreamRetriesTruncatedResponseOnSameAccount(t *testing.T) {
 	var hits atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

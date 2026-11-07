@@ -650,7 +650,7 @@ const (
 )
 
 // Version current version
-const Version = "1.2.98"
+const Version = "1.2.99"
 
 // BuildCommit is injected by Docker/CI builds so operators can verify the
 // exact source revision running in production. Local builds use "unknown".

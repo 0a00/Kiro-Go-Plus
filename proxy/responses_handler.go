@@ -411,7 +411,8 @@ func (h *Handler) handleResponsesNonStream(
 		if thinkingTokens <= 0 {
 			thinkingTokens = estimateApproxTokens(reasoningContent)
 		}
-		outputTokens = estimateOpenAIOutputTokens(finalContent, reasoningContent, toolUses)
+		estimatedOutputTokens := estimateOpenAIOutputTokens(finalContent, reasoningContent, toolUses)
+		outputTokens = resolveOutputTokenCount(outputTokens, upstreamUsage, estimatedOutputTokens)
 
 		h.recordSuccessForApiKey(payload.requestContext, apiKeyID, inputTokens, outputTokens, credits)
 		h.pool.RecordSuccess(account.ID)
@@ -1145,7 +1146,8 @@ func (h *Handler) handleResponsesStream(
 		if thinkingTokens <= 0 {
 			thinkingTokens = estimateApproxTokens(reasoning)
 		}
-		outputTokens = estimateOpenAIOutputTokens(finalContent, reasoning, toolUses)
+		estimatedOutputTokens := estimateOpenAIOutputTokens(finalContent, reasoning, toolUses)
+		outputTokens = resolveOutputTokenCount(outputTokens, upstreamUsage, estimatedOutputTokens)
 
 		h.recordSuccessForApiKey(payload.requestContext, apiKeyID, inputTokens, outputTokens, credits)
 		h.pool.RecordSuccess(account.ID)

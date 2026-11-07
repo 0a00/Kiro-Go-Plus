@@ -3013,7 +3013,8 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 		if thinkingTokens <= 0 {
 			thinkingTokens = estimateApproxTokens(thinkingOutput)
 		}
-		outputTokens = estimateClaudeOutputTokens(outputContent, thinkingOutput, toolUses)
+		estimatedOutputTokens := estimateClaudeOutputTokens(outputContent, thinkingOutput, toolUses)
+		outputTokens = resolveOutputTokenCount(outputTokens, upstreamUsage, estimatedOutputTokens)
 		stopReason := mapClaudeStopReason(upstreamStopReason, len(toolUses))
 
 		h.recordSuccessForApiKey(payload.requestContext, apiKeyID, inputTokens, outputTokens, credits)
@@ -3398,7 +3399,8 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 		if thinkingTokens <= 0 {
 			thinkingTokens = estimateApproxTokens(rawThinkingContent)
 		}
-		outputTokens = estimateClaudeOutputTokens(finalContent, rawThinkingContent, toolUses)
+		estimatedOutputTokens := estimateClaudeOutputTokens(finalContent, rawThinkingContent, toolUses)
+		outputTokens = resolveOutputTokenCount(outputTokens, upstreamUsage, estimatedOutputTokens)
 		stopReason := mapClaudeStopReason(upstreamStopReason, len(toolUses))
 
 		h.recordSuccessForApiKey(payload.requestContext, apiKeyID, inputTokens, outputTokens, credits)
@@ -4096,11 +4098,12 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 		if thinkingTokens <= 0 {
 			thinkingTokens = estimateApproxTokens(reasoningOutput)
 		}
-		outputTokens = estimateApproxTokens(outputContent) + estimateApproxTokens(reasoningOutput)
+		estimatedOutputTokens := estimateApproxTokens(outputContent) + estimateApproxTokens(reasoningOutput)
 		for _, tc := range toolCalls {
-			outputTokens += estimateApproxTokens(tc.Function.Name)
-			outputTokens += estimateApproxTokens(tc.Function.Arguments)
+			estimatedOutputTokens += estimateApproxTokens(tc.Function.Name)
+			estimatedOutputTokens += estimateApproxTokens(tc.Function.Arguments)
 		}
+		outputTokens = resolveOutputTokenCount(outputTokens, upstreamUsage, estimatedOutputTokens)
 
 		h.recordSuccessForApiKey(payload.requestContext, apiKeyID, inputTokens, outputTokens, credits)
 		h.pool.RecordSuccess(account.ID)
@@ -4306,7 +4309,8 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 		if thinkingTokens <= 0 {
 			thinkingTokens = estimateApproxTokens(reasoningContent)
 		}
-		outputTokens = estimateOpenAIOutputTokens(finalContent, reasoningContent, toolUses)
+		estimatedOutputTokens := estimateOpenAIOutputTokens(finalContent, reasoningContent, toolUses)
+		outputTokens = resolveOutputTokenCount(outputTokens, upstreamUsage, estimatedOutputTokens)
 
 		h.recordSuccessForApiKey(payload.requestContext, apiKeyID, inputTokens, outputTokens, credits)
 		h.pool.RecordSuccess(account.ID)
