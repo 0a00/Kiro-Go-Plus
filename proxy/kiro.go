@@ -1111,6 +1111,7 @@ func callKiroAPISingleModel(account *config.Account, payload *KiroPayload, callb
 		preOutputStreamRetries = *retryConfig.PreOutputStreamRetries
 	}
 	preOutputRetryBackoff := time.Duration(retryConfig.PreOutputRetryBackoffMs) * time.Millisecond
+	versionRefreshAttempted := false
 
 endpointLoop:
 	for _, ep := range endpoints {
@@ -1141,7 +1142,8 @@ endpointLoop:
 		endpointCircuitKey := endpointCircuitScope(ep.Key, endpointHost, modelKey, effectiveProxyURL)
 		endpointCircuitLabel := ep.Name + " (" + endpointHost + ")"
 		invocationID := uuid.New().String()
-		for endpointAttempt := 0; endpointAttempt <= preOutputStreamRetries; endpointAttempt++ {
+		maxEndpointAttempts := preOutputStreamRetries
+		for endpointAttempt := 0; endpointAttempt <= maxEndpointAttempts; endpointAttempt++ {
 			attemptStartedAt = time.Now()
 			if err := requestContext.Err(); err != nil {
 				return classifyRequestCancellation(ep.Name, err)
@@ -1348,6 +1350,20 @@ endpointLoop:
 				detailTrace.recordAttempt(accountID, accountEmail, ep.Name, endpointHost, attemptStartedAt, resp.StatusCode, "http_error", lastErr, requestDetailRetryReason(lastErr))
 				if payload != nil {
 					payload.attemptBudget.recordFailure(ep.Name, lastErr)
+				}
+				if upstreamErr, ok := asUpstreamError(lastErr); ok &&
+					upstreamErr.Kind == UpstreamErrorClientVersion && !versionRefreshAttempted {
+					versionRefreshAttempted = true
+					if refreshed, refreshErr := config.RefreshKiroVersionForRetry(); refreshErr != nil {
+						logger.Warnf("[KiroVersion] Failed to persist automatic version refresh: %v", refreshErr)
+					} else if refreshed {
+						// Do not cool the endpoint or move to another account for a
+						// client-version gate. Rebuild headers on this one bounded replay.
+						sharedUpstreamHealth.releaseEndpoint(endpointCircuitKey)
+						maxEndpointAttempts++
+						logger.Warnf("[KiroVersion] Upstream rejected the client version; retrying once with the known latest version %s", config.DefaultKiroVersion)
+						continue
+					}
 				}
 				// A Kiro API key can be valid in a different data-plane region. Retry
 				// the confirmed candidate before cooling this logical endpoint, or the

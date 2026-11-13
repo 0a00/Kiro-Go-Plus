@@ -172,6 +172,67 @@ func TestCallKiroAPIRejectsHTTP200EmptyResponse(t *testing.T) {
 	}
 }
 
+func TestCallKiroAPIRetriesClientVersionGateOnceInAutomaticMode(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	retry := config.GetRetryConfig()
+	retry.MaxUpstreamAttempts = 3
+	preOutputRetries := 0
+	retry.PreOutputStreamRetries = &preOutputRetries
+	if err := config.UpdateRetryConfig(retry); err != nil {
+		t.Fatalf("update retry config: %v", err)
+	}
+	if err := config.UpdateRuntimeConfig(config.RuntimeConfig{KiroVersionMode: config.KiroVersionModeAuto}); err != nil {
+		t.Fatalf("set automatic Kiro version mode: %v", err)
+	}
+	if err := config.UpdatePreferredEndpoint("kiro"); err != nil {
+		t.Fatalf("set endpoint: %v", err)
+	}
+	if err := config.UpdateEndpointFallback(false); err != nil {
+		t.Fatalf("disable endpoint fallback: %v", err)
+	}
+
+	var requests atomic.Int32
+	var userAgents []string
+	var headerMu sync.Mutex
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempt := requests.Add(1)
+		headerMu.Lock()
+		userAgents = append(userAgents, r.Header.Get("User-Agent"))
+		headerMu.Unlock()
+		if attempt == 1 {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"message":"This version of Kiro is no longer supported. Please update to the latest version of Kiro to continue."}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "recovered"}))
+		_, _ = w.Write(awsEventStreamFrame(t, "metadataEvent", map[string]interface{}{"stopReason": "end_turn"}))
+	}))
+	defer server.Close()
+
+	oldEndpoints := kiroEndpoints
+	kiroEndpoints = []kiroEndpoint{{Key: "kiro", URL: server.URL, Name: "Kiro IDE"}}
+	t.Cleanup(func() { kiroEndpoints = oldEndpoints })
+
+	var output strings.Builder
+	err := CallKiroAPI(&config.Account{ID: "version-refresh-account", AccessToken: "token"}, &KiroPayload{}, &KiroStreamCallback{
+		OnText: func(text string, _ bool) { output.WriteString(text) },
+	})
+	if err != nil {
+		t.Fatalf("automatic version retry failed: %v", err)
+	}
+	if requests.Load() != 2 || output.String() != "recovered" {
+		t.Fatalf("unexpected version retry result: requests=%d output=%q", requests.Load(), output.String())
+	}
+	headerMu.Lock()
+	defer headerMu.Unlock()
+	if len(userAgents) != 2 || !strings.Contains(userAgents[1], "KiroIDE-"+config.DefaultKiroVersion) {
+		t.Fatalf("second request did not use known latest version: %v", userAgents)
+	}
+}
+
 func TestCallKiroAPIAcceptsCompletedTextBeforeTelemetryForInferredToolTurn(t *testing.T) {
 	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatalf("init config: %v", err)

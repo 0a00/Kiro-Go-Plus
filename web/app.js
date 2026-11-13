@@ -2013,12 +2013,19 @@
     $('runtimeHost').value = d.host || '0.0.0.0';
     $('runtimePort').value = d.port || 8080;
     $('runtimeLogLevel').value = d.logLevel || d.activeLogLevel || 'info';
+    $('runtimeKiroVersionMode').value = d.kiroVersionMode || 'auto';
     $('runtimeKiroVersion').value = d.kiroVersion || '';
     $('runtimeSystemVersion').value = d.systemVersion || '';
     $('runtimeNodeVersion').value = d.nodeVersion || '';
     $('runtimeActiveAddress').textContent = d.externallyManaged
       ? t('settings.managedListenAddress', d.activeHost || d.host, d.activePort || d.port)
       : t('settings.activeListenAddress', d.activeHost || d.host, d.activePort || d.port);
+    syncRuntimeKiroVersionMode();
+  }
+  function syncRuntimeKiroVersionMode() {
+    const auto = $('runtimeKiroVersionMode').value === 'auto';
+    $('runtimeKiroVersion').disabled = auto;
+    $('runtimeKiroVersion').title = auto ? t('settings.kiroVersionAutoHint') : '';
   }
   async function saveRuntimeConfig() {
     const host = $('runtimeHost').value.trim();
@@ -2032,6 +2039,7 @@
         host,
         port: Math.round(port),
         logLevel,
+        kiroVersionMode: $('runtimeKiroVersionMode').value,
         kiroVersion: $('runtimeKiroVersion').value.trim(),
         systemVersion: $('runtimeSystemVersion').value.trim(),
         nodeVersion: $('runtimeNodeVersion').value.trim()
@@ -5255,6 +5263,7 @@
   function bindSettingsEvents() {
     $('saveRequireApiKeyBtn').addEventListener('click', saveRequireApiKey);
     $('saveRuntimeBtn').addEventListener('click', saveRuntimeConfig);
+    $('runtimeKiroVersionMode').addEventListener('change', syncRuntimeKiroVersionMode);
     $('saveRoutingBtn').addEventListener('click', saveRoutingConfig);
     $('saveAutoRefreshBtn').addEventListener('click', saveAutoRefreshConfig);
     $('runDueAutoRefreshBtn').addEventListener('click', () => runAutoRefresh('due'));

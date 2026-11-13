@@ -229,12 +229,13 @@ const (
 
 // RuntimeConfig contains process-level and client header settings surfaced in Admin.
 type RuntimeConfig struct {
-	Host          string `json:"host"`
-	Port          int    `json:"port"`
-	LogLevel      string `json:"logLevel"`
-	KiroVersion   string `json:"kiroVersion"`
-	SystemVersion string `json:"systemVersion"`
-	NodeVersion   string `json:"nodeVersion"`
+	Host            string `json:"host"`
+	Port            int    `json:"port"`
+	LogLevel        string `json:"logLevel"`
+	KiroVersionMode string `json:"kiroVersionMode"`
+	KiroVersion     string `json:"kiroVersion"`
+	SystemVersion   string `json:"systemVersion"`
+	NodeVersion     string `json:"nodeVersion"`
 }
 
 // RoutingConfig controls how accounts are selected from the pool.
@@ -472,16 +473,17 @@ type CountTokensProviderConfig struct {
 // Config represents the global application configuration.
 type Config struct {
 	// Server settings
-	Password      string        `json:"password"`          // Admin panel password
-	Port          int           `json:"port"`              // HTTP server port (default: 8080)
-	Host          string        `json:"host"`              // HTTP server bind address (default: 0.0.0.0)
-	ApiKey        string        `json:"apiKey,omitempty"`  // [Deprecated] Legacy single API key, migrated into ApiKeys on first load
-	RequireApiKey bool          `json:"requireApiKey"`     // [Deprecated] Whether to enforce API key validation; with multi-key support, len(ApiKeys)>0 implicitly enforces auth
-	ApiKeys       []ApiKeyEntry `json:"apiKeys,omitempty"` // Multiple API keys, each with independent quota
-	KiroVersion   string        `json:"kiroVersion,omitempty"`
-	SystemVersion string        `json:"systemVersion,omitempty"`
-	NodeVersion   string        `json:"nodeVersion,omitempty"`
-	Accounts      []Account     `json:"accounts"` // Registered Kiro accounts
+	Password        string        `json:"password"`                  // Admin panel password
+	Port            int           `json:"port"`                      // HTTP server port (default: 8080)
+	Host            string        `json:"host"`                      // HTTP server bind address (default: 0.0.0.0)
+	ApiKey          string        `json:"apiKey,omitempty"`          // [Deprecated] Legacy single API key, migrated into ApiKeys on first load
+	RequireApiKey   bool          `json:"requireApiKey"`             // [Deprecated] Whether to enforce API key validation; with multi-key support, len(ApiKeys)>0 implicitly enforces auth
+	ApiKeys         []ApiKeyEntry `json:"apiKeys,omitempty"`         // Multiple API keys, each with independent quota
+	KiroVersionMode string        `json:"kiroVersionMode,omitempty"` // "auto" follows the known latest client version; "manual" uses KiroVersion
+	KiroVersion     string        `json:"kiroVersion,omitempty"`
+	SystemVersion   string        `json:"systemVersion,omitempty"`
+	NodeVersion     string        `json:"nodeVersion,omitempty"`
+	Accounts        []Account     `json:"accounts"` // Registered Kiro accounts
 
 	// Thinking mode configuration for extended reasoning output
 	ThinkingSuffix              string `json:"thinkingSuffix,omitempty"`              // Model suffix to trigger thinking mode (default: "-thinking")
@@ -650,14 +652,16 @@ const (
 )
 
 // Version current version
-const Version = "1.3.1"
+const Version = "1.3.2"
 
 // Kiro client versions are sent in the outbound KiroIDE user-agent. Keep the
 // default above the service's published minimum; operators can still override
 // it from the admin runtime settings when Kiro publishes a newer gate.
 const (
-	DefaultKiroVersion          = "1.4.154"
+	DefaultKiroVersion          = "1.4.178"
 	MinimumSupportedKiroVersion = "0.11.133"
+	KiroVersionModeAuto         = "auto"
+	KiroVersionModeManual       = "manual"
 )
 
 // BuildCommit is injected by Docker/CI builds so operators can verify the
@@ -731,6 +735,8 @@ func loadLocked() error {
 				WebSearch:                 defaultWebSearchConfig(),
 				CountTokensProvider:       defaultCountTokensProviderConfig(),
 				ToolStreamMode:            ToolStreamModeSafe,
+				KiroVersionMode:           KiroVersionModeAuto,
+				KiroVersion:               DefaultKiroVersion,
 			}
 			return saveLocked()
 		}
@@ -749,10 +755,25 @@ func loadLocked() error {
 	promptCacheModeMigrated := false
 	upstreamProtectionMigrated := false
 	kiroVersionMigrated := false
+	kiroVersionModeMigrated := false
+	machineIDMigrated := false
 	if strings.TrimSpace(c.Password) == "" {
 		c.Password = "changeme"
 	}
-	if isKiroVersionBelowMinimum(c.KiroVersion) {
+	versionMode := normalizeKiroVersionMode(c.KiroVersionMode)
+	if versionMode == "" {
+		versionMode = KiroVersionModeAuto
+		kiroVersionModeMigrated = true
+	} else if versionMode != c.KiroVersionMode {
+		kiroVersionModeMigrated = true
+	}
+	c.KiroVersionMode = versionMode
+	if versionMode == KiroVersionModeAuto {
+		if c.KiroVersion != DefaultKiroVersion {
+			c.KiroVersion = DefaultKiroVersion
+			kiroVersionMigrated = true
+		}
+	} else if isKiroVersionBelowMinimum(c.KiroVersion) {
 		c.KiroVersion = DefaultKiroVersion
 		kiroVersionMigrated = true
 	}
@@ -960,9 +981,13 @@ func loadLocked() error {
 	fingerprintMigrated := false
 	for i := range cfg.Accounts {
 		hadFingerprint := cfg.Accounts[i].CredentialFingerprint != ""
+		hadMachineID := strings.TrimSpace(cfg.Accounts[i].MachineId) != ""
 		normalizeKiroAPIKeyAccount(&cfg.Accounts[i])
 		if !hadFingerprint && cfg.Accounts[i].CredentialFingerprint != "" {
 			fingerprintMigrated = true
+		}
+		if !hadMachineID && strings.TrimSpace(cfg.Accounts[i].MachineId) != "" {
+			machineIDMigrated = true
 		}
 		if cfg.Accounts[i].LegacyAllowOverage {
 			if cfg.Accounts[i].OverageStatus == "" {
@@ -972,7 +997,7 @@ func loadLocked() error {
 			overageMigrated = true
 		}
 	}
-	if upstreamProtectionMigrated || overageMigrated || fingerprintMigrated || passwordMigrated || secretsMigrated || promptCacheModeMigrated || kiroVersionMigrated {
+	if upstreamProtectionMigrated || overageMigrated || fingerprintMigrated || machineIDMigrated || passwordMigrated || secretsMigrated || promptCacheModeMigrated || kiroVersionMigrated || kiroVersionModeMigrated {
 		if err := saveLocked(); err != nil {
 			return err
 		}
@@ -1021,6 +1046,9 @@ func normalizeKiroAPIKeyAccount(account *Account) {
 	}
 	if account.MaxConcurrency > 1000 {
 		account.MaxConcurrency = 1000
+	}
+	if strings.TrimSpace(account.MachineId) == "" {
+		account.MachineId = GenerateMachineId()
 	}
 	account.EndpointPreference = normalizeAccountEndpointPreference(account.EndpointPreference)
 	if strings.EqualFold(account.AuthMethod, "api_key") || strings.EqualFold(account.AuthMethod, "apikey") || account.KiroApiKey != "" {
@@ -4176,12 +4204,13 @@ func GetRuntimeConfig() RuntimeConfig {
 		}
 	}
 	return RuntimeConfig{
-		Host:          host,
-		Port:          port,
-		LogLevel:      logLevel,
-		KiroVersion:   clientCfg.KiroVersion,
-		SystemVersion: clientCfg.SystemVersion,
-		NodeVersion:   clientCfg.NodeVersion,
+		Host:            host,
+		Port:            port,
+		LogLevel:        logLevel,
+		KiroVersionMode: clientCfg.KiroVersionMode,
+		KiroVersion:     clientCfg.KiroVersion,
+		SystemVersion:   clientCfg.SystemVersion,
+		NodeVersion:     clientCfg.NodeVersion,
 	}
 }
 
@@ -4221,16 +4250,27 @@ func UpdateRuntimeConfig(runtime RuntimeConfig) error {
 	if runtime.LogLevel != "" {
 		cfg.LogLevel = runtime.LogLevel
 	}
-	cfg.KiroVersion = normalizeKiroVersion(runtime.KiroVersion)
+	if mode := normalizeKiroVersionMode(runtime.KiroVersionMode); mode != "" {
+		cfg.KiroVersionMode = mode
+	}
+	if cfg.KiroVersionMode == "" {
+		cfg.KiroVersionMode = KiroVersionModeAuto
+	}
+	if cfg.KiroVersionMode == KiroVersionModeAuto {
+		cfg.KiroVersion = DefaultKiroVersion
+	} else {
+		cfg.KiroVersion = normalizeKiroVersion(runtime.KiroVersion)
+	}
 	cfg.SystemVersion = runtime.SystemVersion
 	cfg.NodeVersion = runtime.NodeVersion
 	return Save()
 }
 
 type KiroClientConfig struct {
-	KiroVersion   string
-	SystemVersion string
-	NodeVersion   string
+	KiroVersionMode string
+	KiroVersion     string
+	SystemVersion   string
+	NodeVersion     string
 }
 
 func GetKiroClientConfig() KiroClientConfig {
@@ -4241,7 +4281,14 @@ func GetKiroClientConfig() KiroClientConfig {
 
 func getKiroClientConfigLocked() KiroClientConfig {
 	kiroVersion := DefaultKiroVersion
-	if cfg != nil && cfg.KiroVersion != "" {
+	versionMode := KiroVersionModeAuto
+	if cfg != nil {
+		versionMode = normalizeKiroVersionMode(cfg.KiroVersionMode)
+		if versionMode == "" {
+			versionMode = KiroVersionModeAuto
+		}
+	}
+	if versionMode == KiroVersionModeManual && cfg != nil && cfg.KiroVersion != "" {
 		kiroVersion = cfg.KiroVersion
 	}
 
@@ -4259,10 +4306,41 @@ func getKiroClientConfigLocked() KiroClientConfig {
 	}
 
 	return KiroClientConfig{
-		KiroVersion:   kiroVersion,
-		SystemVersion: systemVersion,
-		NodeVersion:   nodeVersion,
+		KiroVersionMode: versionMode,
+		KiroVersion:     kiroVersion,
+		SystemVersion:   systemVersion,
+		NodeVersion:     nodeVersion,
 	}
+}
+
+func normalizeKiroVersionMode(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case KiroVersionModeAuto:
+		return KiroVersionModeAuto
+	case KiroVersionModeManual:
+		return KiroVersionModeManual
+	default:
+		return ""
+	}
+}
+
+// RefreshKiroVersionForRetry restores the known latest client version for one
+// bounded retry after an upstream version gate. It deliberately does not
+// rotate account MachineId values or credentials.
+func RefreshKiroVersionForRetry() (bool, error) {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	if cfg == nil || normalizeKiroVersionMode(cfg.KiroVersionMode) != KiroVersionModeAuto {
+		return false, nil
+	}
+	changed := cfg.KiroVersion != DefaultKiroVersion
+	cfg.KiroVersion = DefaultKiroVersion
+	if changed {
+		if err := Save(); err != nil {
+			return false, err
+		}
+	}
+	return true, nil
 }
 
 func normalizeKiroVersion(value string) string {

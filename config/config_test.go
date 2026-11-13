@@ -630,12 +630,13 @@ func TestRuntimeConfigUpdate(t *testing.T) {
 	}
 
 	if err := UpdateRuntimeConfig(RuntimeConfig{
-		Host:          "127.0.0.1",
-		Port:          9090,
-		LogLevel:      "debug",
-		KiroVersion:   "0.12.0",
-		SystemVersion: "linux#6.1",
-		NodeVersion:   "22.23.0",
+		Host:            "127.0.0.1",
+		Port:            9090,
+		LogLevel:        "debug",
+		KiroVersionMode: KiroVersionModeManual,
+		KiroVersion:     "0.12.0",
+		SystemVersion:   "linux#6.1",
+		NodeVersion:     "22.23.0",
 	}); err != nil {
 		t.Fatalf("update runtime config: %v", err)
 	}
@@ -644,7 +645,7 @@ func TestRuntimeConfigUpdate(t *testing.T) {
 	if got.Host != "127.0.0.1" || got.Port != 9090 || got.LogLevel != "debug" {
 		t.Fatalf("unexpected runtime config: %+v", got)
 	}
-	if got.KiroVersion != "0.12.0" || got.SystemVersion != "linux#6.1" || got.NodeVersion != "22.23.0" {
+	if got.KiroVersionMode != KiroVersionModeManual || got.KiroVersion != "0.12.0" || got.SystemVersion != "linux#6.1" || got.NodeVersion != "22.23.0" {
 		t.Fatalf("unexpected client versions: %+v", got)
 	}
 }
@@ -661,17 +662,55 @@ func TestStaleKiroVersionMigratesAndRuntimeUpdatesNormalize(t *testing.T) {
 		t.Fatalf("stale persisted Kiro version = %q, want %q", got, DefaultKiroVersion)
 	}
 
-	if err := UpdateRuntimeConfig(RuntimeConfig{KiroVersion: "0.11.107"}); err != nil {
+	if err := UpdateRuntimeConfig(RuntimeConfig{KiroVersionMode: KiroVersionModeAuto, KiroVersion: "0.11.107"}); err != nil {
 		t.Fatalf("update stale runtime config: %v", err)
 	}
 	if got := GetKiroClientConfig().KiroVersion; got != DefaultKiroVersion {
 		t.Fatalf("stale runtime Kiro version = %q, want %q", got, DefaultKiroVersion)
 	}
-	if err := UpdateRuntimeConfig(RuntimeConfig{KiroVersion: MinimumSupportedKiroVersion}); err != nil {
+	if err := UpdateRuntimeConfig(RuntimeConfig{KiroVersionMode: KiroVersionModeManual, KiroVersion: MinimumSupportedKiroVersion}); err != nil {
 		t.Fatalf("update minimum runtime config: %v", err)
 	}
 	if got := GetKiroClientConfig().KiroVersion; got != MinimumSupportedKiroVersion {
 		t.Fatalf("minimum supported Kiro version = %q, want %q", got, MinimumSupportedKiroVersion)
+	}
+}
+
+func TestAutomaticKiroVersionMigrationKeepsMachineIDStable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"password":"changeme","kiroVersion":"1.4.154","accounts":[{"id":"account-1","accessToken":"token","enabled":true}]}`), 0o600); err != nil {
+		t.Fatalf("write legacy config: %v", err)
+	}
+	if err := Init(path); err != nil {
+		t.Fatalf("init legacy config: %v", err)
+	}
+	first := GetAccounts()
+	if len(first) != 1 || first[0].MachineId == "" {
+		t.Fatalf("expected one account with generated machine ID, got %+v", first)
+	}
+	if runtime := GetRuntimeConfig(); runtime.KiroVersionMode != KiroVersionModeAuto || runtime.KiroVersion != DefaultKiroVersion {
+		t.Fatalf("expected automatic latest version, got %+v", runtime)
+	}
+	machineID := first[0].MachineId
+	if err := Init(path); err != nil {
+		t.Fatalf("reload migrated config: %v", err)
+	}
+	second := GetAccounts()
+	if len(second) != 1 || second[0].MachineId != machineID {
+		t.Fatalf("machine ID changed across reload: before=%q after=%q", machineID, second[0].MachineId)
+	}
+
+	if err := UpdateRuntimeConfig(RuntimeConfig{KiroVersionMode: KiroVersionModeManual, KiroVersion: "1.4.154"}); err != nil {
+		t.Fatalf("set manual version: %v", err)
+	}
+	if got := GetKiroClientConfig().KiroVersion; got != "1.4.154" {
+		t.Fatalf("manual Kiro version = %q, want 1.4.154", got)
+	}
+	if err := UpdateRuntimeConfig(RuntimeConfig{KiroVersionMode: KiroVersionModeAuto, KiroVersion: "1.4.154"}); err != nil {
+		t.Fatalf("restore automatic version: %v", err)
+	}
+	if got := GetKiroClientConfig().KiroVersion; got != DefaultKiroVersion {
+		t.Fatalf("automatic Kiro version = %q, want %q", got, DefaultKiroVersion)
 	}
 }
 

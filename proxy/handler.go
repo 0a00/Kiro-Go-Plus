@@ -6679,6 +6679,7 @@ func (h *Handler) apiGetRuntimeConfig(w http.ResponseWriter, r *http.Request) {
 		"activePort":        activePort,
 		"externallyManaged": externallyManaged,
 		"kiroVersion":       runtimeCfg.KiroVersion,
+		"kiroVersionMode":   runtimeCfg.KiroVersionMode,
 		"systemVersion":     runtimeCfg.SystemVersion,
 		"nodeVersion":       runtimeCfg.NodeVersion,
 		"restartRequired":   runtimeCfg.Host != activeHost || runtimeCfg.Port != activePort,
@@ -6694,6 +6695,7 @@ func (h *Handler) apiUpdateRuntimeConfig(w http.ResponseWriter, r *http.Request)
 	}
 	req.Host = strings.TrimSpace(req.Host)
 	req.LogLevel = strings.TrimSpace(strings.ToLower(req.LogLevel))
+	req.KiroVersionMode = strings.TrimSpace(strings.ToLower(req.KiroVersionMode))
 	req.KiroVersion = strings.TrimSpace(req.KiroVersion)
 	req.SystemVersion = strings.TrimSpace(req.SystemVersion)
 	req.NodeVersion = strings.TrimSpace(req.NodeVersion)
@@ -6710,6 +6712,11 @@ func (h *Handler) apiUpdateRuntimeConfig(w http.ResponseWriter, r *http.Request)
 	if _, ok := logger.ParseLevel(req.LogLevel); !ok {
 		w.WriteHeader(400)
 		json.NewEncoder(w).Encode(map[string]string{"error": "logLevel must be debug, info, warn, or error"})
+		return
+	}
+	if req.KiroVersionMode != "" && req.KiroVersionMode != config.KiroVersionModeAuto && req.KiroVersionMode != config.KiroVersionModeManual {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "kiroVersionMode must be auto or manual"})
 		return
 	}
 

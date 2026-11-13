@@ -954,6 +954,7 @@ func TestApiRuntimeConfigUpdatesConfigAndLogger(t *testing.T) {
 		"host": "127.0.0.1",
 		"port": 9090,
 		"logLevel": "debug",
+		"kiroVersionMode": "manual",
 		"kiroVersion": "0.12.0",
 		"systemVersion": "linux#6.1",
 		"nodeVersion": "22.23.0"

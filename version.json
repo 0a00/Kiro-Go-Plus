@@ -1,5 +1,5 @@
 {
-  "version": "1.3.1",
-  "changelog": "Require profileArn for the CodeWhisperer endpoint and route profile-less accounts to compatible endpoints.\n修复 CodeWhisperer 端点必须携带 profileArn 的兼容性问题，无 profile 账号自动切换到兼容端点。",
+  "version": "1.3.2",
+  "changelog": "Automatically follow the known latest Kiro client version, migrate old runtime settings, and retry a version gate once without rotating account device IDs.\n自动跟随已知最新 Kiro 客户端版本，迁移旧运行时设置，并在版本门禁时单次重试且不轮换账号设备指纹。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }
