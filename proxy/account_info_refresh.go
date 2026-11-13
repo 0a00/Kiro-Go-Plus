@@ -42,7 +42,8 @@ func isUsageLimitsUnavailable(account *config.Account, err error) bool {
 		return false
 	}
 	upstreamErr, ok := asUpstreamError(err)
-	if !ok || upstreamErr.Kind != UpstreamErrorForbidden ||
+	if !ok ||
+		(upstreamErr.Kind != UpstreamErrorForbidden && upstreamErr.Kind != UpstreamErrorClientRequest) ||
 		!strings.EqualFold(strings.TrimSpace(upstreamErr.Endpoint), "GetUsageLimits") {
 		return false
 	}
@@ -67,10 +68,20 @@ func isUsageLimitsUnavailable(account *config.Account, err error) bool {
 	// explicit auth-marker exclusions above for revoked credentials.
 	isBuilderID := strings.Contains(provider, "builderid") || strings.Contains(authMethod, "builderid")
 	isIDC := authMethod == "idc" || authMethod == "awssso" || strings.Contains(authMethod, "identitycenter")
-	return (isBuilderID || isIDC) &&
-		(strings.Contains(message, "not authorized") ||
-			(strings.Contains(message, "access denied") && strings.Contains(message, "usage")) ||
-			strings.Contains(message, "builder id is not supported for this operation"))
+	if !(isBuilderID || isIDC) {
+		return false
+	}
+	// Builder ID and Enterprise/IDC usage calls do not carry a profileArn.
+	// Some Kiro control-plane responses nevertheless report the missing or
+	// server-side profile as a 400. Treat that response like the known optional
+	// usage-permission limitation instead of cooling a still-routable account.
+	invalidProfileArn := strings.Contains(message, "invalid profilearn") ||
+		strings.Contains(message, "invalid profile arn") ||
+		(strings.Contains(message, "profilearn") && strings.Contains(message, "invalid"))
+	return invalidProfileArn ||
+		strings.Contains(message, "not authorized") ||
+		(strings.Contains(message, "access denied") && strings.Contains(message, "usage")) ||
+		strings.Contains(message, "builder id is not supported for this operation")
 }
 
 func compactIdentityValue(value string) string {

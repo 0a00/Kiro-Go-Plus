@@ -26,6 +26,26 @@ func TestUsageMetadataPermissionFailureMatchesProductionBuilderIDError(t *testin
 	}
 }
 
+func TestUsageMetadataInvalidProfileArnIsSoftForIDC(t *testing.T) {
+	err := classifyUpstreamHTTPError(http.StatusBadRequest, "GetUsageLimits", []byte(`{"message":"Invalid profileArn."}`))
+	for _, account := range []config.Account{
+		{AuthMethod: "idc", Provider: "BuilderId"},
+		{AuthMethod: "idc", Provider: "Enterprise"},
+		{AuthMethod: "builder_id"},
+	} {
+		if !isUsageLimitsUnavailable(&account, err) {
+			t.Fatalf("expected invalid profileArn to be metadata-only for %+v: %v", account, err)
+		}
+	}
+}
+
+func TestUsageMetadataInvalidProfileArnIsNotSoftForSocial(t *testing.T) {
+	err := classifyUpstreamHTTPError(http.StatusBadRequest, "GetUsageLimits", []byte(`{"message":"Invalid profileArn."}`))
+	if isUsageLimitsUnavailable(&config.Account{AuthMethod: "social", Provider: "Google"}, err) {
+		t.Fatal("social profileArn errors must not be treated as IDC metadata-only failures")
+	}
+}
+
 func TestBuilderIDUsage403BecomesPartialRefresh(t *testing.T) {
 	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatalf("config.Init: %v", err)
@@ -61,6 +81,36 @@ func TestBuilderIDUsage403BecomesPartialRefresh(t *testing.T) {
 	}
 	if got := calls.Load(); got != 1 {
 		t.Fatalf("expected one usage request without region probing, got %d", got)
+	}
+}
+
+func TestBuilderIDInvalidProfileArnBecomesPartialRefresh(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	kiroRestHttpStore.Store(&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusBadRequest,
+			Body:       io.NopCloser(strings.NewReader(`{"message":"Invalid profileArn."}`)),
+			Header:     make(http.Header),
+		}, nil
+	})})
+	t.Cleanup(func() { InitKiroHttpClient("") })
+
+	account := &config.Account{
+		ID: "builder-invalid-profile", Enabled: true, AccessToken: "access-token",
+		AuthMethod: "idc", Provider: "BuilderId", Region: "us-east-1",
+	}
+	h := &Handler{backgroundCtx: context.Background(), autoRefreshFail: make(map[string]int64)}
+	result := h.refreshOneAccount(account, config.AutoRefreshConfig{
+		IntervalMinutes: 10, TokenRefreshBeforeSeconds: 1800,
+		RefreshTaskTimeoutSeconds: 30,
+	})
+	if result.Status != "partial" || result.Info == nil || !result.Info.MetadataUnavailable {
+		t.Fatalf("invalid profileArn should be partial metadata failure, got %+v", result)
+	}
+	if result.CooldownUntil != 0 {
+		t.Fatalf("invalid profileArn must not create cooldown: %+v", result)
 	}
 }
 

@@ -1,5 +1,5 @@
 {
-  "version": "1.3.2",
-  "changelog": "Automatically follow the known latest Kiro client version, migrate old runtime settings, and retry a version gate once without rotating account device IDs.\n自动跟随已知最新 Kiro 客户端版本，迁移旧运行时设置，并在版本门禁时单次重试且不轮换账号设备指纹。",
+  "version": "1.3.3",
+  "changelog": "Treat Builder ID/IDC Invalid profileArn usage metadata responses as partial refreshes without cooling routable accounts.\n修复 Builder ID/IDC 用量接口返回 Invalid profileArn 时误将可用账号冷却的问题，改为部分刷新。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }
