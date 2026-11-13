@@ -132,6 +132,65 @@ func TestClaudeToKiroKeepsActiveToolTurnStructured(t *testing.T) {
 	}
 }
 
+func TestClaudeToKiroMovesCompactionInstructionAfterToolResult(t *testing.T) {
+	req := &ClaudeRequest{
+		Model: "claude-sonnet-4.6",
+		Tools: []ClaudeTool{{Name: "Read", Description: "read a file", InputSchema: map[string]interface{}{
+			"type": "object", "properties": map[string]interface{}{},
+		}}},
+		Messages: []ClaudeMessage{
+			{Role: "user", Content: "inspect the file"},
+			{Role: "assistant", Content: []interface{}{
+				map[string]interface{}{"type": "tool_use", "id": "tool-compact", "name": "Read", "input": map[string]interface{}{"path": "README.md"}},
+			}},
+			{Role: "user", Content: []interface{}{
+				map[string]interface{}{"type": "tool_result", "tool_use_id": "tool-compact", "content": "file contents"},
+				map[string]interface{}{"type": "text", "text": "Summarize the conversation and reply with exactly SUMMARY."},
+			}},
+		},
+	}
+
+	payload := ClaudeToKiro(req, false)
+	current := payload.ConversationState.CurrentMessage.UserInputMessage
+	if current.Content != "" {
+		t.Fatalf("active structured tool continuation must have empty current content, got %q", current.Content)
+	}
+	if current.UserInputMessageContext == nil || len(current.UserInputMessageContext.ToolResults) != 1 {
+		t.Fatalf("expected one active structured tool result, got %#v", current.UserInputMessageContext)
+	}
+	result := current.UserInputMessageContext.ToolResults[0]
+	if result.ToolUseID != "tool-compact" {
+		t.Fatalf("tool result id changed: %q", result.ToolUseID)
+	}
+	if len(result.Content) == 0 || !strings.Contains(result.Content[0].Text, "file contents") ||
+		!strings.Contains(result.Content[0].Text, "Summarize the conversation") {
+		t.Fatalf("tool result lost the compaction instruction: %+v", result.Content)
+	}
+}
+
+func TestClaudeContentExtractionAcceptsMapSlices(t *testing.T) {
+	user := []map[string]interface{}{
+		{"type": "tool_result", "tool_use_id": "tool-map", "content": "ok"},
+		{"type": "text", "text": "continue"},
+	}
+	text, _, results := extractClaudeUserContent(user)
+	if text != "continue" || len(results) != 1 || results[0].ToolUseID != "tool-map" {
+		t.Fatalf("map-slice user content was not preserved: text=%q results=%+v", text, results)
+	}
+	if got := extractTrailingTextAfterToolResults(user); got != "continue" {
+		t.Fatalf("unexpected trailing text: %q", got)
+	}
+
+	assistant := []map[string]interface{}{
+		{"type": "text", "text": "calling"},
+		{"type": "tool_use", "id": "tool-map", "name": "Read", "input": map[string]interface{}{}},
+	}
+	assistantText, uses := extractClaudeAssistantContent(assistant)
+	if assistantText != "calling" || len(uses) != 1 || uses[0].ToolUseID != "tool-map" {
+		t.Fatalf("map-slice assistant content was not preserved: text=%q uses=%+v", assistantText, uses)
+	}
+}
+
 func TestClaudeToKiroTransparentPreservesCompletedToolHistory(t *testing.T) {
 	req := &ClaudeRequest{
 		Model:    "claude-sonnet-4.6",

@@ -799,6 +799,9 @@ func TestClaudeToolResultMixedTextAndImage(t *testing.T) {
 	if !strings.Contains(cur.Content, "here is the screenshot") {
 		t.Fatalf("expected orphan tool-result text in current content, got %q", cur.Content)
 	}
+	if !strings.Contains(cur.Content, toolResultImagePlaceholder) {
+		t.Fatalf("expected mixed tool-result text to identify the attached image, got %q", cur.Content)
+	}
 	if cur.UserInputMessageContext != nil && len(cur.UserInputMessageContext.ToolResults) != 0 {
 		t.Fatalf("expected orphan tool result to be flattened")
 	}

@@ -317,6 +317,7 @@ func claudeToKiro(req *ClaudeRequest, thinking bool, options claudeTranslationOp
 	var currentContent string
 	var currentImages []KiroImage
 	var currentToolResults []KiroToolResult
+	var currentTrailingToolResultText string
 
 	for i, msg := range req.Messages {
 		isLast := i == len(req.Messages)-1
@@ -329,6 +330,7 @@ func claudeToKiro(req *ClaudeRequest, thinking bool, options claudeTranslationOp
 				currentContent = content
 				currentImages = images
 				currentToolResults = toolResults
+				currentTrailingToolResultText = extractTrailingTextAfterToolResults(msg.Content)
 			} else {
 				userMsg := KiroUserInputMessage{
 					Content: content,
@@ -409,10 +411,21 @@ func claudeToKiro(req *ClaudeRequest, thinking bool, options claudeTranslationOp
 		}
 		mapStructuredHistoryToolNames(history, toolNames)
 	}
+	if keepCurrentToolResults {
+		// Kiro requires the current message body to be empty when structured
+		// tool results answer the immediately preceding assistant tool turn.
+		// Claude Code places /compact instructions after tool_result blocks in
+		// the same user message; move that instruction into the final result
+		// before clearing the body so it is not silently lost.
+		appendToolResultText(currentToolResults, currentTrailingToolResultText)
+		currentContent = ""
+	}
 
 	// 构建最终内容
 	finalContent := ""
-	if currentContent != "" {
+	if keepCurrentToolResults {
+		finalContent = ""
+	} else if currentContent != "" {
 		finalContent = currentContent
 	} else if len(currentImages) > 0 {
 		finalContent = normalizeUserContent("", true)
@@ -427,7 +440,7 @@ func claudeToKiro(req *ClaudeRequest, thinking bool, options claudeTranslationOp
 			finalContent = strings.TrimSpace(finalContent + "\n\n" + continuation)
 		}
 	}
-	if !options.transparent {
+	if !options.transparent && !keepCurrentToolResults {
 		finalContent = appendClaudeRequiredToolAction(finalContent, req)
 	}
 
@@ -938,6 +951,72 @@ func extractSystemPrompt(system interface{}) string {
 	return ""
 }
 
+// contentBlocksAsMaps normalizes Claude content arrays created by JSON
+// decoding and by in-process agent loops. Both []interface{} and
+// []map[string]interface{} are valid internal shapes and must preserve tool
+// blocks instead of silently dropping them.
+func contentBlocksAsMaps(content interface{}) []map[string]interface{} {
+	switch blocks := content.(type) {
+	case []interface{}:
+		out := make([]map[string]interface{}, 0, len(blocks))
+		for _, item := range blocks {
+			if block, ok := item.(map[string]interface{}); ok {
+				out = append(out, block)
+			}
+		}
+		return out
+	case []map[string]interface{}:
+		return blocks
+	default:
+		return nil
+	}
+}
+
+// extractTrailingTextAfterToolResults returns text blocks after the last
+// tool_result in a Claude user message. Claude Code puts /compact and
+// automatic-compaction instructions in this position. Kiro requires a
+// structured tool-result continuation to carry an empty current message, so
+// the instruction is moved into the final tool result before serialization.
+func extractTrailingTextAfterToolResults(content interface{}) string {
+	blocks := contentBlocksAsMaps(content)
+	lastToolResult := -1
+	for i, block := range blocks {
+		if block["type"] == "tool_result" {
+			lastToolResult = i
+		}
+	}
+	if lastToolResult < 0 {
+		return ""
+	}
+
+	parts := make([]string, 0)
+	for _, block := range blocks[lastToolResult+1:] {
+		blockType, _ := block["type"].(string)
+		if blockType != "text" && blockType != "input_text" {
+			continue
+		}
+		if text, ok := block["text"].(string); ok && strings.TrimSpace(text) != "" {
+			parts = append(parts, text)
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
+func appendToolResultText(toolResults []KiroToolResult, text string) {
+	if len(toolResults) == 0 || strings.TrimSpace(text) == "" {
+		return
+	}
+	last := &toolResults[len(toolResults)-1]
+	if len(last.Content) == 0 {
+		last.Content = []KiroResultContent{{}}
+	}
+	content := &last.Content[len(last.Content)-1].Text
+	if strings.TrimSpace(*content) != "" {
+		*content += "\n"
+	}
+	*content += strings.TrimSpace(text)
+}
+
 func extractClaudeUserContent(content interface{}) (string, []KiroImage, []KiroToolResult) {
 	var text string
 	var images []KiroImage
@@ -947,42 +1026,37 @@ func extractClaudeUserContent(content interface{}) (string, []KiroImage, []KiroT
 		return s, nil, nil
 	}
 
-	if blocks, ok := content.([]interface{}); ok {
-		for _, b := range blocks {
-			block, ok := b.(map[string]interface{})
-			if !ok {
-				continue
+	for _, block := range contentBlocksAsMaps(content) {
+		blockType, _ := block["type"].(string)
+		switch blockType {
+		case "text", "input_text":
+			if t, ok := block["text"].(string); ok {
+				text += t
 			}
-
-			blockType, _ := block["type"].(string)
-			switch blockType {
-			case "text", "input_text":
-				if t, ok := block["text"].(string); ok {
-					text += t
-				}
-			case "image", "image_url", "input_image":
-				if img := extractImageFromClaudeBlock(block); img != nil {
-					images = append(images, *img)
-				}
-			case "tool_result":
-				toolUseID, _ := block["tool_use_id"].(string)
-				resultContent, resultImages := extractToolResultContent(block["content"])
-				if len(resultImages) > 0 {
-					images = append(images, resultImages...)
-					if strings.TrimSpace(resultContent) == "" {
-						resultContent = toolResultImagePlaceholder
-					}
-				}
-				status := "success"
-				if failed, ok := block["is_error"].(bool); ok && failed {
-					status = "error"
-				}
-				toolResults = append(toolResults, KiroToolResult{
-					ToolUseID: toolUseID,
-					Content:   []KiroResultContent{{Text: resultContent}},
-					Status:    status,
-				})
+		case "image", "image_url", "input_image":
+			if img := extractImageFromClaudeBlock(block); img != nil {
+				images = append(images, *img)
 			}
+		case "tool_result":
+			toolUseID, _ := block["tool_use_id"].(string)
+			resultContent, resultImages := extractToolResultContent(block["content"])
+			if len(resultImages) > 0 {
+				images = append(images, resultImages...)
+				if strings.TrimSpace(resultContent) == "" {
+					resultContent = toolResultImagePlaceholder
+				} else if !strings.Contains(resultContent, toolResultImagePlaceholder) {
+					resultContent += "\n" + toolResultImagePlaceholder
+				}
+			}
+			status := "success"
+			if failed, ok := block["is_error"].(bool); ok && failed {
+				status = "error"
+			}
+			toolResults = append(toolResults, KiroToolResult{
+				ToolUseID: toolUseID,
+				Content:   []KiroResultContent{{Text: resultContent}},
+				Status:    status,
+			})
 		}
 	}
 
@@ -1031,14 +1105,10 @@ func extractToolResultContent(content interface{}) (string, []KiroImage) {
 	if s, ok := content.(string); ok {
 		return s, nil
 	}
-	if blocks, ok := content.([]interface{}); ok {
+	if blocks := contentBlocksAsMaps(content); blocks != nil {
 		var parts []string
 		var images []KiroImage
-		for _, b := range blocks {
-			block, ok := b.(map[string]interface{})
-			if !ok {
-				continue
-			}
+		for _, block := range blocks {
 			blockType, _ := block["type"].(string)
 			switch blockType {
 			case "image", "image_url", "input_image":
@@ -1068,32 +1138,25 @@ func extractClaudeAssistantContent(content interface{}) (string, []KiroToolUse) 
 		return s, nil
 	}
 
-	if blocks, ok := content.([]interface{}); ok {
-		for _, b := range blocks {
-			block, ok := b.(map[string]interface{})
-			if !ok {
-				continue
+	for _, block := range contentBlocksAsMaps(content) {
+		blockType, _ := block["type"].(string)
+		switch blockType {
+		case "text":
+			if t, ok := block["text"].(string); ok {
+				text += t
 			}
-
-			blockType, _ := block["type"].(string)
-			switch blockType {
-			case "text":
-				if t, ok := block["text"].(string); ok {
-					text += t
-				}
-			case "tool_use":
-				id, _ := block["id"].(string)
-				name, _ := block["name"].(string)
-				input, _ := block["input"].(map[string]interface{})
-				if input == nil {
-					input = make(map[string]interface{})
-				}
-				toolUses = append(toolUses, KiroToolUse{
-					ToolUseID: id,
-					Name:      name,
-					Input:     input,
-				})
+		case "tool_use":
+			id, _ := block["id"].(string)
+			name, _ := block["name"].(string)
+			input, _ := block["input"].(map[string]interface{})
+			if input == nil {
+				input = make(map[string]interface{})
 			}
+			toolUses = append(toolUses, KiroToolUse{
+				ToolUseID: id,
+				Name:      name,
+				Input:     input,
+			})
 		}
 	}
 
@@ -1838,6 +1901,8 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 				content = strings.TrimSpace(cleanText)
 				if content == "" {
 					content = toolResultImagePlaceholder
+				} else if !strings.Contains(content, toolResultImagePlaceholder) {
+					content += "\n" + toolResultImagePlaceholder
 				}
 			} else {
 				content = extractOpenAIMessageText(msg.Content)
@@ -1906,9 +1971,14 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 	}
 	mapStructuredHistoryToolNames(history, toolNames)
 
-	// 构建最终内容
-	finalContent := currentContent
-	if finalContent == "" {
+	// 构建最终内容. Kiro requires an empty current body when the structured
+	// results answer the immediately preceding assistant tool turn.
+	finalContent := ""
+	if keepCurrentToolResults {
+		finalContent = ""
+	} else if currentContent != "" {
+		finalContent = currentContent
+	} else {
 		if len(currentImages) > 0 {
 			finalContent = normalizeUserContent("", true)
 		} else if len(currentToolResults) > 0 {
@@ -1995,13 +2065,8 @@ func extractOpenAIUserContent(content interface{}) (string, []KiroImage) {
 		}
 	}
 
-	if parts, ok := content.([]interface{}); ok {
-		for _, p := range parts {
-			part, ok := p.(map[string]interface{})
-			if !ok {
-				continue
-			}
-
+	if parts := contentBlocksAsMaps(content); parts != nil {
+		for _, part := range parts {
 			if t, ok := extractOpenAITextPart(part); ok {
 				text += t
 			}
@@ -2042,6 +2107,20 @@ func extractOpenAIMessageText(content interface{}) string {
 			return string(raw)
 		}
 	case []interface{}:
+		parts := make([]string, 0, len(v))
+		for _, item := range v {
+			partText := extractOpenAIMessageText(item)
+			if strings.TrimSpace(partText) != "" {
+				parts = append(parts, partText)
+			}
+		}
+		if len(parts) > 0 {
+			return strings.Join(parts, "")
+		}
+		if raw, err := json.Marshal(v); err == nil {
+			return string(raw)
+		}
+	case []map[string]interface{}:
 		parts := make([]string, 0, len(v))
 		for _, item := range v {
 			partText := extractOpenAIMessageText(item)
@@ -2671,6 +2750,18 @@ func detachOrphanedToolResults(payload *KiroPayload) bool {
 	return true
 }
 
+func currentStructuredToolResultsAreActive(payload *KiroPayload) bool {
+	if payload == nil {
+		return false
+	}
+	context := payload.ConversationState.CurrentMessage.UserInputMessage.UserInputMessageContext
+	if context == nil || len(context.ToolResults) == 0 {
+		return false
+	}
+	_, ok := orderToolResultsForLastAssistant(payload.ConversationState.History, context.ToolResults)
+	return ok
+}
+
 func sameToolResultOrder(left, right []KiroToolResult) bool {
 	if len(left) != len(right) {
 		return false
@@ -2941,14 +3032,15 @@ func currentMessageModelID(payload *KiroPayload) string {
 
 func truncateCurrentMessage(payload *KiroPayload, tokenLimit int) {
 	current := &payload.ConversationState.CurrentMessage.UserInputMessage
+	keepEmptyContent := currentStructuredToolResultsAreActive(payload)
 	current.Content = fitPayloadTextBytes(payload, current.Content)
-	if current.Content == "" {
+	if current.Content == "" && !keepEmptyContent {
 		current.Content = minimalFallbackUserContent
 	}
 
 	if tokenLimit > 0 {
 		current.Content = fitTextToTokenBudget(current.Content, remainingTokenBudget(payload, tokenLimit, estimateWireTokens(current.Content)))
-		if current.Content == "" {
+		if current.Content == "" && !keepEmptyContent {
 			current.Content = minimalFallbackUserContent
 		}
 	}
