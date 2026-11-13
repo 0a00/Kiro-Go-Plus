@@ -1692,6 +1692,12 @@ func TestMapDownstreamErrorPreservesActionableStatus(t *testing.T) {
 			wantStatus: http.StatusServiceUnavailable,
 			wantType:   "server_error",
 		},
+		{
+			name:       "unsupported Kiro client version",
+			err:        &UpstreamError{Kind: UpstreamErrorClientVersion},
+			wantStatus: http.StatusServiceUnavailable,
+			wantType:   "server_error",
+		},
 	}
 
 	for _, tt := range tests {

@@ -650,7 +650,15 @@ const (
 )
 
 // Version current version
-const Version = "1.2.99"
+const Version = "1.3.0"
+
+// Kiro client versions are sent in the outbound KiroIDE user-agent. Keep the
+// default above the service's published minimum; operators can still override
+// it from the admin runtime settings when Kiro publishes a newer gate.
+const (
+	DefaultKiroVersion          = "1.4.154"
+	MinimumSupportedKiroVersion = "0.11.133"
+)
 
 // BuildCommit is injected by Docker/CI builds so operators can verify the
 // exact source revision running in production. Local builds use "unknown".
@@ -740,8 +748,13 @@ func loadLocked() error {
 	passwordMigrated := false
 	promptCacheModeMigrated := false
 	upstreamProtectionMigrated := false
+	kiroVersionMigrated := false
 	if strings.TrimSpace(c.Password) == "" {
 		c.Password = "changeme"
+	}
+	if isKiroVersionBelowMinimum(c.KiroVersion) {
+		c.KiroVersion = DefaultKiroVersion
+		kiroVersionMigrated = true
 	}
 	if !isAdminPasswordHash(c.Password) {
 		hashed, hashErr := hashAdminPassword(c.Password)
@@ -959,7 +972,7 @@ func loadLocked() error {
 			overageMigrated = true
 		}
 	}
-	if upstreamProtectionMigrated || overageMigrated || fingerprintMigrated || passwordMigrated || secretsMigrated || promptCacheModeMigrated {
+	if upstreamProtectionMigrated || overageMigrated || fingerprintMigrated || passwordMigrated || secretsMigrated || promptCacheModeMigrated || kiroVersionMigrated {
 		if err := saveLocked(); err != nil {
 			return err
 		}
@@ -4208,7 +4221,7 @@ func UpdateRuntimeConfig(runtime RuntimeConfig) error {
 	if runtime.LogLevel != "" {
 		cfg.LogLevel = runtime.LogLevel
 	}
-	cfg.KiroVersion = runtime.KiroVersion
+	cfg.KiroVersion = normalizeKiroVersion(runtime.KiroVersion)
 	cfg.SystemVersion = runtime.SystemVersion
 	cfg.NodeVersion = runtime.NodeVersion
 	return Save()
@@ -4227,7 +4240,7 @@ func GetKiroClientConfig() KiroClientConfig {
 }
 
 func getKiroClientConfigLocked() KiroClientConfig {
-	kiroVersion := "0.11.107"
+	kiroVersion := DefaultKiroVersion
 	if cfg != nil && cfg.KiroVersion != "" {
 		kiroVersion = cfg.KiroVersion
 	}
@@ -4250,6 +4263,53 @@ func getKiroClientConfigLocked() KiroClientConfig {
 		SystemVersion: systemVersion,
 		NodeVersion:   nodeVersion,
 	}
+}
+
+func normalizeKiroVersion(value string) string {
+	value = strings.TrimSpace(value)
+	if isKiroVersionBelowMinimum(value) {
+		return DefaultKiroVersion
+	}
+	return value
+}
+
+func isKiroVersionBelowMinimum(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return false
+	}
+	parse := func(raw string) ([3]int, bool) {
+		var result [3]int
+		parts := strings.Split(raw, ".")
+		if len(parts) < 2 || len(parts) > 3 {
+			return result, false
+		}
+		for index, part := range parts {
+			if part == "" {
+				return result, false
+			}
+			parsed, err := strconv.Atoi(part)
+			if err != nil || parsed < 0 {
+				return result, false
+			}
+			result[index] = parsed
+		}
+		return result, true
+	}
+	current, ok := parse(value)
+	if !ok {
+		return false
+	}
+	minimum, ok := parse(MinimumSupportedKiroVersion)
+	if !ok {
+		return false
+	}
+	for index := range current {
+		if current[index] != minimum[index] {
+			return current[index] < minimum[index]
+		}
+	}
+	return false
 }
 
 func defaultSystemVersion() string {

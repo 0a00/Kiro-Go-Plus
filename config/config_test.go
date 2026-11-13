@@ -649,6 +649,32 @@ func TestRuntimeConfigUpdate(t *testing.T) {
 	}
 }
 
+func TestStaleKiroVersionMigratesAndRuntimeUpdatesNormalize(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"password":"changeme","kiroVersion":"0.11.107"}`), 0o600); err != nil {
+		t.Fatalf("write legacy config: %v", err)
+	}
+	if err := Init(path); err != nil {
+		t.Fatalf("init legacy config: %v", err)
+	}
+	if got := GetKiroClientConfig().KiroVersion; got != DefaultKiroVersion {
+		t.Fatalf("stale persisted Kiro version = %q, want %q", got, DefaultKiroVersion)
+	}
+
+	if err := UpdateRuntimeConfig(RuntimeConfig{KiroVersion: "0.11.107"}); err != nil {
+		t.Fatalf("update stale runtime config: %v", err)
+	}
+	if got := GetKiroClientConfig().KiroVersion; got != DefaultKiroVersion {
+		t.Fatalf("stale runtime Kiro version = %q, want %q", got, DefaultKiroVersion)
+	}
+	if err := UpdateRuntimeConfig(RuntimeConfig{KiroVersion: MinimumSupportedKiroVersion}); err != nil {
+		t.Fatalf("update minimum runtime config: %v", err)
+	}
+	if got := GetKiroClientConfig().KiroVersion; got != MinimumSupportedKiroVersion {
+		t.Fatalf("minimum supported Kiro version = %q, want %q", got, MinimumSupportedKiroVersion)
+	}
+}
+
 func TestOperationalConfigDefaults(t *testing.T) {
 	if err := Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatalf("init config: %v", err)

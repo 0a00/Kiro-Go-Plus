@@ -40,6 +40,14 @@ func TestSharedCircuitOnlyCountsServiceAndTransportFailures(t *testing.T) {
 	if !circuitEligibleFailure(classifyTransportError("test", &net.OpError{Op: "dial", Err: errors.New("refused")})) {
 		t.Fatal("transport outage ignored")
 	}
+
+	versionGate := classifyUpstreamHTTPError(http.StatusBadRequest, "CodeWhisperer", []byte(`{"message":"This version of Kiro is no longer supported. Please update to the latest version of Kiro to continue."}`))
+	if versionGate.Kind != UpstreamErrorClientVersion || shouldRetryAcrossAccounts(versionGate) || shouldRetryAcrossEndpoints(versionGate) || circuitEligibleFailure(versionGate) {
+		t.Fatalf("version gate was treated as an account or endpoint failure: %+v", versionGate)
+	}
+	if mapped := mapDownstreamError(versionGate); mapped.Status != http.StatusServiceUnavailable {
+		t.Fatalf("version gate mapped to %d, want %d", mapped.Status, http.StatusServiceUnavailable)
+	}
 }
 
 func TestStreamIdleTimeoutPreservesRequestLocalRecoveryPolicy(t *testing.T) {

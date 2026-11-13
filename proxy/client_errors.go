@@ -10,6 +10,8 @@ func clientErrorMessage(err error) string {
 	}
 	if upstream, ok := asUpstreamError(err); ok {
 		switch upstream.Kind {
+		case UpstreamErrorClientVersion:
+			return "The Kiro gateway client version is no longer supported; ask the administrator to update it."
 		case UpstreamErrorToolAssemblyTimeout, UpstreamErrorToolOutputTruncated:
 			return "Tool call did not complete. For file changes, retry with smaller complete edits; preserve any required atomic operation."
 		case UpstreamErrorEmptyResponse:

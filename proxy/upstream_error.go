@@ -28,6 +28,7 @@ const (
 	UpstreamErrorRateLimit           UpstreamErrorKind = "rate_limit"
 	UpstreamErrorModelUnavailable    UpstreamErrorKind = "model_unavailable"
 	UpstreamErrorClientRequest       UpstreamErrorKind = "client_request"
+	UpstreamErrorClientVersion       UpstreamErrorKind = "client_version_unsupported"
 	UpstreamErrorEndpointUnavailable UpstreamErrorKind = "endpoint_unavailable"
 	UpstreamErrorTransient           UpstreamErrorKind = "transient"
 	UpstreamErrorFirstTokenTimeout   UpstreamErrorKind = "first_token_timeout"
@@ -220,7 +221,7 @@ func mapDownstreamError(err error) downstreamError {
 		mapped.Status = http.StatusTooManyRequests
 		mapped.ClaudeType = "rate_limit_error"
 		mapped.OpenAIType = "rate_limit_error"
-	case UpstreamErrorTokenExpired, UpstreamErrorAuthRevoked, UpstreamErrorModelUnavailable, UpstreamErrorRetryBudget,
+	case UpstreamErrorTokenExpired, UpstreamErrorAuthRevoked, UpstreamErrorModelUnavailable, UpstreamErrorClientVersion, UpstreamErrorRetryBudget,
 		UpstreamErrorLocalConfiguration:
 		// These credentials and models belong to the proxy, not the caller.
 		// Returning 401 would incorrectly tell clients their own API key failed.
@@ -296,6 +297,14 @@ func classifyUpstreamHTTPError(statusCode int, endpoint string, body []byte) *Up
 	}
 
 	switch {
+	case strings.Contains(combined, "this version of kiro is no longer supported") ||
+		(strings.Contains(combined, "update to the latest version") && strings.Contains(combined, "kiro")):
+		// This is a gateway-wide client compatibility failure. Retrying another
+		// account or endpoint only repeats the same version gate and can make a
+		// large account pool appear unhealthy.
+		err.Kind = UpstreamErrorClientVersion
+		err.RetryAcrossAccounts = false
+		err.RetryAcrossEndpoints = false
 	case strings.Contains(combined, "tool_use_result_mismatch") ||
 		strings.Contains(combined, "unexpected tool_use_id") ||
 		(strings.Contains(combined, "tool_result") &&

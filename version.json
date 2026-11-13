@@ -1,5 +1,5 @@
 {
-  "version": "1.2.99",
-  "changelog": "Preserve upstream output-token usage across Claude, OpenAI, and Responses handlers, using local estimation only when upstream usage is unavailable. Add stream regression coverage.\n修复 Claude、OpenAI 和 Responses 响应中上游输出 token 被本地估算值覆盖的问题；仅在上游没有用量时回退估算，并增加事件流回归测试。",
+  "version": "1.3.0",
+  "changelog": "Update the default Kiro client version, migrate stale persisted versions, and stop retrying gateway-wide Kiro version gates across accounts.\n更新默认 Kiro 客户端版本，自动迁移已保存的过期版本，并阻止版本门禁错误跨账号重复重试。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }

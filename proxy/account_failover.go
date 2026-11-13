@@ -434,7 +434,7 @@ func (h *Handler) handleAccountFailure(account *config.Account, err error) {
 
 	if upstreamErr, ok := asUpstreamError(err); ok {
 		switch upstreamErr.Kind {
-		case UpstreamErrorClientRequest, UpstreamErrorRetryBudget, UpstreamErrorModelUnavailable, UpstreamErrorCanceled,
+		case UpstreamErrorClientRequest, UpstreamErrorClientVersion, UpstreamErrorRetryBudget, UpstreamErrorModelUnavailable, UpstreamErrorCanceled,
 			UpstreamErrorLocalConfiguration:
 			return
 		case UpstreamErrorQuota:

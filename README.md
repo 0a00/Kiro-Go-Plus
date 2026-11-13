@@ -375,6 +375,11 @@ readable. See [test changes](docs/development-testing.md#1297-acceptance-changes
 
 Compose uses `/health`, so account exhaustion does not cause a restart loop. Reverse proxies and load balancers should use `/ready` when deciding whether to route new requests.
 
+1.3.0 updates the default Kiro client version to a currently supported release,
+migrates persisted versions below the published minimum, and classifies the
+upstream Kiro version gate as a gateway configuration failure. It returns a
+service-unavailable response without retrying every account or endpoint.
+
 1.2.99 preserves upstream output-token usage across Claude, OpenAI, and Responses
 handlers and falls back to local estimation only when upstream usage is absent.
 This prevents completed responses with substantial content from being reported as
