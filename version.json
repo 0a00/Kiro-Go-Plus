@@ -1,5 +1,5 @@
 {
-  "version": "1.3.0",
-  "changelog": "Update the default Kiro client version, migrate stale persisted versions, and stop retrying gateway-wide Kiro version gates across accounts.\n更新默认 Kiro 客户端版本，自动迁移已保存的过期版本，并阻止版本门禁错误跨账号重复重试。",
+  "version": "1.3.1",
+  "changelog": "Require profileArn for the CodeWhisperer endpoint and route profile-less accounts to compatible endpoints.\n修复 CodeWhisperer 端点必须携带 profileArn 的兼容性问题，无 profile 账号自动切换到兼容端点。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }

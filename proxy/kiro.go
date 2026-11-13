@@ -67,11 +67,12 @@ var kiroEndpoints = []kiroEndpoint{
 		Name:      "Kiro IDE",
 	},
 	{
-		Key:       "codewhisperer",
-		URL:       "https://codewhisperer.us-east-1.amazonaws.com/generateAssistantResponse",
-		Origin:    "AI_EDITOR",
-		AmzTarget: "AmazonCodeWhispererStreamingService.GenerateAssistantResponse",
-		Name:      "CodeWhisperer",
+		Key:                "codewhisperer",
+		URL:                "https://codewhisperer.us-east-1.amazonaws.com/generateAssistantResponse",
+		Origin:             "AI_EDITOR",
+		AmzTarget:          "AmazonCodeWhispererStreamingService.GenerateAssistantResponse",
+		Name:               "CodeWhisperer",
+		RequiresProfileArn: true,
 	},
 	{
 		Key:       "amazonq",
