@@ -72,7 +72,7 @@ func TestLongToolRequestPrefersKiroAndUsesSeparateRouteKey(t *testing.T) {
 	}
 }
 
-func TestAPIKeyAccountEndpointsSkipRuntimeAndPreferKiro(t *testing.T) {
+func TestAPIKeyAccountEndpointsUseKeyBoundProfileCompatibility(t *testing.T) {
 	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatalf("init config: %v", err)
 	}
@@ -82,8 +82,8 @@ func TestAPIKeyAccountEndpointsSkipRuntimeAndPreferKiro(t *testing.T) {
 		t.Fatalf("API key endpoint order = %+v", endpoints)
 	}
 	for _, endpoint := range endpoints {
-		if endpoint.RequiresProfileArn || endpoint.Key == "runtime" {
-			t.Fatalf("API key account received profile-bound endpoint: %+v", endpoints)
+		if endpoint.Key == "runtime" || endpoint.Key == "codewhisperer" {
+			t.Fatalf("API key account received an OAuth/runtime endpoint: %+v", endpoints)
 		}
 	}
 
@@ -94,18 +94,18 @@ func TestAPIKeyAccountEndpointsSkipRuntimeAndPreferKiro(t *testing.T) {
 	}
 }
 
-func TestProfilelessBuilderIDAccountSkipsProfileBoundEndpointsAndPrefersKiro(t *testing.T) {
+func TestProfilelessBuilderIDAccountKeepsOnlyProfileBoundGenerationRoutes(t *testing.T) {
 	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatalf("init config: %v", err)
 	}
 	account := &config.Account{AuthMethod: "idc", Provider: "BuilderId", Region: "us-east-1"}
 	endpoints := getRequestEndpointsForAccount("auto", &KiroPayload{}, account)
-	if len(endpoints) == 0 || endpoints[0].Key != "kiro" {
-		t.Fatalf("profileless Builder ID endpoint order = %+v, want Kiro IDE first", endpoints)
+	if len(endpoints) == 0 || endpoints[0].Key != "codewhisperer" {
+		t.Fatalf("profileless Builder ID endpoint order = %+v, want profile-bound route first", endpoints)
 	}
 	for _, endpoint := range endpoints {
-		if endpoint.RequiresProfileArn || endpoint.Key == "runtime" {
-			t.Fatalf("profileless Builder ID received profile-bound endpoint: %+v", endpoints)
+		if !endpoint.RequiresProfileArn {
+			t.Fatalf("profileless Builder ID received a profile-less generation route: %+v", endpoints)
 		}
 	}
 	if got := accountAutoEndpointHint(account); got != "codewhisperer" {
@@ -113,10 +113,10 @@ func TestProfilelessBuilderIDAccountSkipsProfileBoundEndpointsAndPrefersKiro(t *
 	}
 }
 
-func TestCodeWhispererRequiresProfileArn(t *testing.T) {
+func TestAllGenerationEndpointsRequireProfileArnForOAuth(t *testing.T) {
 	for _, endpoint := range kiroEndpoints {
-		if endpoint.Key == "codewhisperer" && !endpoint.RequiresProfileArn {
-			t.Fatal("CodeWhisperer must require profileArn")
+		if !endpoint.RequiresProfileArn {
+			t.Fatalf("generation endpoint %q must require profileArn", endpoint.Key)
 		}
 	}
 }

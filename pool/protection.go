@@ -498,6 +498,9 @@ func (p *AccountPool) ensureProtectionMapsLocked() {
 	if p.refreshFailures == nil {
 		p.refreshFailures = make(map[string]time.Time)
 	}
+	if p.profileUnavailable == nil {
+		p.profileUnavailable = make(map[string]time.Time)
+	}
 }
 
 func (p *AccountPool) findSelectableAccountLocked(accountID, model string, excluded map[string]bool, now time.Time, allowOverUsage bool) *config.Account {

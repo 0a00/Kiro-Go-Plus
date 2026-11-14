@@ -375,10 +375,14 @@ readable. See [test changes](docs/development-testing.md#1297-acceptance-changes
 
 Compose uses `/health`, so account exhaustion does not cause a restart loop. Reverse proxies and load balancers should use `/ready` when deciding whether to route new requests.
 
+1.3.4 requires a profile ARN before OAuth/IDC generation and WebSearch requests.
+Accounts that cannot resolve one are temporarily removed from request selection
+without being disabled or counted as credential failures, and are retried after
+a bounded cooldown. API-key accounts retain their key-bound compatibility routes.
 1.3.3 treats `Invalid profileArn` responses from Builder ID/IDC `GetUsageLimits`
 as partial metadata refreshes instead of account failures. These accounts remain
-routable and do not enter refresh cooldown; Social accounts, revoked credentials,
-and suspension errors keep their hard-failure behavior.
+routable for metadata refresh; Social accounts, revoked credentials, and
+suspension errors keep their hard-failure behavior.
 
 1.3.2 follows the known latest Kiro client version (`1.4.178`) by default. Runtime
 settings support automatic or manual version mode; old configurations migrate to

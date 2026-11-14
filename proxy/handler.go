@@ -7679,9 +7679,12 @@ func (h *Handler) testKiroGenerationEndpoint(account *config.Account, payload *K
 		return check, err
 	}
 	setPayloadProfileArnForAccount(payloadCopy, account)
-	if endpoint.RequiresProfileArn && strings.TrimSpace(payloadCopy.ProfileArn) == "" {
+	if endpointRequiresProfileArnForAccount(endpoint, account) && strings.TrimSpace(payloadCopy.ProfileArn) == "" {
 		if profileArn, err := ResolveProfileArn(account); err == nil {
 			payloadCopy.ProfileArn = profileArn
+		} else {
+			check.Error = newProfileUnavailableError(endpoint.Name, err).Error()
+			return check, fmt.Errorf("%s", check.Error)
 		}
 	}
 	payloadCopy.ConversationState.CurrentMessage.UserInputMessage.Origin = endpoint.Origin

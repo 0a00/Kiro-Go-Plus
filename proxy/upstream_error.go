@@ -30,6 +30,7 @@ const (
 	UpstreamErrorClientRequest       UpstreamErrorKind = "client_request"
 	UpstreamErrorClientVersion       UpstreamErrorKind = "client_version_unsupported"
 	UpstreamErrorEndpointUnavailable UpstreamErrorKind = "endpoint_unavailable"
+	UpstreamErrorProfileUnavailable  UpstreamErrorKind = "profile_unavailable"
 	UpstreamErrorTransient           UpstreamErrorKind = "transient"
 	UpstreamErrorFirstTokenTimeout   UpstreamErrorKind = "first_token_timeout"
 	UpstreamErrorStreamIdleTimeout   UpstreamErrorKind = "stream_idle_timeout"
@@ -226,6 +227,11 @@ func mapDownstreamError(err error) downstreamError {
 		// These credentials and models belong to the proxy, not the caller.
 		// Returning 401 would incorrectly tell clients their own API key failed.
 		mapped.Status = http.StatusServiceUnavailable
+	case UpstreamErrorProfileUnavailable:
+		// The selected credential is not revoked; it cannot currently satisfy
+		// the upstream profile requirement. This is a proxy capacity issue, not
+		// a caller request error.
+		mapped.Status = http.StatusServiceUnavailable
 	case UpstreamErrorFirstTokenTimeout, UpstreamErrorStreamIdleTimeout, UpstreamErrorActionableTimeout, UpstreamErrorToolAssemblyTimeout:
 		mapped.Status = http.StatusGatewayTimeout
 	case UpstreamErrorToolOutputTruncated:
@@ -365,6 +371,14 @@ func classifyUpstreamHTTPError(statusCode int, endpoint string, body []byte) *Up
 		strings.Contains(combined, "model_not_found"):
 		err.Kind = UpstreamErrorModelUnavailable
 		err.RetryAcrossEndpoints = true
+	case strings.Contains(combined, "profilearn is required") ||
+		(strings.Contains(combined, "profile arn") && strings.Contains(combined, "required")):
+		// The current Kiro data plane rejects profile-less generation/MCP calls.
+		// Do not retry the same payload across endpoints; the account must be
+		// replaced or obtain a profile ARN first.
+		err.Kind = UpstreamErrorProfileUnavailable
+		err.RetryAcrossEndpoints = false
+		err.RetryAcrossAccounts = true
 	case strings.Contains(combined, "content_length_exceeds_threshold") ||
 		strings.Contains(combined, "input is too long") || statusCode == 422:
 		err.Kind = UpstreamErrorClientRequest
@@ -383,6 +397,22 @@ func classifyUpstreamHTTPError(statusCode int, endpoint string, body []byte) *Up
 		err.RetryAcrossEndpoints = true
 	}
 	return err
+}
+
+func newProfileUnavailableError(endpoint string, cause error) *UpstreamError {
+	message := "account profile ARN is unavailable for this request"
+	if cause != nil && strings.TrimSpace(cause.Error()) != "" {
+		message += ": " + cause.Error()
+	}
+	return &UpstreamError{
+		Kind:                 UpstreamErrorProfileUnavailable,
+		Endpoint:             endpoint,
+		Message:              message,
+		RetryAcrossEndpoints: false,
+		RetryAcrossAccounts:  true,
+		RetryAfter:           10 * time.Minute,
+		Cause:                cause,
+	}
 }
 
 func classifyTransportError(endpoint string, err error) *UpstreamError {

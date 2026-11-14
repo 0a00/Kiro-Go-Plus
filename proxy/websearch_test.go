@@ -276,6 +276,14 @@ func TestMCPWebSearchFallsBackFromRuntimeToQAndLearnsRoute(t *testing.T) {
 	}
 }
 
+func TestMCPWebSearchQRouteRequiresProfileArnForOAuth(t *testing.T) {
+	for _, endpoint := range webSearchRouteEndpoints {
+		if !endpoint.RequiresProfileArn {
+			t.Fatalf("MCP endpoint %q must require profileArn for OAuth/IDC accounts", endpoint.Key)
+		}
+	}
+}
+
 func TestMCPWebSearchFixedRuntimeWithoutProfileUsesCompatibleQRoute(t *testing.T) {
 	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatalf("init config: %v", err)

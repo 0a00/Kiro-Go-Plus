@@ -465,6 +465,14 @@ func (h *Handler) handleAccountFailure(account *config.Account, err error) {
 			UpstreamErrorActionableTimeout, UpstreamErrorToolAssemblyTimeout, UpstreamErrorToolOutputTruncated, UpstreamErrorEmptyResponse,
 			UpstreamErrorStreamTruncated:
 			return
+		case UpstreamErrorProfileUnavailable:
+			until := time.Now().Add(time.Duration(10) * time.Minute)
+			if upstreamErr.RetryAfter > 0 {
+				until = time.Now().Add(upstreamErr.RetryAfter)
+			}
+			h.pool.RecordProfileUnavailable(account.ID, until)
+			logger.Warnf("[AccountFailover] Account %s is not generation-ready until %s: %s", account.ID, until.Format(time.RFC3339), upstreamErr.Message)
+			return
 		}
 	}
 
@@ -479,9 +487,9 @@ func (h *Handler) handleAccountFailure(account *config.Account, err error) {
 		h.disableAccount(account, "BANNED", "AWS temporarily suspended - unusual user activity detected")
 	case isProfileUnavailableErrorMessage(errMsg):
 		// Profile ARN may be transiently unresolvable (upstream blip, stale token).
-		// Treat as a soft failure: short cooldown so the next request rotates account,
-		// but never auto-disable — operators can still investigate via warn logs.
-		h.pool.RecordError(account.ID, false)
+		// Keep the credential enabled and out of the request path until the next
+		// bounded profile-resolution attempt.
+		h.pool.RecordProfileUnavailable(account.ID, time.Now().Add(10*time.Minute))
 	case isAuthErrorMessage(errMsg):
 		h.disableAccount(account, "BANNED", "Authentication failed - token invalid or expired")
 	default:

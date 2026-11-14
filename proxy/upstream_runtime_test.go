@@ -172,6 +172,16 @@ func TestCallKiroAPIRejectsHTTP200EmptyResponse(t *testing.T) {
 	}
 }
 
+func TestClassifyProfileArnRequiredAsAccountCapabilityFailure(t *testing.T) {
+	err := classifyUpstreamHTTPError(http.StatusBadRequest, "Kiro IDE", []byte(`{"message":"profileArn is required for this request"}`))
+	if err.Kind != UpstreamErrorProfileUnavailable {
+		t.Fatalf("profile requirement kind = %q, want %q", err.Kind, UpstreamErrorProfileUnavailable)
+	}
+	if !err.RetryAcrossAccounts || err.RetryAcrossEndpoints {
+		t.Fatalf("profile requirement retry policy = accounts=%v endpoints=%v", err.RetryAcrossAccounts, err.RetryAcrossEndpoints)
+	}
+}
+
 func TestCallKiroAPIRetriesClientVersionGateOnceInAutomaticMode(t *testing.T) {
 	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatalf("init config: %v", err)

@@ -60,11 +60,12 @@ var kiroEndpoints = []kiroEndpoint{
 		RequiresProfileArn: true,
 	},
 	{
-		Key:       "kiro",
-		URL:       "https://q.us-east-1.amazonaws.com/generateAssistantResponse",
-		Origin:    "AI_EDITOR",
-		AmzTarget: "",
-		Name:      "Kiro IDE",
+		Key:                "kiro",
+		URL:                "https://q.us-east-1.amazonaws.com/generateAssistantResponse",
+		Origin:             "AI_EDITOR",
+		AmzTarget:          "",
+		Name:               "Kiro IDE",
+		RequiresProfileArn: true,
 	},
 	{
 		Key:                "codewhisperer",
@@ -75,11 +76,12 @@ var kiroEndpoints = []kiroEndpoint{
 		RequiresProfileArn: true,
 	},
 	{
-		Key:       "amazonq",
-		URL:       "https://q.us-east-1.amazonaws.com/generateAssistantResponse",
-		Origin:    "AI_EDITOR",
-		AmzTarget: "AmazonQDeveloperStreamingService.SendMessage",
-		Name:      "AmazonQ",
+		Key:                "amazonq",
+		URL:                "https://q.us-east-1.amazonaws.com/generateAssistantResponse",
+		Origin:             "AI_EDITOR",
+		AmzTarget:          "AmazonQDeveloperStreamingService.SendMessage",
+		Name:               "AmazonQ",
+		RequiresProfileArn: true,
 	},
 }
 
@@ -898,20 +900,39 @@ func accountAutoEndpointHint(account *config.Account) string {
 	return "kiro"
 }
 
+// API-key credentials use a key-bound upstream profile and do not expose the
+// OAuth profile ARN field. OAuth/IDC credentials must have an explicit profile
+// before generation or MCP requests are sent.
+func endpointRequiresProfileArnForAccount(endpoint kiroEndpoint, account *config.Account) bool {
+	return endpoint.RequiresProfileArn && !isKiroAPIKeyAccount(account)
+}
+
+func filterGenerationEndpointsForAccount(endpoints []kiroEndpoint, account *config.Account) []kiroEndpoint {
+	if !isKiroAPIKeyAccount(account) || strings.TrimSpace(account.ProfileArn) != "" {
+		return endpoints
+	}
+
+	// API keys use the key-bound Kiro/Q profile. Keep the legacy-compatible
+	// generation routes and do not silently broaden an API key to OAuth/runtime
+	// routes merely because those routes are marked profile-bound for OAuth.
+	compatible := make([]kiroEndpoint, 0, len(endpoints))
+	for _, endpoint := range endpoints {
+		if endpoint.Key == "kiro" || endpoint.Key == "amazonq" || !endpoint.RequiresProfileArn {
+			compatible = append(compatible, endpoint)
+		}
+	}
+	if len(compatible) > 0 {
+		return compatible
+	}
+	return endpoints
+}
+
 func getRequestEndpointsForAccount(preferred string, payload *KiroPayload, account *config.Account) []kiroEndpoint {
 	if account != nil && strings.TrimSpace(account.EndpointPreference) != "" {
 		preferred = preferredEndpointForAccount(account)
 	}
 	endpoints := getRequestEndpoints(preferred, payload)
-	if (isKiroAPIKeyAccount(account) || isProfilelessBuilderIDAccount(account)) && strings.TrimSpace(account.ProfileArn) == "" {
-		compatible := make([]kiroEndpoint, 0, len(endpoints))
-		for _, endpoint := range endpoints {
-			if !endpoint.RequiresProfileArn {
-				compatible = append(compatible, endpoint)
-			}
-		}
-		endpoints = compatible
-	}
+	endpoints = filterGenerationEndpointsForAccount(endpoints, account)
 	preferred = strings.ToLower(strings.TrimSpace(preferred))
 	if preferred == "" || preferred == "auto" {
 		endpoints = moveEndpointFirst(endpoints, accountAutoEndpointHint(account))
@@ -1053,7 +1074,7 @@ func callKiroAPISingleModel(account *config.Account, payload *KiroPayload, callb
 	}
 	requiresProfileArn := false
 	for _, endpoint := range endpoints {
-		if endpoint.RequiresProfileArn {
+		if endpointRequiresProfileArnForAccount(endpoint, account) {
 			requiresProfileArn = true
 			break
 		}
@@ -1061,10 +1082,9 @@ func callKiroAPISingleModel(account *config.Account, payload *KiroPayload, callb
 	if requiresProfileArn && payload != nil && strings.TrimSpace(payload.ProfileArn) == "" {
 		if profileArn, err := ResolveProfileArnContext(requestContext, account); err == nil {
 			payload.ProfileArn = profileArn
-		} else if isProfileArnResolutionSoftError(err) {
-			logger.Debugf("[ProfileArn] Skipped profile ARN resolution for %s: %v", accountEmailForLog(account), err)
 		} else {
-			logger.Warnf("[ProfileArn] Failed to resolve profile ARN for %s: %v", accountEmailForLog(account), err)
+			logger.Warnf("[ProfileArn] Account %s is not generation-ready: %v", accountEmailForLog(account), err)
+			return newProfileUnavailableError("Kiro generation", err)
 		}
 	}
 
@@ -1119,7 +1139,7 @@ endpointLoop:
 		if err := requestContext.Err(); err != nil {
 			return classifyRequestCancellation(ep.Name, err)
 		}
-		if ep.RequiresProfileArn && strings.TrimSpace(payload.ProfileArn) == "" {
+		if endpointRequiresProfileArnForAccount(ep, account) && strings.TrimSpace(payload.ProfileArn) == "" {
 			lastErr = &UpstreamError{
 				Kind:                 UpstreamErrorEndpointUnavailable,
 				Endpoint:             ep.Name,

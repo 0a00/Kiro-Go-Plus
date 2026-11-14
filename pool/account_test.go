@@ -311,6 +311,20 @@ func newTestPool(accounts ...config.Account) *AccountPool {
 	return p
 }
 
+func TestProfileUnavailableTemporarilyRemovesAccountFromSelection(t *testing.T) {
+	initAccountSelectionConfig(t)
+	p := newTestPool(config.Account{ID: "profileless", Enabled: true, AccessToken: "access"})
+	p.RecordProfileUnavailable("profileless", time.Now().Add(time.Hour))
+	if got := p.GetNext(); got != nil {
+		t.Fatalf("profile-unavailable account remained selectable: %+v", got)
+	}
+
+	p.UpdateProfileArn("profileless", "arn:aws:codewhisperer:us-east-1:123:profile/test")
+	if got := p.GetNext(); got == nil || got.ID != "profileless" {
+		t.Fatalf("profile ARN update did not restore selection: %+v", got)
+	}
+}
+
 func initWeightedRoutingTest(t *testing.T) {
 	t.Helper()
 	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {

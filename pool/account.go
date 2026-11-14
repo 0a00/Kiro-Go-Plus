@@ -64,7 +64,12 @@ type AccountPool struct {
 	lastSuccess     map[string]time.Time
 	healthStats     map[string]accountHealthState
 	refreshFailures map[string]time.Time
-	refreshCursor   int
+	// profileUnavailable keeps accounts whose credentials are valid but cannot
+	// currently obtain the profile required by generation endpoints out of the
+	// hot request path. It is intentionally in-memory and does not affect the
+	// persisted account enabled/ban state.
+	profileUnavailable map[string]time.Time
+	refreshCursor      int
 	// availabilityNotify is closed and replaced whenever a slot or account
 	// state changes. Waiting requests subscribe to the current channel instead
 	// of polling the whole pool on a fixed timer.
@@ -106,6 +111,7 @@ func GetPool() *AccountPool {
 			lastSuccess:        make(map[string]time.Time),
 			healthStats:        make(map[string]accountHealthState),
 			refreshFailures:    make(map[string]time.Time),
+			profileUnavailable: make(map[string]time.Time),
 			availabilityNotify: make(chan struct{}),
 			dirtyStats:         make(map[string]struct{}),
 			configGeneration:   config.GetGeneration(),
@@ -221,6 +227,9 @@ func (p *AccountPool) GetNextExcluding(excluded map[string]bool) *config.Account
 		if isQuotaBlocked(*acc, allowOverUsage) {
 			continue
 		}
+		if p.profileUnavailableLocked(acc.ID, now) && strings.TrimSpace(acc.ProfileArn) == "" {
+			continue
+		}
 		if !p.accountTokenRoutableLocked(acc, now) {
 			continue
 		}
@@ -328,6 +337,9 @@ func (p *AccountPool) GetNextForModelExcluding(model string, excluded map[string
 			continue
 		}
 		if isQuotaBlocked(*acc, allowOverUsage) {
+			continue
+		}
+		if p.profileUnavailableLocked(acc.ID, now) && strings.TrimSpace(acc.ProfileArn) == "" {
 			continue
 		}
 		if !p.accountTokenRoutableLocked(acc, now) {
@@ -510,6 +522,9 @@ func (p *AccountPool) accountSelectableBasicLocked(acc *config.Account, model st
 	if cooldown, ok := p.cooldowns[acc.ID]; ok && now.Before(cooldown) {
 		return false
 	}
+	if p.profileUnavailableLocked(acc.ID, now) && strings.TrimSpace(acc.ProfileArn) == "" {
+		return false
+	}
 	if accountTokenNeedsRefresh(acc, now) {
 		if !allowRefreshFallback || strings.TrimSpace(acc.RefreshToken) == "" {
 			return false
@@ -519,6 +534,21 @@ func (p *AccountPool) accountSelectableBasicLocked(acc *config.Account, model st
 		}
 	}
 	return !isQuotaBlocked(*acc, allowOverUsage)
+}
+
+func (p *AccountPool) profileUnavailableLocked(accountID string, now time.Time) bool {
+	if p.profileUnavailable == nil {
+		return false
+	}
+	until, ok := p.profileUnavailable[accountID]
+	if !ok {
+		return false
+	}
+	if !until.After(now) {
+		delete(p.profileUnavailable, accountID)
+		return false
+	}
+	return true
 }
 
 func accountTokenNeedsRefresh(acc *config.Account, now time.Time) bool {
@@ -967,6 +997,8 @@ func (p *AccountPool) UpdateCredentials(id, accessToken, refreshToken string, ex
 		p.accounts[i].ExpiresAt = expiresAt
 		if profileArn != "" {
 			p.accounts[i].ProfileArn = profileArn
+			delete(p.profileUnavailable, id)
+			p.signalAvailabilityLocked()
 		}
 		if len(p.accountIndex) != len(p.accounts) {
 			for j := range p.accounts {
@@ -990,6 +1022,8 @@ func (p *AccountPool) UpdateProfileArn(id, profileArn string) {
 	defer p.mu.Unlock()
 	if i, ok := p.accountIndexLocked(id); ok {
 		p.accounts[i].ProfileArn = profileArn
+		delete(p.profileUnavailable, id)
+		p.signalAvailabilityLocked()
 		if len(p.accountIndex) != len(p.accounts) {
 			for j := range p.accounts {
 				if j != i && p.accounts[j].ID == id {
@@ -998,6 +1032,36 @@ func (p *AccountPool) UpdateProfileArn(id, profileArn string) {
 			}
 		}
 	}
+}
+
+// RecordProfileUnavailable temporarily excludes an account from generation
+// selection without changing its enabled, ban, or error counters. The account
+// remains eligible for token and metadata refresh; UpdateProfileArn clears the
+// marker as soon as a profile is discovered.
+func (p *AccountPool) RecordProfileUnavailable(id string, until time.Time) {
+	if p == nil || strings.TrimSpace(id) == "" {
+		return
+	}
+	if until.IsZero() || !until.After(time.Now()) {
+		until = time.Now().Add(10 * time.Minute)
+	}
+	p.mu.Lock()
+	p.ensureProtectionMapsLocked()
+	if current := p.profileUnavailable[id]; current.Before(until) {
+		p.profileUnavailable[id] = until
+	}
+	p.signalAvailabilityLocked()
+	p.mu.Unlock()
+}
+
+func (p *AccountPool) ClearProfileUnavailable(id string) {
+	if p == nil || strings.TrimSpace(id) == "" {
+		return
+	}
+	p.mu.Lock()
+	delete(p.profileUnavailable, id)
+	p.signalAvailabilityLocked()
+	p.mu.Unlock()
 }
 
 // Count 返回账号总数
@@ -1018,8 +1082,8 @@ func (p *AccountPool) Count() int {
 // AvailableCount 返回可用账号数
 func (p *AccountPool) AvailableCount() int {
 	allowOverUsage := config.GetAllowOverUsage()
-	p.mu.RLock()
-	defer p.mu.RUnlock()
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	now := time.Now()
 	count := 0
 	seen := make(map[string]bool)
@@ -1029,6 +1093,9 @@ func (p *AccountPool) AvailableCount() int {
 		}
 		seen[acc.ID] = true
 		if cooldown, ok := p.cooldowns[acc.ID]; ok && now.Before(cooldown) {
+			continue
+		}
+		if p.profileUnavailableLocked(acc.ID, now) && strings.TrimSpace(acc.ProfileArn) == "" {
 			continue
 		}
 		if acc.ExpiresAt > 0 && now.Unix() >= acc.ExpiresAt-tokenRefreshSafetyWindowSecondsForAccount(&acc) {

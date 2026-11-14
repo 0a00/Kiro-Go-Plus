@@ -26,7 +26,7 @@ var errMCPWebSearchPayload = errors.New("MCP web_search payload error")
 
 var webSearchRouteEndpoints = []kiroEndpoint{
 	{Key: "runtime-mcp", URL: "https://runtime.us-east-1.kiro.dev/mcp", Name: "Kiro Runtime MCP", RequiresProfileArn: true},
-	{Key: "q-mcp", URL: "https://q.us-east-1.amazonaws.com/mcp", Name: "Kiro Q MCP"},
+	{Key: "q-mcp", URL: "https://q.us-east-1.amazonaws.com/mcp", Name: "Kiro Q MCP", RequiresProfileArn: true},
 }
 
 type mcpRequest struct {
@@ -426,19 +426,12 @@ func callMCPWebSearchContext(ctx context.Context, account *config.Account, query
 	if query == "" {
 		return nil, fmt.Errorf("web_search query must not be empty")
 	}
-	if !isKiroAPIKeyAccount(account) {
-		if err := ensureRestProfileArnContext(ctx, account); err != nil {
-			// Q MCP does not require a Kiro profile ARN. Builder ID accounts
-			// commonly cannot resolve one, while their Q web-search route is
-			// still usable; let endpoint selection below choose that route.
-			if strings.TrimSpace(account.ProfileArn) == "" &&
-				strings.EqualFold(strings.TrimSpace(account.Provider), "BuilderId") &&
-				(strings.Contains(strings.ToLower(err.Error()), "no available kiro profile") ||
-					strings.Contains(strings.ToLower(err.Error()), "profile arn unsupported")) {
-				logger.Debugf("[WebSearch] Continuing without profile ARN for Builder ID account %s: %v", accountEmailForLog(account), err)
-			} else {
-				return nil, fmt.Errorf("resolve profileArn: %w", err)
-			}
+	if !isKiroAPIKeyAccount(account) && strings.TrimSpace(account.ProfileArn) == "" {
+		if profileArn, err := ResolveProfileArnContext(ctx, account); err == nil {
+			account.ProfileArn = profileArn
+		} else {
+			logger.Warnf("[WebSearch] Account %s is not generation-ready: %v", accountEmailForLog(account), err)
+			return nil, newProfileUnavailableError("Kiro MCP WebSearch", err)
 		}
 	}
 	body, err := json.Marshal(mcpRequest{
@@ -459,27 +452,31 @@ func callMCPWebSearchContext(ctx context.Context, account *config.Account, query
 		(preferred == "auto" && !accountPrefersRuntime(account)) {
 		endpoints = moveEndpointFirst(endpoints, "q-mcp")
 	}
-	if strings.TrimSpace(account.ProfileArn) == "" {
-		compatible := make([]kiroEndpoint, 0, len(endpoints))
-		for _, endpoint := range endpoints {
-			if !endpoint.RequiresProfileArn {
-				compatible = append(compatible, endpoint)
-			}
-		}
-		endpoints = compatible
-	}
 	if preferred != "" && preferred != "auto" && !config.GetEndpointFallback() {
 		if preferred == "runtime" {
-			if strings.TrimSpace(account.ProfileArn) != "" {
-				endpoints = []kiroEndpoint{webSearchRouteEndpoints[0]}
-			} else {
-				// Runtime MCP requires a profile ARN. A profile-less OAuth account
-				// can still use the Q MCP route, so select that compatible plane even
-				// when generation endpoint fallback is disabled.
+			if isKiroAPIKeyAccount(account) && len(webSearchRouteEndpoints) > 1 {
+				// API keys use their key-bound profile and retain the legacy Q MCP
+				// compatibility route when runtime is explicitly selected.
 				endpoints = []kiroEndpoint{webSearchRouteEndpoints[1]}
+			} else {
+				endpoints = []kiroEndpoint{webSearchRouteEndpoints[0]}
 			}
 		} else {
 			endpoints = []kiroEndpoint{webSearchRouteEndpoints[1]}
+		}
+	}
+	if isKiroAPIKeyAccount(account) && strings.TrimSpace(account.ProfileArn) == "" {
+		// API keys are bound to the legacy Q profile. Keep the compatibility
+		// route even though it is marked profile-bound for OAuth/IDC accounts,
+		// and avoid retrying the runtime route for every key.
+		compatible := make([]kiroEndpoint, 0, len(endpoints))
+		for _, endpoint := range endpoints {
+			if endpoint.Key == "q-mcp" || !endpoint.RequiresProfileArn {
+				compatible = append(compatible, endpoint)
+			}
+		}
+		if len(compatible) > 0 {
+			endpoints = compatible
 		}
 	}
 	endpoints, err = sharedAccountEndpointRoutes.availableEndpoints(account.ID, webSearchEndpointRouteModel, "auto", endpoints)

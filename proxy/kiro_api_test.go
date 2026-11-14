@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"kiro-go/config"
 	"net/http"
@@ -729,6 +730,49 @@ func TestEnsureRestProfileArnSuppressesUnsupportedBuilderIDLookup(t *testing.T) 
 	}
 	if got := atomic.LoadInt32(&calls); got != 1 {
 		t.Fatalf("expected one profile lookup during cooldown, got %d", got)
+	}
+}
+
+func TestCallKiroAPISkipsProfilelessOAuthBeforeDataPlane(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	clearProfileArnResolutionCooldowns()
+	t.Cleanup(clearProfileArnResolutionCooldowns)
+
+	previousREST := kiroRestHttpStore.Load()
+	previousStream := kiroHttpStore.Load()
+	t.Cleanup(func() {
+		kiroRestHttpStore.Store(previousREST)
+		kiroHttpStore.Store(previousStream)
+	})
+
+	var dataPlaneCalls atomic.Int32
+	kiroRestHttpStore.Store(&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Path != "/ListAvailableProfiles" {
+			t.Fatalf("unexpected profile resolution path: %s", req.URL.Path)
+		}
+		return &http.Response{
+			StatusCode: http.StatusForbidden,
+			Body:       io.NopCloser(strings.NewReader(`{"message":"AWS Builder ID is not supported for this operation."}`)),
+			Header:     make(http.Header),
+		}, nil
+	})})
+	kiroHttpStore.Store(&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		dataPlaneCalls.Add(1)
+		return nil, errors.New("generation data plane must not be called")
+	})})
+
+	err := CallKiroAPI(&config.Account{
+		ID: "profileless-builder", AccessToken: "access-token", AuthMethod: "idc",
+		Provider: "BuilderId", Region: "us-east-1",
+	}, &KiroPayload{}, &KiroStreamCallback{})
+	upstreamErr, ok := asUpstreamError(err)
+	if !ok || upstreamErr.Kind != UpstreamErrorProfileUnavailable {
+		t.Fatalf("profileless generation error = %#v, want profile-unavailable upstream error", err)
+	}
+	if dataPlaneCalls.Load() != 0 {
+		t.Fatalf("profileless generation reached data plane %d times", dataPlaneCalls.Load())
 	}
 }
 

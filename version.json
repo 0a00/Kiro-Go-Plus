@@ -1,5 +1,5 @@
 {
-  "version": "1.3.3",
-  "changelog": "Treat Builder ID/IDC Invalid profileArn usage metadata responses as partial refreshes without cooling routable accounts.\n修复 Builder ID/IDC 用量接口返回 Invalid profileArn 时误将可用账号冷却的问题，改为部分刷新。",
+  "version": "1.3.4",
+  "changelog": "Require profile ARN before OAuth/IDC generation and WebSearch requests, temporarily quarantine profileless accounts without disabling valid credentials, and preserve API-key compatibility routes.\n修复 OAuth/IDC 账号缺少 profile ARN 仍进入生成和 WebSearch 导致 400 的问题；缺 ARN 账号仅临时移出请求池，不禁用有效凭据，并保留 API Key 兼容端点。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }
