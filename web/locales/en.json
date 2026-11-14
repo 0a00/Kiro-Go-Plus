@@ -39,6 +39,7 @@
   "stats.inventoryDisabled": "Disabled",
   "stats.inventoryCredential": "Credential Issue",
   "stats.inventoryProfile": "Profile Issue",
+  "stats.inventoryProfileless": "Missing Profile",
   "tabs.accounts": "Accounts",
   "tabs.overview": "Overview",
   "tabs.settings": "Settings",

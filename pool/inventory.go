@@ -19,6 +19,7 @@ type AccountInventory struct {
 	Disabled        int `json:"disabled"`
 	CredentialIssue int `json:"credentialIssue"`
 	ProfileIssue    int `json:"profileIssue"`
+	Profileless     int `json:"profileless"`
 }
 
 type accountInventoryState int
@@ -29,6 +30,7 @@ const (
 	inventoryQuotaBlocked
 	inventoryCredentialIssue
 	inventoryProfileIssue
+	inventoryProfileless
 	inventoryDisabled
 	inventoryBanned
 )
@@ -82,6 +84,8 @@ func (p *AccountPool) InventorySnapshot() AccountInventory {
 			result.CredentialIssue++
 		case inventoryProfileIssue:
 			result.ProfileIssue++
+		case inventoryProfileless:
+			result.Profileless++
 		case inventoryDisabled:
 			result.Disabled++
 		case inventoryBanned:
@@ -104,6 +108,9 @@ func classifyInventoryAccount(account config.Account, resident, cooling, allowOv
 	}
 	if hasCredentialIssue(account, now) {
 		return inventoryCredentialIssue
+	}
+	if accountRequiresGenerationProfile(&account) {
+		return inventoryProfileless
 	}
 	if isQuotaBlocked(account, allowOverUsage) {
 		return inventoryQuotaBlocked

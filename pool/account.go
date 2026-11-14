@@ -227,6 +227,9 @@ func (p *AccountPool) GetNextExcluding(excluded map[string]bool) *config.Account
 		if isQuotaBlocked(*acc, allowOverUsage) {
 			continue
 		}
+		if accountRequiresGenerationProfile(acc) {
+			continue
+		}
 		if p.profileUnavailableLocked(acc.ID, now) && strings.TrimSpace(acc.ProfileArn) == "" {
 			continue
 		}
@@ -337,6 +340,9 @@ func (p *AccountPool) GetNextForModelExcluding(model string, excluded map[string
 			continue
 		}
 		if isQuotaBlocked(*acc, allowOverUsage) {
+			continue
+		}
+		if accountRequiresGenerationProfile(acc) {
 			continue
 		}
 		if p.profileUnavailableLocked(acc.ID, now) && strings.TrimSpace(acc.ProfileArn) == "" {
@@ -519,6 +525,9 @@ func (p *AccountPool) accountSelectableBasicLocked(acc *config.Account, model st
 	if model != "" && !p.accountHasModel(acc.ID, model) {
 		return false
 	}
+	if accountRequiresGenerationProfile(acc) {
+		return false
+	}
 	if cooldown, ok := p.cooldowns[acc.ID]; ok && now.Before(cooldown) {
 		return false
 	}
@@ -534,6 +543,29 @@ func (p *AccountPool) accountSelectableBasicLocked(acc *config.Account, model st
 		}
 	}
 	return !isQuotaBlocked(*acc, allowOverUsage)
+}
+
+// accountRequiresGenerationProfile reports whether an account is known to use
+// OAuth/IDC credentials but has not yet obtained the profile required by the
+// generation APIs. API-key accounts are intentionally exempt: their key-bound
+// route has different profile requirements. Accounts with no authentication
+// metadata are left alone for backwards compatibility with legacy imports; the
+// request path will still classify an upstream profile error when it occurs.
+func accountRequiresGenerationProfile(acc *config.Account) bool {
+	if acc == nil || strings.TrimSpace(acc.ProfileArn) != "" {
+		return false
+	}
+	if strings.TrimSpace(acc.KiroApiKey) != "" {
+		return false
+	}
+	authMethod := strings.ToLower(strings.TrimSpace(acc.AuthMethod))
+	if authMethod == "api_key" || authMethod == "apikey" {
+		return false
+	}
+	return authMethod != "" ||
+		strings.TrimSpace(acc.Provider) != "" ||
+		strings.TrimSpace(acc.RefreshToken) != "" ||
+		strings.TrimSpace(acc.StartUrl) != ""
 }
 
 func (p *AccountPool) profileUnavailableLocked(accountID string, now time.Time) bool {
@@ -1099,6 +1131,9 @@ func (p *AccountPool) AvailableCount() int {
 			continue
 		}
 		if acc.ExpiresAt > 0 && now.Unix() >= acc.ExpiresAt-tokenRefreshSafetyWindowSecondsForAccount(&acc) {
+			continue
+		}
+		if accountRequiresGenerationProfile(&acc) {
 			continue
 		}
 		if isQuotaBlocked(acc, allowOverUsage) {

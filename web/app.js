@@ -709,7 +709,8 @@
       ['stats.inventoryBanned', inventory.banned || 0],
       ['stats.inventoryDisabled', inventory.disabled || 0],
       ['stats.inventoryCredential', inventory.credentialIssue || 0],
-      ['stats.inventoryProfile', inventory.profileIssue || 0]
+      ['stats.inventoryProfile', inventory.profileIssue || 0],
+      ['stats.inventoryProfileless', inventory.profileless || 0]
     ];
     el.innerHTML = values.map(([label, value]) =>
       '<div class="request-summary-item"><span>' + escapeHtml(t(label)) + '</span><strong>' + escapeHtml(String(value)) + '</strong></div>'

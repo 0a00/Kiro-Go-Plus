@@ -39,6 +39,7 @@
   "stats.inventoryDisabled": "已禁用",
   "stats.inventoryCredential": "凭据待修复",
   "stats.inventoryProfile": "Profile 异常",
+  "stats.inventoryProfileless": "缺少 Profile",
   "tabs.accounts": "账号",
   "tabs.overview": "概览",
   "tabs.settings": "设置",

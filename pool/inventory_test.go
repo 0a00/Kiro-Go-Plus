@@ -12,7 +12,7 @@ func TestInventorySnapshotPartitionsAndDeduplicatesAccounts(t *testing.T) {
 		t.Fatalf("config.Init: %v", err)
 	}
 	accounts := []config.Account{
-		{ID: "live", UserId: "user-live", Provider: "AzureAD", Enabled: true, AccessToken: "token"},
+		{ID: "live", UserId: "user-live", Enabled: true, AccessToken: "token"},
 		{ID: "cool", UserId: "user-cool", Enabled: true, AccessToken: "token"},
 		{ID: "quota", UserId: "user-quota", Enabled: true, AccessToken: "token", UsageCurrent: 100, UsageLimit: 100},
 		{ID: "expired", UserId: "user-expired", Enabled: true, AccessToken: "old", ExpiresAt: time.Now().Add(-time.Hour).Unix()},
@@ -41,8 +41,28 @@ func TestInventorySnapshotPartitionsAndDeduplicatesAccounts(t *testing.T) {
 	if got.Routable != 1 || got.Cooling != 1 || got.QuotaBlocked != 1 || got.CredentialIssue != 1 || got.ProfileIssue != 1 || got.Disabled != 1 || got.Banned != 1 {
 		t.Fatalf("unexpected inventory partition: %+v", got)
 	}
-	if sum := got.Routable + got.Cooling + got.QuotaBlocked + got.CredentialIssue + got.ProfileIssue + got.Disabled + got.Banned; sum != got.Total {
+	if sum := got.Routable + got.Cooling + got.QuotaBlocked + got.CredentialIssue + got.ProfileIssue + got.Profileless + got.Disabled + got.Banned; sum != got.Total {
 		t.Fatalf("inventory does not partition total: sum=%d total=%d", sum, got.Total)
+	}
+}
+
+func TestInventorySnapshotSeparatesProfilelessOAuthAccounts(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	accounts := []config.Account{
+		{ID: "profileless", UserId: "profileless", AuthMethod: "idc", Provider: "BuilderId", Enabled: true, AccessToken: "token"},
+		{ID: "profiled", UserId: "profiled", AuthMethod: "idc", Provider: "BuilderId", Enabled: true, AccessToken: "token", ProfileArn: "arn:aws:codewhisperer:us-east-1:123:profile/test"},
+	}
+	for _, account := range accounts {
+		if err := config.AddAccount(account); err != nil {
+			t.Fatalf("AddAccount(%s): %v", account.ID, err)
+		}
+	}
+	p := &AccountPool{accounts: accounts, refreshFailures: make(map[string]time.Time)}
+	got := p.InventorySnapshot()
+	if got.Routable != 1 || got.Profileless != 1 {
+		t.Fatalf("unexpected profile inventory: %+v", got)
 	}
 }
 

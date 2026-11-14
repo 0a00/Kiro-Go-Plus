@@ -325,6 +325,47 @@ func TestProfileUnavailableTemporarilyRemovesAccountFromSelection(t *testing.T) 
 	}
 }
 
+func TestProfilelessOAuthAccountsAreSkippedFromGenerationSelection(t *testing.T) {
+	initAccountSelectionConfig(t)
+	profileless := config.Account{
+		ID: "profileless-oauth", Enabled: true, AccessToken: "access-token",
+		AuthMethod: "idc", Provider: "BuilderId", Region: "us-east-1",
+	}
+	profiled := config.Account{
+		ID: "profiled-oauth", Enabled: true, AccessToken: "access-token",
+		AuthMethod: "idc", Provider: "BuilderId", Region: "us-east-1",
+		ProfileArn: "arn:aws:codewhisperer:us-east-1:123:profile/test",
+	}
+	apiKey := config.Account{
+		ID: "profileless-api-key", Enabled: true, AccessToken: "ksk-test",
+		AuthMethod: "api_key", KiroApiKey: "ksk-test", Region: "us-east-1",
+	}
+	p := newTestPool(profileless, profiled, apiKey)
+
+	for i := 0; i < 8; i++ {
+		got := p.GetNext()
+		if got == nil || got.ID == profileless.ID {
+			t.Fatalf("profileless OAuth account was selected: %+v", got)
+		}
+	}
+}
+
+func TestProfileUpdateRestoresProfilelessOAuthAccount(t *testing.T) {
+	initAccountSelectionConfig(t)
+	p := newTestPool(config.Account{
+		ID: "profile-restored", Enabled: true, AccessToken: "access-token",
+		AuthMethod: "idc", Provider: "BuilderId", Region: "us-east-1",
+	})
+	if got := p.GetNext(); got != nil {
+		t.Fatalf("profileless OAuth account was selectable before profile update: %+v", got)
+	}
+
+	p.UpdateProfileArn("profile-restored", "arn:aws:codewhisperer:us-east-1:123:profile/restored")
+	if got := p.GetNext(); got == nil || got.ID != "profile-restored" {
+		t.Fatalf("profile update did not restore generation selection: %+v", got)
+	}
+}
+
 func initWeightedRoutingTest(t *testing.T) {
 	t.Helper()
 	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
@@ -718,6 +759,7 @@ func TestAcquireForModelFallsBackToRefreshableExpiredAccount(t *testing.T) {
 		Enabled:      true,
 		AccessToken:  "old-access",
 		RefreshToken: "refreshable",
+		ProfileArn:   "arn:aws:codewhisperer:us-east-1:123:profile/expired",
 		ExpiresAt:    time.Now().Add(-time.Minute).Unix(),
 	})
 
@@ -742,6 +784,7 @@ func TestAcquireForModelPrefersReadyAccountOverRefreshableExpiredAccount(t *test
 			Enabled:      true,
 			AccessToken:  "old-access",
 			RefreshToken: "refreshable",
+			ProfileArn:   "arn:aws:codewhisperer:us-east-1:123:profile/expired",
 			ExpiresAt:    time.Now().Add(-time.Minute).Unix(),
 			Weight:       100,
 		},
@@ -774,6 +817,7 @@ func TestAcquireForModelSkipsExpiredAccountInRefreshFailureCooldown(t *testing.T
 		Enabled:      true,
 		AccessToken:  "old-access",
 		RefreshToken: "refreshable",
+		ProfileArn:   "arn:aws:codewhisperer:us-east-1:123:profile/expired",
 		ExpiresAt:    time.Now().Add(-time.Minute).Unix(),
 	})
 	p.SetRefreshFailureCooldown("expired", time.Now().Add(time.Minute))

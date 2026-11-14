@@ -149,6 +149,7 @@ func TestApiUpdateAccountReenableClearsHardCooldown(t *testing.T) {
 	}
 	if err := config.AddAccount(config.Account{
 		ID: "reenable", Enabled: true, RefreshToken: "refresh-token", AuthMethod: "social", Region: "us-east-1",
+		ProfileArn: "arn:aws:codewhisperer:us-east-1:123:profile/reenable",
 	}); err != nil {
 		t.Fatalf("AddAccount: %v", err)
 	}
