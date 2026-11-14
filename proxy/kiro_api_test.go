@@ -1,9 +1,9 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"io"
 	"kiro-go/config"
 	"net/http"
@@ -733,7 +733,7 @@ func TestEnsureRestProfileArnSuppressesUnsupportedBuilderIDLookup(t *testing.T) 
 	}
 }
 
-func TestCallKiroAPISkipsProfilelessOAuthBeforeDataPlane(t *testing.T) {
+func TestCallKiroAPIUsesLegacyRouteForProfilelessBuilderID(t *testing.T) {
 	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatalf("config.Init: %v", err)
 	}
@@ -747,8 +747,9 @@ func TestCallKiroAPISkipsProfilelessOAuthBeforeDataPlane(t *testing.T) {
 		kiroHttpStore.Store(previousStream)
 	})
 
-	var dataPlaneCalls atomic.Int32
+	var profileLookupCalls atomic.Int32
 	kiroRestHttpStore.Store(&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		profileLookupCalls.Add(1)
 		if req.URL.Path != "/ListAvailableProfiles" {
 			t.Fatalf("unexpected profile resolution path: %s", req.URL.Path)
 		}
@@ -758,21 +759,33 @@ func TestCallKiroAPISkipsProfilelessOAuthBeforeDataPlane(t *testing.T) {
 			Header:     make(http.Header),
 		}, nil
 	})})
+	var dataPlaneCalls atomic.Int32
 	kiroHttpStore.Store(&http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 		dataPlaneCalls.Add(1)
-		return nil, errors.New("generation data plane must not be called")
+		body := append(
+			awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "profileless-ok"}),
+			awsEventStreamFrame(t, "metadataEvent", map[string]interface{}{"stopReason": "end_turn"})...,
+		)
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(bytes.NewReader(body)),
+			Header:     make(http.Header),
+		}, nil
 	})})
 
+	var output strings.Builder
 	err := CallKiroAPI(&config.Account{
 		ID: "profileless-builder", AccessToken: "access-token", AuthMethod: "idc",
 		Provider: "BuilderId", Region: "us-east-1",
-	}, &KiroPayload{}, &KiroStreamCallback{})
-	upstreamErr, ok := asUpstreamError(err)
-	if !ok || upstreamErr.Kind != UpstreamErrorProfileUnavailable {
-		t.Fatalf("profileless generation error = %#v, want profile-unavailable upstream error", err)
+	}, &KiroPayload{}, &KiroStreamCallback{OnText: func(text string, _ bool) { output.WriteString(text) }})
+	if err != nil {
+		t.Fatalf("profileless generation failed: %v", err)
 	}
-	if dataPlaneCalls.Load() != 0 {
-		t.Fatalf("profileless generation reached data plane %d times", dataPlaneCalls.Load())
+	if profileLookupCalls.Load() != 0 {
+		t.Fatalf("profileless generation performed %d unnecessary profile lookups", profileLookupCalls.Load())
+	}
+	if dataPlaneCalls.Load() != 1 || output.String() != "profileless-ok" {
+		t.Fatalf("unexpected profileless generation result: calls=%d output=%q", dataPlaneCalls.Load(), output.String())
 	}
 }
 

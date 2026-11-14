@@ -360,6 +360,8 @@ Flush 成功不等于客户端已收到；这些计数不依赖完整详情开�
 此提示不会自动扩容或删除文件。本版无需迁移配置或凭据，回退 1.2.96 可恢复旧行为。
 生产测试会核对专用测试 Key 的日志，避免客户端自动重试掩盖 400 错误。
 
+1.3.5 修复 1.3.4 对无 profile ARN 的 OAuth/IDC 账号门控过严导致生成请求长时间轮询和超时的问题。无 profile 的账号可使用兼容的 Kiro IDE/Q 生成端点；Runtime 和 CodeWhisperer 仍在确实需要时校验 profile ARN。WebSearch/MCP 的 profile 要求保持不变，避免把元数据能力误判为生成能力。
+
 1.3.4 要求 OAuth/IDC 账号在生成和 WebSearch 请求前具备 profile ARN。无法解析 ARN 的账号只会暂时移出请求选择，不会被禁用或计入凭据失败，并在有界冷却后重新尝试；API Key 仍保留 key-bound 兼容端点。
 
 1.3.3 修复 Builder ID/IDC 的 `GetUsageLimits` 返回 `Invalid profileArn` 时被误判为账号刷新失败的问题。此类控制面元数据不可用只记录为部分刷新，仍可参与元数据刷新；Social、Token 撤销和封禁错误仍按硬失败处理。

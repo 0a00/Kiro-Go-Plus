@@ -60,12 +60,11 @@ var kiroEndpoints = []kiroEndpoint{
 		RequiresProfileArn: true,
 	},
 	{
-		Key:                "kiro",
-		URL:                "https://q.us-east-1.amazonaws.com/generateAssistantResponse",
-		Origin:             "AI_EDITOR",
-		AmzTarget:          "",
-		Name:               "Kiro IDE",
-		RequiresProfileArn: true,
+		Key:       "kiro",
+		URL:       "https://q.us-east-1.amazonaws.com/generateAssistantResponse",
+		Origin:    "AI_EDITOR",
+		AmzTarget: "",
+		Name:      "Kiro IDE",
 	},
 	{
 		Key:                "codewhisperer",
@@ -76,12 +75,11 @@ var kiroEndpoints = []kiroEndpoint{
 		RequiresProfileArn: true,
 	},
 	{
-		Key:                "amazonq",
-		URL:                "https://q.us-east-1.amazonaws.com/generateAssistantResponse",
-		Origin:             "AI_EDITOR",
-		AmzTarget:          "AmazonQDeveloperStreamingService.SendMessage",
-		Name:               "AmazonQ",
-		RequiresProfileArn: true,
+		Key:       "amazonq",
+		URL:       "https://q.us-east-1.amazonaws.com/generateAssistantResponse",
+		Origin:    "AI_EDITOR",
+		AmzTarget: "AmazonQDeveloperStreamingService.SendMessage",
+		Name:      "AmazonQ",
 	},
 }
 
@@ -892,7 +890,9 @@ func isProfilelessBuilderIDAccount(account *config.Account) bool {
 
 func accountAutoEndpointHint(account *config.Account) string {
 	if isProfilelessBuilderIDAccount(account) {
-		return "codewhisperer"
+		// Builder ID accounts commonly do not expose an IDE profile ARN. The
+		// Kiro IDE/Q route is the compatible generation path in that case.
+		return "kiro"
 	}
 	if accountPrefersRuntime(account) {
 		return "runtime"
@@ -901,23 +901,25 @@ func accountAutoEndpointHint(account *config.Account) string {
 }
 
 // API-key credentials use a key-bound upstream profile and do not expose the
-// OAuth profile ARN field. OAuth/IDC credentials must have an explicit profile
-// before generation or MCP requests are sent.
+// OAuth profile ARN field. Only endpoints known to require an IDE profile are
+// gated for OAuth/IDC accounts; the legacy Kiro IDE/Q routes remain usable for
+// profileless Builder ID credentials.
 func endpointRequiresProfileArnForAccount(endpoint kiroEndpoint, account *config.Account) bool {
 	return endpoint.RequiresProfileArn && !isKiroAPIKeyAccount(account)
 }
 
 func filterGenerationEndpointsForAccount(endpoints []kiroEndpoint, account *config.Account) []kiroEndpoint {
-	if !isKiroAPIKeyAccount(account) || strings.TrimSpace(account.ProfileArn) != "" {
+	if account == nil || strings.TrimSpace(account.ProfileArn) != "" {
 		return endpoints
 	}
 
-	// API keys use the key-bound Kiro/Q profile. Keep the legacy-compatible
-	// generation routes and do not silently broaden an API key to OAuth/runtime
-	// routes merely because those routes are marked profile-bound for OAuth.
+	// API keys use the key-bound Kiro/Q profile. OAuth/IDC credentials without
+	// a cached profile use the same legacy-compatible routes, while runtime and
+	// CodeWhisperer remain available only after profile resolution. This keeps a
+	// failed metadata lookup from turning the whole account pool unusable.
 	compatible := make([]kiroEndpoint, 0, len(endpoints))
 	for _, endpoint := range endpoints {
-		if endpoint.Key == "kiro" || endpoint.Key == "amazonq" || !endpoint.RequiresProfileArn {
+		if !endpoint.RequiresProfileArn {
 			compatible = append(compatible, endpoint)
 		}
 	}

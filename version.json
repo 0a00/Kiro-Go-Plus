@@ -1,5 +1,5 @@
 {
-  "version": "1.3.4",
-  "changelog": "Require profile ARN before OAuth/IDC generation and WebSearch requests, temporarily quarantine profileless accounts without disabling valid credentials, and preserve API-key compatibility routes.\n修复 OAuth/IDC 账号缺少 profile ARN 仍进入生成和 WebSearch 导致 400 的问题；缺 ARN 账号仅临时移出请求池，不禁用有效凭据，并保留 API Key 兼容端点。",
+  "version": "1.3.5",
+  "changelog": "Restore profileless OAuth/IDC generation through compatible Kiro IDE/Q routes while keeping profile-bound endpoints gated.\n修复 1.3.4 对无 profile ARN 的 OAuth/IDC 账号门控过严导致生成请求长时间轮询和超时的问题；兼容端点可直接使用，Runtime/CodeWhisperer 仍按能力要求校验。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }

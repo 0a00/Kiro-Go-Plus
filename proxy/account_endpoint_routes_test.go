@@ -94,29 +94,30 @@ func TestAPIKeyAccountEndpointsUseKeyBoundProfileCompatibility(t *testing.T) {
 	}
 }
 
-func TestProfilelessBuilderIDAccountKeepsOnlyProfileBoundGenerationRoutes(t *testing.T) {
+func TestProfilelessBuilderIDAccountUsesLegacyGenerationRoutes(t *testing.T) {
 	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatalf("init config: %v", err)
 	}
 	account := &config.Account{AuthMethod: "idc", Provider: "BuilderId", Region: "us-east-1"}
 	endpoints := getRequestEndpointsForAccount("auto", &KiroPayload{}, account)
-	if len(endpoints) == 0 || endpoints[0].Key != "codewhisperer" {
-		t.Fatalf("profileless Builder ID endpoint order = %+v, want profile-bound route first", endpoints)
+	if len(endpoints) == 0 || endpoints[0].Key != "kiro" {
+		t.Fatalf("profileless Builder ID endpoint order = %+v, want Kiro IDE first", endpoints)
 	}
 	for _, endpoint := range endpoints {
-		if !endpoint.RequiresProfileArn {
-			t.Fatalf("profileless Builder ID received a profile-less generation route: %+v", endpoints)
+		if endpoint.RequiresProfileArn {
+			t.Fatalf("profileless Builder ID received a profile-bound generation route: %+v", endpoints)
 		}
 	}
-	if got := accountAutoEndpointHint(account); got != "codewhisperer" {
-		t.Fatalf("profileless Builder ID hint = %q, want codewhisperer for observability", got)
+	if got := accountAutoEndpointHint(account); got != "kiro" {
+		t.Fatalf("profileless Builder ID hint = %q, want Kiro IDE compatibility route", got)
 	}
 }
 
-func TestAllGenerationEndpointsRequireProfileArnForOAuth(t *testing.T) {
+func TestOnlyProfileBoundGenerationEndpointsRequireProfileArnForOAuth(t *testing.T) {
 	for _, endpoint := range kiroEndpoints {
-		if !endpoint.RequiresProfileArn {
-			t.Fatalf("generation endpoint %q must require profileArn", endpoint.Key)
+		want := endpoint.Key == "runtime" || endpoint.Key == "codewhisperer"
+		if endpoint.RequiresProfileArn != want {
+			t.Fatalf("endpoint %q RequiresProfileArn=%v, want %v", endpoint.Key, endpoint.RequiresProfileArn, want)
 		}
 	}
 }

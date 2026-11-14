@@ -375,6 +375,13 @@ readable. See [test changes](docs/development-testing.md#1297-acceptance-changes
 
 Compose uses `/health`, so account exhaustion does not cause a restart loop. Reverse proxies and load balancers should use `/ready` when deciding whether to route new requests.
 
+1.3.5 fixes the overly strict 1.3.4 profile gate that made profileless OAuth/IDC
+generation spend the request budget rotating accounts. Profileless credentials
+may use the compatible Kiro IDE/Q generation routes; Runtime and CodeWhisperer
+remain gated when their capability requires a profile ARN. WebSearch/MCP profile
+requirements are unchanged so metadata capability is not confused with
+generation capability.
+
 1.3.4 requires a profile ARN before OAuth/IDC generation and WebSearch requests.
 Accounts that cannot resolve one are temporarily removed from request selection
 without being disabled or counted as credential failures, and are retried after
