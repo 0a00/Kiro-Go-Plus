@@ -96,6 +96,8 @@ type Handler struct {
 	backgroundWG      sync.WaitGroup
 	backgroundTaskMu  sync.Mutex
 	backgroundClosing bool
+	autoRefreshRunMu  sync.Mutex
+	autoRefreshCancel context.CancelFunc
 	stopOnce          sync.Once
 	closeOnce         sync.Once
 	// 模型缓存
@@ -597,6 +599,21 @@ func (h *Handler) refreshSelectedAccounts(selected []*config.Account, autoRefres
 func (h *Handler) refreshSelectedAccountsLocked(selected []*config.Account, autoRefresh config.AutoRefreshConfig) {
 	defer h.autoRefreshRunning.Store(false)
 
+	parent := h.backgroundCtx
+	if parent == nil {
+		parent = context.Background()
+	}
+	runCtx, cancel := context.WithCancel(parent)
+	h.autoRefreshRunMu.Lock()
+	h.autoRefreshCancel = cancel
+	h.autoRefreshRunMu.Unlock()
+	defer func() {
+		cancel()
+		h.autoRefreshRunMu.Lock()
+		h.autoRefreshCancel = nil
+		h.autoRefreshRunMu.Unlock()
+	}()
+
 	startedAt := time.Now()
 	h.beginAutoRefreshRun(startedAt.Unix(), len(selected))
 	if len(selected) == 0 {
@@ -613,14 +630,28 @@ func (h *Handler) refreshSelectedAccountsLocked(selected []*config.Account, auto
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for account := range jobs {
-				results <- h.refreshOneAccount(account, autoRefresh)
+			for {
+				select {
+				case <-runCtx.Done():
+					return
+				case account, ok := <-jobs:
+					if !ok {
+						return
+					}
+					results <- h.refreshOneAccountContext(runCtx, account, autoRefresh)
+				}
 			}
 		}()
 	}
 	for _, account := range selected {
 		select {
 		case jobs <- account:
+		case <-runCtx.Done():
+			close(jobs)
+			wg.Wait()
+			close(results)
+			h.finishAutoRefreshRun(startedAt, nil)
+			return
 		case <-h.stopRefresh:
 			close(jobs)
 			wg.Wait()
@@ -679,6 +710,14 @@ func boundedRefreshConcurrencyFor(total, configured int) int {
 }
 
 func (h *Handler) refreshOneAccount(account *config.Account, autoRefresh config.AutoRefreshConfig) (result autoRefreshAccountResult) {
+	parent := h.backgroundCtx
+	if parent == nil {
+		parent = context.Background()
+	}
+	return h.refreshOneAccountContext(parent, account, autoRefresh)
+}
+
+func (h *Handler) refreshOneAccountContext(ctx context.Context, account *config.Account, autoRefresh config.AutoRefreshConfig) (result autoRefreshAccountResult) {
 	startedAt := time.Now().Unix()
 	result = autoRefreshAccountResult{
 		AccountID:  account.ID,
@@ -711,7 +750,7 @@ func (h *Handler) refreshOneAccount(account *config.Account, autoRefresh config.
 			result.CooldownUntil = until
 			return result
 		}
-		if err := h.refreshAccountToken(account); err != nil {
+		if err := h.refreshAccountTokenContext(ctx, account); err != nil {
 			if isLocalConfigurationError(err) {
 				logger.Errorf("[BackgroundRefresh] Local IPv6 configuration prevents token refresh: %v", err)
 				result.Status = "failed"
@@ -758,15 +797,11 @@ func (h *Handler) refreshOneAccount(account *config.Account, autoRefresh config.
 		return result
 	}
 
-	parent := h.backgroundCtx
-	if parent == nil {
-		parent = context.Background()
-	}
 	taskTimeout := time.Duration(autoRefresh.RefreshTaskTimeoutSeconds) * time.Second
 	if taskTimeout < 10*time.Second {
 		taskTimeout = 120 * time.Second
 	}
-	infoCtx, cancel := context.WithTimeout(parent, taskTimeout)
+	infoCtx, cancel := context.WithTimeout(ctx, taskTimeout)
 	info, err := RefreshAccountInfoContext(infoCtx, account)
 	cancel()
 	if err != nil {
@@ -801,7 +836,23 @@ func (h *Handler) refreshAccountToken(account *config.Account) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	return h.refreshAccountTokenContext(ctx, account)
+}
+
+func (h *Handler) refreshAccountTokenContext(ctx context.Context, account *config.Account) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	return sharedTokenRefreshCoordinator.RefreshContext(ctx, account, true)
+}
+
+func (h *Handler) cancelAutoRefreshRun() {
+	h.autoRefreshRunMu.Lock()
+	cancel := h.autoRefreshCancel
+	h.autoRefreshRunMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 }
 
 func (h *Handler) dueAutoRefreshAccounts(accounts []config.Account, autoRefresh config.AutoRefreshConfig) []config.Account {
@@ -6940,6 +6991,10 @@ func (h *Handler) apiUpdateAutoRefresh(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
+	// A live run may have captured an older, much larger batch or concurrency
+	// setting. Cancel it so the new limits take effect on the next scheduler
+	// pass instead of allowing stale refresh work to starve API requests.
+	h.cancelAutoRefreshRun()
 	json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "config": config.GetAutoRefreshConfig()})
 }
 

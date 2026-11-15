@@ -795,6 +795,21 @@ func TestBoundedRefreshConcurrencyUsesProvidedSetting(t *testing.T) {
 	}
 }
 
+func TestCancelAutoRefreshRunSignalsCancellation(t *testing.T) {
+	h := &Handler{}
+	ctx, cancel := context.WithCancel(context.Background())
+	h.autoRefreshRunMu.Lock()
+	h.autoRefreshCancel = cancel
+	h.autoRefreshRunMu.Unlock()
+
+	h.cancelAutoRefreshRun()
+	select {
+	case <-ctx.Done():
+	default:
+		t.Fatal("active auto-refresh run was not canceled")
+	}
+}
+
 func TestTokenDueBypassesMetadataCooldownButNotTokenFailureCooldown(t *testing.T) {
 	now := time.Now()
 	account := config.Account{

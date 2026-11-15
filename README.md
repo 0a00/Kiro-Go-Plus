@@ -375,6 +375,10 @@ readable. See [test changes](docs/development-testing.md#1297-acceptance-changes
 
 Compose uses `/health`, so account exhaustion does not cause a restart loop. Reverse proxies and load balancers should use `/ready` when deciding whether to route new requests.
 
+1.3.8 cancels stale background refresh batches when refresh settings change and
+propagates cancellation through token and metadata refreshes, preventing an old
+large batch from occupying refresh resources.
+
 1.3.7 prevents background metadata refresh from repeatedly sending profileless
 OAuth/IDC credentials to an upstream usage endpoint that rejects them with
 `Invalid profileArn`. Token refresh remains enabled, metadata retries are
