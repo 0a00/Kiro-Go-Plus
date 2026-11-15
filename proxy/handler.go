@@ -874,6 +874,14 @@ func (h *Handler) dueAutoRefreshAccounts(accounts []config.Account, autoRefresh 
 		if account.AccessToken == "" && account.RefreshToken == "" && account.KiroApiKey == "" {
 			continue
 		}
+		// A profileless OAuth/IDC account is allowed one refresh attempt to
+		// discover its generation profile. Once that attempt has recorded a
+		// metadata checkpoint, defer it for the bounded profile retry window;
+		// otherwise an expired token keeps waking the scheduler indefinitely
+		// even though the account still cannot enter the generation pool.
+		if profilelessRefreshDeferred(&account, now) {
+			continue
+		}
 
 		tokenDue, _ := tokenRefreshUrgency(account, now.Unix(), refreshBefore)
 		if tokenDue {
@@ -889,11 +897,8 @@ func (h *Handler) dueAutoRefreshAccounts(accounts []config.Account, autoRefresh 
 			continue
 		}
 		if pool.AccountRequiresGenerationProfile(&account) {
-			// Retry profile discovery on a slow cadence, while still allowing an
-			// urgent token refresh through the branch above.
-			if account.LastRefresh != 0 && now.Sub(time.Unix(account.LastRefresh, 0)) < profilelessMetadataRetryInterval {
-				continue
-			}
+			// Retry profile discovery on a slow cadence. The deferred checkpoint
+			// branch above prevents an urgent token condition from bypassing it.
 			due = append(due, account)
 			continue
 		}
@@ -926,22 +931,32 @@ func (h *Handler) dueAutoRefreshAccounts(accounts []config.Account, autoRefresh 
 func (h *Handler) hasUrgentAutoRefreshAccount(autoRefresh config.AutoRefreshConfig) bool {
 	accounts := config.GetAccounts()
 	refreshBefore := tokenRefreshBeforeForConfig(autoRefresh)
-	now := time.Now().Unix()
+	now := time.Now()
 	for _, account := range accounts {
 		if !account.Enabled || (account.AccessToken == "" && account.RefreshToken == "") {
+			continue
+		}
+		if profilelessRefreshDeferred(&account, now) {
 			continue
 		}
 		// A token-refresh failure cooldown is an intentional backoff. Do not
 		// treat that account as urgent or the scheduler will launch an empty
 		// refresh pass on every 30-second tick until the cooldown expires.
-		if _, blocked := h.tokenRefreshBlockedByCooldown(account.ID, now); blocked {
+		if _, blocked := h.tokenRefreshBlockedByCooldown(account.ID, now.Unix()); blocked {
 			continue
 		}
-		if urgent, _ := tokenRefreshUrgency(account, now, refreshBefore); urgent {
+		if urgent, _ := tokenRefreshUrgency(account, now.Unix(), refreshBefore); urgent {
 			return true
 		}
 	}
 	return false
+}
+
+func profilelessRefreshDeferred(account *config.Account, now time.Time) bool {
+	if account == nil || !pool.AccountRequiresGenerationProfile(account) || account.LastRefresh == 0 {
+		return false
+	}
+	return now.Sub(time.Unix(account.LastRefresh, 0)) < profilelessMetadataRetryInterval
 }
 
 func tokenRefreshUrgency(account config.Account, now, refreshBefore int64) (bool, int64) {

@@ -689,7 +689,7 @@ func TestDueAutoRefreshAccountsFiltersAndUsesAdaptiveStaleness(t *testing.T) {
 		{ID: "fresh", Enabled: true, AccessToken: "token", LastUsed: now.Unix(), LastRefresh: now.Add(-5 * time.Minute).Unix()},
 		{ID: "active-stale", Enabled: true, AccessToken: "token", LastUsed: now.Unix(), LastRefresh: now.Add(-31 * time.Minute).Unix()},
 		{ID: "idle-fresh", Enabled: true, AccessToken: "token", LastRefresh: now.Add(-2 * time.Hour).Unix()},
-		{ID: "token-due", Enabled: true, AccessToken: "token", RefreshToken: "refresh", ExpiresAt: now.Add(time.Minute).Unix(), LastRefresh: now.Unix()},
+		{ID: "token-due", Enabled: true, AccessToken: "token", RefreshToken: "refresh", ProfileArn: "arn:aws:codewhisperer:profile/due", ExpiresAt: now.Add(time.Minute).Unix(), LastRefresh: now.Unix()},
 		{ID: "cooling", Enabled: true, AccessToken: "token", LastRefresh: 0},
 		{ID: "no-creds", Enabled: true},
 	}
@@ -727,6 +727,10 @@ func TestDueAutoRefreshAccountsDefersProfilelessMetadataRefresh(t *testing.T) {
 			AuthMethod: "idc", Provider: "BuilderId", LastUsed: now.Unix(),
 			LastRefresh: now.Unix(), ExpiresAt: now.Add(time.Minute).Unix(),
 		},
+		{
+			ID: "profileless-token-initial", Enabled: true, RefreshToken: "refresh",
+			AuthMethod: "idc", Provider: "BuilderId", LastUsed: now.Unix(),
+		},
 	}
 
 	due := h.dueAutoRefreshAccounts(accounts, autoRefresh)
@@ -734,8 +738,30 @@ func TestDueAutoRefreshAccountsDefersProfilelessMetadataRefresh(t *testing.T) {
 	for _, account := range due {
 		ids = append(ids, account.ID)
 	}
-	if got := strings.Join(ids, ","); got != "profileless-token-due,profileless-retry" {
+	if got := strings.Join(ids, ","); got != "profileless-token-initial,profileless-retry" {
 		t.Fatalf("unexpected profileless refresh schedule: %s", got)
+	}
+}
+
+func TestProfilelessRefreshDefersUrgentWakeupAfterCheckpoint(t *testing.T) {
+	now := time.Now()
+	account := config.Account{
+		ID: "profileless", Enabled: true, AccessToken: "token", RefreshToken: "refresh",
+		AuthMethod: "idc", Provider: "BuilderId", LastRefresh: now.Unix(),
+		ExpiresAt: now.Add(time.Minute).Unix(),
+	}
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	if err := config.AddAccount(account); err != nil {
+		t.Fatalf("config.AddAccount: %v", err)
+	}
+	h := &Handler{}
+	if due := h.dueAutoRefreshAccounts([]config.Account{account}, config.AutoRefreshConfig{TokenRefreshBeforeSeconds: 900}); len(due) != 0 {
+		t.Fatalf("profileless checkpoint should defer due account: %+v", due)
+	}
+	if h.hasUrgentAutoRefreshAccount(config.AutoRefreshConfig{TokenRefreshBeforeSeconds: 900}) {
+		t.Fatal("profileless checkpoint should not wake the scheduler")
 	}
 }
 
@@ -761,7 +787,7 @@ func TestAutoRefreshSelectionPrioritizesExpiringTokens(t *testing.T) {
 	accounts := []config.Account{
 		{ID: "regular", Enabled: true, AccessToken: "token", LastUsed: now.Unix(), LastRefresh: 0},
 		{ID: "expires-later", Enabled: true, AccessToken: "token", RefreshToken: "refresh", ExpiresAt: now.Add(time.Minute).Unix()},
-		{ID: "missing-token", Enabled: true, RefreshToken: "refresh", LastRefresh: now.Unix()},
+		{ID: "missing-token", Enabled: true, RefreshToken: "refresh", LastRefresh: 0},
 	}
 	due := h.dueAutoRefreshAccounts(accounts, autoRefresh)
 	selected := h.nextAutoRefreshAccounts(due, 2, autoRefresh)
@@ -814,7 +840,7 @@ func TestTokenDueBypassesMetadataCooldownButNotTokenFailureCooldown(t *testing.T
 	now := time.Now()
 	account := config.Account{
 		ID: "metadata-cooldown", Enabled: true, AccessToken: "access", RefreshToken: "refresh",
-		ExpiresAt: now.Add(time.Minute).Unix(), LastRefresh: now.Unix(),
+		ProfileArn: "arn:aws:codewhisperer:profile/metadata", ExpiresAt: now.Add(time.Minute).Unix(), LastRefresh: now.Unix(),
 	}
 	autoRefresh := config.AutoRefreshConfig{IntervalMinutes: 10, TokenRefreshBeforeSeconds: 1800}
 	h := &Handler{
@@ -829,7 +855,7 @@ func TestTokenDueBypassesMetadataCooldownButNotTokenFailureCooldown(t *testing.T
 	}
 	accounts := []config.Account{account, {
 		ID: "token-cooldown", Enabled: true, AccessToken: "access", RefreshToken: "refresh",
-		ExpiresAt: now.Add(time.Minute).Unix(), LastRefresh: now.Unix(),
+		ProfileArn: "arn:aws:codewhisperer:profile/token", ExpiresAt: now.Add(time.Minute).Unix(), LastRefresh: now.Unix(),
 	}}
 	due := h.dueAutoRefreshAccounts(accounts, autoRefresh)
 	if len(due) != 1 || due[0].ID != "metadata-cooldown" {
@@ -866,7 +892,7 @@ func TestAutoRefreshStatusCountsDueAndFailedAccounts(t *testing.T) {
 	}
 	now := time.Now()
 	accounts := []config.Account{
-		{ID: "token-due", Enabled: true, AccessToken: "token", RefreshToken: "refresh", ExpiresAt: now.Add(time.Minute).Unix(), LastRefresh: now.Unix()},
+		{ID: "token-due", Enabled: true, AccessToken: "token", RefreshToken: "refresh", ProfileArn: "arn:aws:codewhisperer:profile/due", ExpiresAt: now.Add(time.Minute).Unix(), LastRefresh: now.Unix()},
 		{ID: "stale", Enabled: true, AccessToken: "token", LastUsed: now.Unix(), LastRefresh: now.Add(-time.Hour).Unix()},
 		{ID: "fresh", Enabled: true, AccessToken: "token", LastUsed: now.Unix(), LastRefresh: now.Unix()},
 		{ID: "failed", Enabled: true, AccessToken: "token", LastRefresh: 0},
