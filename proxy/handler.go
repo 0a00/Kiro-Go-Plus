@@ -34,6 +34,7 @@ const tokenRefreshSkewSeconds int64 = 120
 const maxRequestBodyBytes int64 = 8 << 20
 const maxCredentialImportBatch = 5000
 const externalIdpImportMaxTrust = 15 * time.Minute
+const profilelessMetadataRetryInterval = 6 * time.Hour
 
 var claudeStreamHeartbeatInterval = 10 * time.Second
 
@@ -745,6 +746,17 @@ func (h *Handler) refreshOneAccount(account *config.Account, autoRefresh config.
 		result.CooldownUntil = until
 		return result
 	}
+	if pool.AccountRequiresGenerationProfile(account) {
+		// The generation profile is required before this identity can be routed,
+		// and the usage endpoint rejects profileless OAuth/IDC records. Keep the
+		// token refresh path alive, but avoid a guaranteed control-plane 400.
+		result.Reason = "profileArn required for metadata refresh"
+		result.Info = &config.AccountInfo{
+			LastRefresh:         time.Now().Unix(),
+			MetadataUnavailable: true,
+		}
+		return result
+	}
 
 	parent := h.backgroundCtx
 	if parent == nil {
@@ -823,6 +835,15 @@ func (h *Handler) dueAutoRefreshAccounts(accounts []config.Account, autoRefresh 
 			continue
 		}
 		if h.isAutoRefreshCooling(account.ID, now.Unix()) {
+			continue
+		}
+		if pool.AccountRequiresGenerationProfile(&account) {
+			// Retry profile discovery on a slow cadence, while still allowing an
+			// urgent token refresh through the branch above.
+			if account.LastRefresh != 0 && now.Sub(time.Unix(account.LastRefresh, 0)) < profilelessMetadataRetryInterval {
+				continue
+			}
+			due = append(due, account)
 			continue
 		}
 

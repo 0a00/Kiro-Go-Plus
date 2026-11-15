@@ -704,6 +704,56 @@ func TestDueAutoRefreshAccountsFiltersAndUsesAdaptiveStaleness(t *testing.T) {
 	}
 }
 
+func TestDueAutoRefreshAccountsDefersProfilelessMetadataRefresh(t *testing.T) {
+	now := time.Now()
+	h := &Handler{}
+	autoRefresh := config.AutoRefreshConfig{
+		IntervalMinutes:           10,
+		TokenRefreshBeforeSeconds: 900,
+	}
+	accounts := []config.Account{
+		{
+			ID: "profileless-recent", Enabled: true, AccessToken: "token",
+			AuthMethod: "idc", Provider: "BuilderId", LastUsed: now.Unix(),
+			LastRefresh: now.Add(-time.Hour).Unix(),
+		},
+		{
+			ID: "profileless-retry", Enabled: true, AccessToken: "token",
+			AuthMethod: "idc", Provider: "BuilderId", LastUsed: now.Unix(),
+			LastRefresh: now.Add(-7 * time.Hour).Unix(),
+		},
+		{
+			ID: "profileless-token-due", Enabled: true, AccessToken: "token", RefreshToken: "refresh",
+			AuthMethod: "idc", Provider: "BuilderId", LastUsed: now.Unix(),
+			LastRefresh: now.Unix(), ExpiresAt: now.Add(time.Minute).Unix(),
+		},
+	}
+
+	due := h.dueAutoRefreshAccounts(accounts, autoRefresh)
+	ids := make([]string, 0, len(due))
+	for _, account := range due {
+		ids = append(ids, account.ID)
+	}
+	if got := strings.Join(ids, ","); got != "profileless-token-due,profileless-retry" {
+		t.Fatalf("unexpected profileless refresh schedule: %s", got)
+	}
+}
+
+func TestRefreshOneAccountSkipsProfilelessMetadataRequest(t *testing.T) {
+	account := &config.Account{
+		ID: "profileless", Enabled: true, AccessToken: "token",
+		AuthMethod: "idc", Provider: "BuilderId",
+	}
+	h := &Handler{}
+	result := h.refreshOneAccount(account, config.AutoRefreshConfig{RefreshTaskTimeoutSeconds: 30})
+	if result.Status != "skipped" || result.Reason != "profileArn required for metadata refresh" {
+		t.Fatalf("unexpected profileless refresh result: %+v", result)
+	}
+	if result.Info == nil || !result.Info.MetadataUnavailable || result.Info.LastRefresh == 0 {
+		t.Fatalf("profileless refresh did not persist a metadata checkpoint: %+v", result.Info)
+	}
+}
+
 func TestAutoRefreshSelectionPrioritizesExpiringTokens(t *testing.T) {
 	now := time.Now()
 	h := &Handler{}

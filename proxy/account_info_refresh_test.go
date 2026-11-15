@@ -67,6 +67,7 @@ func TestBuilderIDUsage403BecomesPartialRefresh(t *testing.T) {
 	account := &config.Account{
 		ID: "builder-refresh", Enabled: true, AccessToken: "access-token",
 		AuthMethod: "idc", Provider: "BuilderId", Region: "us-east-1",
+		ProfileArn: "arn:aws:codewhisperer:us-east-1:123456789012:profile/test",
 	}
 	h := &Handler{backgroundCtx: context.Background(), autoRefreshFail: make(map[string]int64)}
 	result := h.refreshOneAccount(account, config.AutoRefreshConfig{
@@ -100,6 +101,7 @@ func TestBuilderIDInvalidProfileArnBecomesPartialRefresh(t *testing.T) {
 	account := &config.Account{
 		ID: "builder-invalid-profile", Enabled: true, AccessToken: "access-token",
 		AuthMethod: "idc", Provider: "BuilderId", Region: "us-east-1",
+		ProfileArn: "arn:aws:codewhisperer:us-east-1:123456789012:profile/test",
 	}
 	h := &Handler{backgroundCtx: context.Background(), autoRefreshFail: make(map[string]int64)}
 	result := h.refreshOneAccount(account, config.AutoRefreshConfig{

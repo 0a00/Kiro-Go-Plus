@@ -375,6 +375,13 @@ readable. See [test changes](docs/development-testing.md#1297-acceptance-changes
 
 Compose uses `/health`, so account exhaustion does not cause a restart loop. Reverse proxies and load balancers should use `/ready` when deciding whether to route new requests.
 
+1.3.7 prevents background metadata refresh from repeatedly sending profileless
+OAuth/IDC credentials to an upstream usage endpoint that rejects them with
+`Invalid profileArn`. Token refresh remains enabled, metadata retries are
+bounded, and accounts become routable automatically after a profile is obtained.
+API-key accounts remain selectable, and the admin inventory exposes a separate
+`profileless` count.
+
 1.3.6 prevents profileless OAuth/IDC credentials from entering generation
 selection while the upstream service requires a profile ARN. Background refresh
 continues to process these accounts, and they become selectable automatically
