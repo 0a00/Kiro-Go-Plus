@@ -4843,6 +4843,8 @@ func (h *Handler) apiGetAccounts(w http.ResponseWriter, r *http.Request) {
 			"authMethod":         a.AuthMethod,
 			"provider":           a.Provider,
 			"region":             a.Region,
+			"authRegion":         a.AuthRegion,
+			"apiRegion":          a.ApiRegion,
 			"profileArn":         a.ProfileArn,
 			"enabled":            a.Enabled,
 			"banStatus":          a.BanStatus,
@@ -5031,6 +5033,12 @@ func (h *Handler) apiUpdateAccount(w http.ResponseWriter, r *http.Request, id st
 	}
 	if v, ok := updates["machineId"].(string); ok {
 		patch.MachineId = &v
+	}
+	if v, ok := updates["authRegion"].(string); ok {
+		patch.AuthRegion = &v
+	}
+	if v, ok := updates["apiRegion"].(string); ok {
+		patch.ApiRegion = &v
 	}
 	if v, ok := updates["weight"].(float64); ok {
 		weight := int(v)
@@ -5606,6 +5614,8 @@ type importCredentialsRequest struct {
 	Region            string       `json:"region"`
 	AuthRegion        string       `json:"authRegion"`
 	AuthRegionAlt     string       `json:"auth_region"`
+	ApiRegion         string       `json:"apiRegion"`
+	ApiRegionAlt      string       `json:"api_region"`
 	StartUrl          string       `json:"startUrl"`
 	StartUrlAlt       string       `json:"start_url"`
 	ExpiresAt         int64        `json:"expiresAt"`
@@ -5638,6 +5648,8 @@ type importCredentialsRequest struct {
 		Region           string       `json:"region"`
 		AuthRegion       string       `json:"authRegion"`
 		AuthRegionAlt    string       `json:"auth_region"`
+		ApiRegion        string       `json:"apiRegion"`
+		ApiRegionAlt     string       `json:"api_region"`
 		StartUrl         string       `json:"startUrl"`
 		StartUrlAlt      string       `json:"start_url"`
 		ExpiresAt        int64        `json:"expiresAt"`
@@ -5847,6 +5859,12 @@ func normalizeNestedCredentialImport(req importCredentialsRequest) importCredent
 	if req.AuthRegionAlt == "" {
 		req.AuthRegionAlt = creds.AuthRegionAlt
 	}
+	if req.ApiRegion == "" {
+		req.ApiRegion = creds.ApiRegion
+	}
+	if req.ApiRegionAlt == "" {
+		req.ApiRegionAlt = creds.ApiRegionAlt
+	}
 	if req.StartUrl == "" {
 		req.StartUrl = creds.StartUrl
 	}
@@ -5875,10 +5893,14 @@ func normalizeImportedIDCMetadata(req *importCredentialsRequest) {
 	if req == nil || !strings.EqualFold(strings.TrimSpace(req.AuthMethod), "idc") {
 		return
 	}
-	if region := strings.TrimSpace(req.AuthRegion); region != "" {
-		req.Region = region
-	} else if region := strings.TrimSpace(req.AuthRegionAlt); region != "" {
-		req.Region = region
+	// Keep the legacy region and the explicit authRegion independent. The
+	// latter is an OIDC override; overwriting region here loses the API-region
+	// information carried by newer Kiro credential exports.
+	if strings.TrimSpace(req.AuthRegion) == "" {
+		req.AuthRegion = strings.TrimSpace(req.AuthRegionAlt)
+	}
+	if strings.TrimSpace(req.ApiRegion) == "" {
+		req.ApiRegion = strings.TrimSpace(req.ApiRegionAlt)
 	}
 	if strings.TrimSpace(req.StartUrl) == "" {
 		req.StartUrl = strings.TrimSpace(req.StartUrlAlt)
@@ -6171,6 +6193,16 @@ func (h *Handler) prepareCredentialsAccountContextWithRecovery(ctx context.Conte
 		if regionErr != nil {
 			return config.Account{}, newCredentialImportError(http.StatusBadRequest, regionErr.Error())
 		}
+		if req.AuthRegion != "" {
+			if req.AuthRegion, regionErr = awsregion.Normalize(req.AuthRegion); regionErr != nil {
+				return config.Account{}, newCredentialImportError(http.StatusBadRequest, "authRegion: "+regionErr.Error())
+			}
+		}
+		if req.ApiRegion != "" {
+			if req.ApiRegion, regionErr = awsregion.Normalize(req.ApiRegion); regionErr != nil {
+				return config.Account{}, newCredentialImportError(http.StatusBadRequest, "apiRegion: "+regionErr.Error())
+			}
+		}
 		if req.Provider == "" {
 			req.Provider = "API Key"
 		}
@@ -6182,6 +6214,8 @@ func (h *Handler) prepareCredentialsAccountContextWithRecovery(ctx context.Conte
 			AuthMethod:  "api_key",
 			Provider:    req.Provider,
 			Region:      req.Region,
+			AuthRegion:  req.AuthRegion,
+			ApiRegion:   req.ApiRegion,
 			Enabled:     true,
 			MachineId:   config.GenerateMachineId(),
 		}
@@ -6190,7 +6224,8 @@ func (h *Handler) prepareCredentialsAccountContextWithRecovery(ctx context.Conte
 		return account, nil
 	}
 
-	// OAuth credentials default to the historical OIDC/data-plane region.
+	// OAuth credentials default to the historical OIDC region. API routing is
+	// independent and uses ApiRegion when a credential export provides it.
 	if req.Region == "" {
 		req.Region = "us-east-1"
 	}
@@ -6198,6 +6233,16 @@ func (h *Handler) prepareCredentialsAccountContextWithRecovery(ctx context.Conte
 	req.Region, regionErr = awsregion.Normalize(req.Region)
 	if regionErr != nil {
 		return config.Account{}, newCredentialImportError(http.StatusBadRequest, regionErr.Error())
+	}
+	if req.AuthRegion != "" {
+		if req.AuthRegion, regionErr = awsregion.Normalize(req.AuthRegion); regionErr != nil {
+			return config.Account{}, newCredentialImportError(http.StatusBadRequest, "authRegion: "+regionErr.Error())
+		}
+	}
+	if req.ApiRegion != "" {
+		if req.ApiRegion, regionErr = awsregion.Normalize(req.ApiRegion); regionErr != nil {
+			return config.Account{}, newCredentialImportError(http.StatusBadRequest, "apiRegion: "+regionErr.Error())
+		}
 	}
 	if req.AuthMethod == "external_idp" {
 		if req.TokenEndpoint == "" {
@@ -6245,6 +6290,7 @@ func (h *Handler) prepareCredentialsAccountContextWithRecovery(ctx context.Conte
 			RefreshToken: req.RefreshToken, ClientID: req.ClientID,
 			ClientSecret: req.ClientSecret, AuthMethod: req.AuthMethod,
 			Region: req.Region, StartUrl: req.StartUrl, TokenEndpoint: req.TokenEndpoint,
+			AuthRegion: req.AuthRegion, ApiRegion: req.ApiRegion,
 			IssuerURL: req.IssuerURL, Scopes: string(req.Scopes),
 		}
 		var newRefreshToken string
@@ -6304,6 +6350,8 @@ func (h *Handler) prepareCredentialsAccountContextWithRecovery(ctx context.Conte
 		AuthMethod:    req.AuthMethod,
 		Provider:      req.Provider,
 		Region:        req.Region,
+		AuthRegion:    req.AuthRegion,
+		ApiRegion:     req.ApiRegion,
 		StartUrl:      req.StartUrl,
 		ExpiresAt:     expiresAt,
 		Enabled:       true,
@@ -8025,6 +8073,8 @@ func (h *Handler) apiGetAccountFull(w http.ResponseWriter, r *http.Request, id s
 		"authMethod":         account.AuthMethod,
 		"provider":           account.Provider,
 		"region":             account.Region,
+		"authRegion":         account.AuthRegion,
+		"apiRegion":          account.ApiRegion,
 		"profileArn":         account.ProfileArn,
 		"tokenEndpoint":      account.TokenEndpoint,
 		"issuerUrl":          account.IssuerURL,
@@ -8103,6 +8153,8 @@ func (h *Handler) apiExportAccountCredentials(w http.ResponseWriter, r *http.Req
 			"authMethod":    account.AuthMethod,
 			"provider":      account.Provider,
 			"region":        account.Region,
+			"authRegion":    account.AuthRegion,
+			"apiRegion":     account.ApiRegion,
 			"startUrl":      account.StartUrl,
 			"profileArn":    account.ProfileArn,
 			"tokenEndpoint": account.TokenEndpoint,
@@ -8796,6 +8848,8 @@ func (h *Handler) apiExportAccounts(w http.ResponseWriter, r *http.Request) {
 		ClientID      string `json:"clientId,omitempty"`
 		ClientSecret  string `json:"clientSecret,omitempty"`
 		Region        string `json:"region,omitempty"`
+		AuthRegion    string `json:"authRegion,omitempty"`
+		ApiRegion     string `json:"apiRegion,omitempty"`
 		StartUrl      string `json:"startUrl,omitempty"`
 		ExpiresAt     int64  `json:"expiresAt"`
 		AuthMethod    string `json:"authMethod,omitempty"`
@@ -8888,6 +8942,8 @@ func (h *Handler) apiExportAccounts(w http.ResponseWriter, r *http.Request) {
 				ClientID:      a.ClientID,
 				ClientSecret:  a.ClientSecret,
 				Region:        a.Region,
+				AuthRegion:    a.AuthRegion,
+				ApiRegion:     a.ApiRegion,
 				StartUrl:      a.StartUrl,
 				ExpiresAt:     a.ExpiresAt * 1000, // 转为毫秒时间戳
 				AuthMethod:    authMethod,

@@ -1257,6 +1257,39 @@ func TestAccountEndpointPreferencePatchValidatesAndPersists(t *testing.T) {
 	}
 }
 
+func TestAccountRegionOverridesValidateAndPersistIndependently(t *testing.T) {
+	if err := Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	if err := AddAccount(Account{
+		ID: "region-overrides", Region: "us-east-1", AuthRegion: "us-east-1", ApiRegion: "us-east-1",
+		AccessToken: "access", RefreshToken: "refresh", Enabled: true,
+	}); err != nil {
+		t.Fatalf("add account: %v", err)
+	}
+	authRegion := "EU-NORTH-1"
+	apiRegion := "EU-CENTRAL-1"
+	updated, err := PatchAccountAdmin("region-overrides", AccountAdminPatch{
+		AuthRegion: &authRegion, ApiRegion: &apiRegion,
+	})
+	if err != nil {
+		t.Fatalf("patch account regions: %v", err)
+	}
+	if updated.Region != "us-east-1" || updated.AuthRegion != "eu-north-1" || updated.ApiRegion != "eu-central-1" {
+		t.Fatalf("unexpected independent regions: %+v", updated)
+	}
+	if updated.AccessToken != "access" || updated.RefreshToken != "refresh" {
+		t.Fatalf("region patch replaced credentials: %+v", updated)
+	}
+	bad := "not a region"
+	if _, err := PatchAccountAdmin("region-overrides", AccountAdminPatch{AuthRegion: &bad}); err == nil {
+		t.Fatal("invalid auth region was accepted")
+	}
+	if got := GetAccounts()[0]; got.AuthRegion != "eu-north-1" || got.ApiRegion != "eu-central-1" {
+		t.Fatalf("invalid patch changed persisted regions: %+v", got)
+	}
+}
+
 func TestClearAccountBanUsesPersistedReasonForAutoEnable(t *testing.T) {
 	if err := Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatalf("init config: %v", err)

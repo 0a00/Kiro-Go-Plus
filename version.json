@@ -1,5 +1,5 @@
 {
-  "version": "1.3.10",
-  "changelog": "Route profileless OAuth/IDC accounts through compatible Kiro IDE/Q generation endpoints while keeping profile-bound endpoints and WebSearch gated.\n无 Profile 的 OAuth/IDC 账号可通过兼容的 Kiro IDE/Q 生成端点路由，同时继续限制必须 Profile 的端点和 WebSearch。",
+  "version": "1.3.11",
+  "changelog": "Keep OAuth authentication and Kiro API regions independent, preserve profileless account generation, and retain region metadata across import, refresh, export, and admin edits.\n分离 OAuth 认证区域与 Kiro API 数据面区域，保留无 Profile 账号的生成能力，并在导入、刷新、导出和后台编辑中完整保留区域信息。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }

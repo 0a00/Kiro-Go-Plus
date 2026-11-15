@@ -34,7 +34,7 @@ Prompt Cache accounting does not cache model response bodies or reduce Kiro requ
 
 Token-budget precedence is: explicit request values, per-model registry values, global Web defaults, then automatic model detection. Supported request overrides include `max_tokens`, `max_completion_tokens`, `max_output_tokens`, `context_window`, and `max_input_tokens` where applicable. Dynamic model entries may also set `maxToolTokens` for long-tool guidance and fallback decisions.
 
-Credential import narrowly repairs exports labeled as generic `social` when the provider is `BuilderId` or `Enterprise` and refresh token, client ID, and client secret are all present. The backend validates IDC first and retries Social once only for a clear authentication mismatch; timeouts, rate limits, upstream blocks, and server errors never trigger this fallback. AWS regions and successful token responses are validated before persistence, and Web uploads normalize camelCase and snake_case exports.
+Credential import narrowly repairs exports labeled as generic `social` when the provider is `BuilderId` or `Enterprise` and refresh token, client ID, and client secret are all present. The backend validates IDC first and retries Social once only for a clear authentication mismatch; timeouts, rate limits, upstream blocks, and server errors never trigger this fallback. AWS regions and successful token responses are validated before persistence, and Web uploads normalize camelCase and snake_case exports. Newer exports may provide independent `authRegion` and `apiRegion` fields: the former is used only for token refresh, while the latter selects the API data plane when no profile ARN overrides it. Without an explicit `apiRegion`, OAuth keeps its historical data-plane default.
 
 ## Web Administration
 
@@ -374,6 +374,10 @@ restores the prior validation/logging and removes the warning; old data remains
 readable. See [test changes](docs/development-testing.md#1297-acceptance-changes).
 
 Compose uses `/health`, so account exhaustion does not cause a restart loop. Reverse proxies and load balancers should use `/ready` when deciding whether to route new requests.
+
+1.3.11 keeps OAuth authentication and Kiro API data-plane regions independent,
+preserves region metadata across import, refresh, export, and admin edits, and
+adds normalization and regression coverage for profileless credentials.
 
 1.3.10 restores generation routing for profileless OAuth/IDC accounts when a
 compatible Kiro IDE/Q endpoint is available. Runtime, CodeWhisperer, and

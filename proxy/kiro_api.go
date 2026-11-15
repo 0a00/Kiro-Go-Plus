@@ -95,8 +95,12 @@ func kiroRegionForProfile(account *config.Account, profileArn string) string {
 		if region := regionFromProfileArn(account.ProfileArn); region != "" {
 			return region
 		}
+		if region := account.EffectiveAPIRegion(); region != "" {
+			return region
+		}
 		// API key credentials use Region for the CLI runtime data plane.
-		// OAuth credentials use Region for authentication only.
+		// OAuth credentials without an explicit API region retain the historical
+		// us-east-1 legacy route; their auth region is not a data-plane hint.
 		if isKiroAPIKeyAccount(account) {
 			if region := strings.TrimSpace(account.Region); region != "" {
 				return region

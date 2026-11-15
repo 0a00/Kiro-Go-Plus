@@ -34,7 +34,7 @@ Prompt Cache 统计不会缓存模型响应正文或减少 Kiro 请求。`offici
 
 Token 预算优先级为：请求显式参数、模型专属配置、Web 全局默认、模型自动识别。按协议支持 `max_tokens`、`max_completion_tokens`、`max_output_tokens`、`context_window` 和 `max_input_tokens` 等覆盖参数。动态模型还可配置 `maxToolTokens`，用于长工具提示和备用模型判断。
 
-凭据导入只会纠正一种明确矛盾：`authMethod` 为通用 `social`、Provider 为 `BuilderId` 或 `Enterprise`，并且 Refresh Token、Client ID、Client Secret 全部存在。后端先验证 IdC，仅在明确的认证类型不匹配时尝试一次 Social；超时、限流、上游拦截和服务端错误不会触发回退。持久化前会校验 AWS Region 和成功 Token 响应，Web 上传同时兼容 camelCase 与 snake_case 导出。
+凭据导入只会纠正一种明确矛盾：`authMethod` 为通用 `social`、Provider 为 `BuilderId` 或 `Enterprise`，并且 Refresh Token、Client ID、Client Secret 全部存在。后端先验证 IdC，仅在明确的认证类型不匹配时尝试一次 Social；超时、限流、上游拦截和服务端错误不会触发回退。持久化前会校验 AWS Region 和成功 Token 响应，Web 上传同时兼容 camelCase 与 snake_case 导出。新版凭据可分别提供 `authRegion` 和 `apiRegion`：前者仅用于 Token 刷新，后者仅用于无 Profile ARN 时的 API 数据面路由；没有显式 `apiRegion` 时保留 OAuth 的历史默认数据面行为。
 
 ## Web 管理
 
@@ -359,6 +359,8 @@ Flush 成功不等于客户端已收到；这些计数不依赖完整详情开�
 归档容量使用达到 90% 时显示预警；容量限制可能先于保留天数淘汰旧日志。
 此提示不会自动扩容或删除文件。本版无需迁移配置或凭据，回退 1.2.96 可恢复旧行为。
 生产测试会核对专用测试 Key 的日志，避免客户端自动重试掩盖 400 错误。
+
+1.3.11 分离 OAuth 认证区域与 Kiro API 数据面区域，修复导入时 `authRegion` 被错误写入旧 `region` 导致刷新区域丢失的问题；区域信息现在会在批量导入、Token 刷新、导出和后台单账号编辑中保留，并增加规范化与回归测试。
 
 1.3.10 修复无 Profile 的 OAuth/IDC 账号被账号池全局剔除的问题。自动或允许端点回退时，账号优先通过兼容的 Kiro IDE/Q 生成端点使用；Runtime、CodeWhisperer 和 WebSearch/MCP 仍按 Profile 要求处理。明确关闭端点回退且固定到 Profile 端点时，账号继续被保护性跳过。
 

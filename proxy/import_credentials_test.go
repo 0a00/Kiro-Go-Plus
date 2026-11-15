@@ -531,7 +531,8 @@ func TestApiImportCredentialsRecoversEnterpriseIDCMetadata(t *testing.T) {
 			"clientSecret": %s,
 			"authMethod": "idc",
 			"region": "us-east-1",
-			"authRegion": "eu-north-1"
+			"authRegion": "eu-north-1",
+			"apiRegion": "eu-central-1"
 		}
 	}`, strconv.Quote(clientSecret))
 	rec := httptest.NewRecorder()
@@ -548,7 +549,7 @@ func TestApiImportCredentialsRecoversEnterpriseIDCMetadata(t *testing.T) {
 		t.Fatalf("account count = %d, want 1", len(accounts))
 	}
 	account := accounts[0]
-	if account.Region != "eu-north-1" || account.StartUrl != "https://d-1234567890.awsapps.com/start" {
+	if account.Region != "us-east-1" || account.AuthRegion != "eu-north-1" || account.ApiRegion != "eu-central-1" || account.StartUrl != "https://d-1234567890.awsapps.com/start" {
 		t.Fatalf("enterprise IDC metadata was not retained: %+v", account)
 	}
 	if account.Provider != "Enterprise" || account.AuthMethod != "idc" {

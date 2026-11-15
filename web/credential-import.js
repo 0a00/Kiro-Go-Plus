@@ -56,6 +56,7 @@
       provider: firstCredentialValue(credentials.provider, credentials.idp, record.provider, record.idp),
       region: firstCredentialValue(credentials.region, record.region),
       authRegion: firstCredentialValue(credentials.authRegion, credentials.auth_region, record.authRegion, record.auth_region),
+      apiRegion: firstCredentialValue(credentials.apiRegion, credentials.api_region, record.apiRegion, record.api_region),
       startUrl: firstCredentialValue(credentials.startUrl, credentials.start_url, record.startUrl, record.start_url),
       expiresAt: firstCredentialValue(credentials.expiresAt, credentials.expires_at, record.expiresAt, record.expires_at),
       profileArn: firstCredentialValue(credentials.profileArn, credentials.profile_arn, record.profileArn, record.profile_arn),

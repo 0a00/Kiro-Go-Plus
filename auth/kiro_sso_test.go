@@ -165,6 +165,45 @@ func TestExternalIdpAuthorizeURLOmitsEmptyLoginHint(t *testing.T) {
 	}
 }
 
+func TestRefreshTokenUsesExplicitAuthRegion(t *testing.T) {
+	var gotRegion string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("expected POST, got %s", r.Method)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"accessToken":"access-new","refreshToken":"refresh-new","expiresIn":3600}`))
+	}))
+	defer server.Close()
+
+	oldURL := GetOIDCTokenURLForTest()
+	SetOIDCTokenURLForTest(func(region string) string {
+		gotRegion = region
+		return server.URL
+	})
+	defer SetOIDCTokenURLForTest(oldURL)
+	oldClient := SetGlobalAuthClientForTest(server.Client())
+	defer SetGlobalAuthClientForTest(oldClient)
+
+	access, refresh, expiresAt, _, err := RefreshTokenContext(context.Background(), &config.Account{
+		AuthMethod:   "idc",
+		Region:       "us-east-1",
+		AuthRegion:   "EU-NORTH-1",
+		ClientID:     "client-id",
+		ClientSecret: "client-secret",
+		RefreshToken: "refresh-old",
+	})
+	if err != nil {
+		t.Fatalf("refresh with explicit auth region: %v", err)
+	}
+	if gotRegion != "eu-north-1" {
+		t.Fatalf("refresh region = %q, want eu-north-1", gotRegion)
+	}
+	if access != "access-new" || refresh != "refresh-new" || expiresAt <= time.Now().Unix() {
+		t.Fatalf("unexpected refreshed credentials: access=%q refresh=%q expiresAt=%d", access, refresh, expiresAt)
+	}
+}
+
 func testJWT(payload string) string {
 	encode := func(value string) string {
 		return base64.RawURLEncoding.EncodeToString([]byte(value))

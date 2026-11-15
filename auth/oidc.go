@@ -64,10 +64,11 @@ func RefreshTokenContext(ctx context.Context, account *config.Account) (string, 
 	if strings.EqualFold(strings.TrimSpace(account.AuthMethod), "external_idp") {
 		return refreshExternalIdpToken(ctx, account.RefreshToken, account.ClientID, account.TokenEndpoint, account.Scopes, client)
 	}
+	region := account.EffectiveAuthRegion()
 	if strings.EqualFold(strings.TrimSpace(account.AuthMethod), "social") {
-		return refreshSocialToken(ctx, account.RefreshToken, client)
+		return refreshSocialTokenAtRegion(ctx, account.RefreshToken, region, client)
 	}
-	return refreshOIDCToken(ctx, account.RefreshToken, account.ClientID, account.ClientSecret, account.Region, client)
+	return refreshOIDCToken(ctx, account.RefreshToken, account.ClientID, account.ClientSecret, region, client)
 }
 
 func refreshExternalIdpToken(ctx context.Context, refreshToken, clientID, tokenEndpoint, scopes string, client *http.Client) (string, string, int64, string, error) {
@@ -198,14 +199,29 @@ func refreshOIDCToken(ctx context.Context, refreshToken, clientID, clientSecret,
 
 // refreshSocialToken Social (GitHub/Google) token 刷新
 func refreshSocialToken(ctx context.Context, refreshToken string, client *http.Client) (string, string, int64, string, error) {
-	url := socialTokenURL()
+	return refreshSocialTokenAtRegion(ctx, refreshToken, "us-east-1", client)
+}
+
+func refreshSocialTokenAtRegion(ctx context.Context, refreshToken, region string, client *http.Client) (string, string, int64, string, error) {
+	if region == "" {
+		region = "us-east-1"
+	}
+	var err error
+	region, err = awsregion.Normalize(region)
+	if err != nil {
+		return "", "", 0, "", err
+	}
+	refreshURL := socialTokenURL()
+	if region != "us-east-1" {
+		refreshURL = fmt.Sprintf("https://prod.%s.auth.desktop.kiro.dev/refreshToken", region)
+	}
 
 	payload := map[string]string{
 		"refreshToken": refreshToken,
 	}
 
 	body, _ := json.Marshal(payload)
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, "POST", refreshURL, bytes.NewReader(body))
 	if err != nil {
 		return "", "", 0, "", err
 	}

@@ -60,7 +60,9 @@ type Account struct {
 	CredentialFingerprint string `json:"credentialFingerprint,omitempty"`
 	AuthMethod            string `json:"authMethod"`           // Authentication method: "idc", "social", "external_idp", or "api_key"
 	Provider              string `json:"provider,omitempty"`   // Identity provider name (e.g., "BuilderId", "GitHub", "AzureAD")
-	Region                string `json:"region"`               // AWS region for OIDC endpoints
+	Region                string `json:"region"`               // Legacy credential region; used as the auth-region fallback
+	AuthRegion            string `json:"authRegion,omitempty"` // AWS region used for OAuth/OIDC token refresh
+	ApiRegion             string `json:"apiRegion,omitempty"`  // AWS region used for Kiro API requests when no profile ARN overrides it
 	StartUrl              string `json:"startUrl,omitempty"`   // AWS SSO start URL
 	ExpiresAt             int64  `json:"expiresAt,omitempty"`  // Token expiration timestamp (Unix seconds)
 	MachineId             string `json:"machineId,omitempty"`  // UUID machine identifier for request tracking
@@ -652,7 +654,7 @@ const (
 )
 
 // Version current version
-const Version = "1.3.10"
+const Version = "1.3.11"
 
 // Kiro client versions are sent in the outbound KiroIDE user-agent. Keep the
 // default above the service's published minimum; operators can still override
@@ -1063,6 +1065,27 @@ func normalizeKiroAPIKeyAccount(account *Account) {
 		account.ExpiresAt = 0
 	}
 	normalizeAccountCredentialFingerprint(account)
+}
+
+// EffectiveAuthRegion returns the credential region used by token refresh.
+// AuthRegion was added after Region; old imports continue to use Region.
+func (account Account) EffectiveAuthRegion() string {
+	if region := strings.TrimSpace(account.AuthRegion); region != "" {
+		return region
+	}
+	if region := strings.TrimSpace(account.Region); region != "" {
+		return region
+	}
+	return "us-east-1"
+}
+
+// EffectiveAPIRegion returns an explicit API region when one is available.
+// Profile ARN and legacy OAuth routing are resolved by the proxy layer.
+func (account Account) EffectiveAPIRegion() string {
+	if region := strings.TrimSpace(account.ApiRegion); region != "" {
+		return region
+	}
+	return ""
 }
 
 func normalizeAccountEndpointPreference(value string) string {
@@ -2917,6 +2940,8 @@ type AccountAdminPatch struct {
 	Enabled            *bool
 	Nickname           *string
 	MachineId          *string
+	AuthRegion         *string
+	ApiRegion          *string
 	Weight             *int
 	Priority           *int
 	MaxConcurrency     *int
@@ -2949,6 +2974,28 @@ func PatchAccountAdmin(id string, patch AccountAdminPatch) (Account, error) {
 		}
 		if patch.MachineId != nil {
 			candidate.MachineId = *patch.MachineId
+		}
+		if patch.AuthRegion != nil {
+			value := strings.TrimSpace(*patch.AuthRegion)
+			if value != "" {
+				normalized, err := awsregion.Normalize(value)
+				if err != nil {
+					return Account{}, fmt.Errorf("authRegion: %w", err)
+				}
+				value = normalized
+			}
+			candidate.AuthRegion = value
+		}
+		if patch.ApiRegion != nil {
+			value := strings.TrimSpace(*patch.ApiRegion)
+			if value != "" {
+				normalized, err := awsregion.Normalize(value)
+				if err != nil {
+					return Account{}, fmt.Errorf("apiRegion: %w", err)
+				}
+				value = normalized
+			}
+			candidate.ApiRegion = value
 		}
 		if patch.Weight != nil {
 			if *patch.Weight < 0 || *patch.Weight > 100 {
@@ -3170,6 +3217,12 @@ func mergeAccountDefaults(account *Account, existing Account) {
 	}
 	if account.ProfileArn == "" {
 		account.ProfileArn = existing.ProfileArn
+	}
+	if account.AuthRegion == "" {
+		account.AuthRegion = existing.AuthRegion
+	}
+	if account.ApiRegion == "" {
+		account.ApiRegion = existing.ApiRegion
 	}
 	if account.TokenEndpoint == "" {
 		account.TokenEndpoint = existing.TokenEndpoint

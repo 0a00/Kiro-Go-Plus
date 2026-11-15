@@ -83,6 +83,31 @@ func TestRegionalizeURLDoesNotUseOAuthAuthenticationRegion(t *testing.T) {
 	}
 }
 
+func TestRegionalizeURLUsesExplicitOAuthAPIRegion(t *testing.T) {
+	account := &config.Account{
+		AuthMethod: "idc",
+		Region:     "us-east-1",
+		AuthRegion: "eu-north-1",
+		ApiRegion:  "eu-central-1",
+	}
+	want := "https://q.eu-central-1.amazonaws.com/generateAssistantResponse"
+	if got := regionalizeURL("https://q.us-east-1.amazonaws.com/generateAssistantResponse", account); got != want {
+		t.Fatalf("explicit OAuth API region URL = %q, want %q", got, want)
+	}
+}
+
+func TestRegionalizeURLProfileArnStillWinsOverExplicitOAuthAPIRegion(t *testing.T) {
+	account := &config.Account{
+		AuthMethod: "idc",
+		ApiRegion:  "eu-central-1",
+		ProfileArn: "arn:aws:codewhisperer:us-west-2:123456789012:profile/test",
+	}
+	want := "https://q.us-west-2.amazonaws.com/generateAssistantResponse"
+	if got := regionalizeURL("https://q.us-east-1.amazonaws.com/generateAssistantResponse", account); got != want {
+		t.Fatalf("profile ARN did not win over explicit API region: got %q, want %q", got, want)
+	}
+}
+
 func TestRegionalizeURLUsesAPIKeyDataPlaneRegion(t *testing.T) {
 	account := &config.Account{AuthMethod: "api_key", KiroApiKey: "ksk_test", Region: "eu-central-1"}
 	want := "https://q.eu-central-1.amazonaws.com/generateAssistantResponse"

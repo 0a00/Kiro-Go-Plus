@@ -195,6 +195,29 @@ func TestDecodeImportCredentialsAcceptsScopesStringOrArray(t *testing.T) {
 	}
 }
 
+func TestNormalizeImportedIDCMetadataPreservesIndependentRegions(t *testing.T) {
+	req := normalizeNestedCredentialImport(importCredentialsRequest{
+		AuthMethod:    "idc",
+		Region:        "us-east-1",
+		AuthRegionAlt: "eu-north-1",
+		ApiRegionAlt:  "eu-central-1",
+	})
+	normalizeImportedIDCMetadata(&req)
+	if req.Region != "us-east-1" || req.AuthRegion != "eu-north-1" || req.ApiRegion != "eu-central-1" {
+		t.Fatalf("independent regions were not preserved: %+v", req)
+	}
+
+	req = importCredentialsRequest{
+		AuthMethod: "idc", Region: "us-east-1",
+		AuthRegion: "ap-southeast-1", ApiRegion: "ap-northeast-1",
+		AuthRegionAlt: "eu-north-1", ApiRegionAlt: "eu-central-1",
+	}
+	normalizeImportedIDCMetadata(&req)
+	if req.AuthRegion != "ap-southeast-1" || req.ApiRegion != "ap-northeast-1" {
+		t.Fatalf("explicit regions were overwritten: %+v", req)
+	}
+}
+
 func TestStatusIncludesAccountInventory(t *testing.T) {
 	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatalf("config.Init: %v", err)

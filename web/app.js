@@ -1362,6 +1362,8 @@
       authMethod: source.authMethod,
       provider: source.provider,
       region: source.region,
+      authRegion: source.authRegion,
+      apiRegion: source.apiRegion,
       startUrl: source.startUrl,
       profileArn: source.profileArn,
       tokenEndpoint: source.tokenEndpoint,
@@ -1388,6 +1390,8 @@
       authMethod: credentials.authMethod || source.authMethod,
       provider: credentials.provider || source.provider || source.idp,
       region: credentials.region || source.region,
+      authRegion: credentials.authRegion || source.authRegion,
+      apiRegion: credentials.apiRegion || source.apiRegion,
       startUrl: credentials.startUrl || source.startUrl,
       profileArn: credentials.profileArn || source.profileArn,
       tokenEndpoint: credentials.tokenEndpoint,
@@ -1573,6 +1577,16 @@
 	  detailItem(t('detail.assignedIPv6'), a.assignedIPv6 || '-') +
       '</div></div>' +
 
+      '<div class="detail-section"><h4>' + escapeHtml(t('detail.accountRegions')) + '</h4>' +
+      '<div class="form-group"><label>' + escapeHtml(t('detail.authRegion')) + '</label>' +
+      '<input type="text" id="authRegionInput" value="' + escapeAttr(a.authRegion || '') + '" placeholder="us-east-1" />' +
+      '<small>' + escapeHtml(t('detail.authRegionHint')) + '</small></div>' +
+      '<div class="form-group"><label>' + escapeHtml(t('detail.apiRegion')) + '</label>' +
+      '<input type="text" id="apiRegionInput" value="' + escapeAttr(a.apiRegion || '') + '" placeholder="us-east-1" />' +
+      '<small>' + escapeHtml(t('detail.apiRegionHint')) + '</small></div>' +
+      '<button class="btn btn-sm btn-primary" data-detail-action="saveRegions" data-id="' + idAttr + '" type="button">' + escapeHtml(t('detail.save')) + '</button>' +
+      '</div>' +
+
       '<div class="detail-section"><h4>' + escapeHtml(t('detail.endpointRouting')) + '</h4>' +
       '<div class="machine-id-row">' +
       '<select id="endpointPreferenceInput">' +
@@ -1717,6 +1731,11 @@
   async function saveEndpointPreference(id) {
     const endpointPreference = $('endpointPreferenceInput').value;
     await putAccount(id, { endpointPreference }, t('detail.endpointSaved'));
+  }
+  async function saveRegions(id) {
+    const authRegion = $('authRegionInput').value.trim();
+    const apiRegion = $('apiRegionInput').value.trim();
+    await putAccount(id, { authRegion, apiRegion }, t('detail.regionsSaved'));
   }
   async function saveWeight(id) {
     const weight = parseInt($('weightInput').value, 10) || 0;
@@ -4576,6 +4595,7 @@
         authMethod: declaredAuthMethod || authMethod, provider,
         region: authMethod === 'api_key' ? (item.region || '') : (item.region || 'us-east-1'),
         authRegion: item.authRegion || '',
+        apiRegion: item.apiRegion || '',
         startUrl: item.startUrl || '',
         profileArn: item.profileArn || '',
         tokenEndpoint: item.tokenEndpoint || '',
@@ -5383,6 +5403,7 @@
       const a = b.dataset.detailAction;
       if (a === 'saveMachineId') saveMachineId(id);
       else if (a === 'saveEndpointPreference') saveEndpointPreference(id);
+      else if (a === 'saveRegions') saveRegions(id);
       else if (a === 'saveWeight') saveWeight(id);
       else if (a === 'toggleOverage') toggleOverageSwitch(id, b);
       else if (a === 'refreshOverage') refreshAccountOverage(id);
