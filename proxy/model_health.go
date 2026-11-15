@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"kiro-go/config"
+	accountpool "kiro-go/pool"
 	"net/http"
 	"sort"
 	"strings"
@@ -23,6 +24,7 @@ type modelCapabilityHealth struct {
 }
 
 type modelHealthState struct {
+	AccountID   string                `json:"accountId,omitempty"`
 	Model       string                `json:"model"`
 	KiroModelID string                `json:"kiroModelId"`
 	Status      string                `json:"status"`
@@ -34,6 +36,7 @@ type modelHealthState struct {
 }
 
 type modelHealthTestRequest struct {
+	AccountID      string `json:"accountId,omitempty"`
 	Model          string `json:"model"`
 	TestThinking   *bool  `json:"testThinking,omitempty"`
 	TestTools      *bool  `json:"testTools,omitempty"`
@@ -93,17 +96,18 @@ func (h *Handler) apiTestModelHealth(w http.ResponseWriter, r *http.Request) {
 	}
 
 	state := modelHealthState{
+		AccountID:   strings.TrimSpace(req.AccountID),
 		Model:       model,
 		KiroModelID: MapModel(actualModel),
 		Advertised:  h.modelAdvertised(actualModel),
 		TestedAt:    time.Now().Unix(),
 	}
-	state.Text = h.runModelHealthProbe(r.Context(), actualModel, modelHealthProbeText, timeout)
+	state.Text = h.runModelHealthProbeForAccount(r.Context(), state.AccountID, actualModel, modelHealthProbeText, timeout)
 	if testThinking {
-		state.Thinking = h.runModelHealthProbe(r.Context(), actualModel, modelHealthProbeThinking, timeout)
+		state.Thinking = h.runModelHealthProbeForAccount(r.Context(), state.AccountID, actualModel, modelHealthProbeThinking, timeout)
 	}
 	if testTools {
-		state.Tools = h.runModelHealthProbe(r.Context(), actualModel, modelHealthProbeTools, timeout)
+		state.Tools = h.runModelHealthProbeForAccount(r.Context(), state.AccountID, actualModel, modelHealthProbeTools, timeout)
 	}
 	state.Status = summarizeModelHealthStatus(state)
 
@@ -123,6 +127,10 @@ func (h *Handler) apiTestModelHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) runModelHealthProbe(parent context.Context, model string, kind modelHealthProbeKind, timeout time.Duration) modelCapabilityHealth {
+	return h.runModelHealthProbeForAccount(parent, "", model, kind, timeout)
+}
+
+func (h *Handler) runModelHealthProbeForAccount(parent context.Context, accountID, model string, kind modelHealthProbeKind, timeout time.Duration) modelCapabilityHealth {
 	result := modelCapabilityHealth{Tested: true}
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
@@ -170,15 +178,44 @@ func (h *Handler) runModelHealthProbe(parent context.Context, model string, kind
 	payload.attemptBudget = newUpstreamAttemptBudget()
 
 	attempts := h.newAccountAttemptController(ctx)
+	var fixedAccount *config.Account
+	if accountID != "" {
+		fixedAccount = h.pool.GetByID(accountID)
+		if fixedAccount == nil {
+			for _, candidate := range config.GetAccounts() {
+				if candidate.ID == accountID {
+					candidateCopy := candidate
+					fixedAccount = &candidateCopy
+					break
+				}
+			}
+		}
+		if fixedAccount == nil {
+			result.Error = "account not found"
+			return result
+		}
+	}
+	fixedAttempted := false
 	var lastErr error
 	for {
-		account, guard, busy := h.acquireNextAccountForRequest(attempts, model, payload.ConversationState.ConversationID)
-		if busy != nil {
-			lastErr = busy
-			break
-		}
-		if account == nil {
-			break
+		var account *config.Account
+		var guard *accountpool.UpstreamRequestGuard
+		if fixedAccount != nil {
+			if fixedAttempted {
+				break
+			}
+			fixedAttempted = true
+			account = fixedAccount
+		} else {
+			var busy *accountpool.UpstreamBusyError
+			account, guard, busy = h.acquireNextAccountForRequest(attempts, model, payload.ConversationState.ConversationID)
+			if busy != nil {
+				lastErr = busy
+				break
+			}
+			if account == nil {
+				break
+			}
 		}
 		release := func() {
 			if guard != nil {
@@ -214,8 +251,11 @@ func (h *Handler) runModelHealthProbe(parent context.Context, model string, kind
 		result.AccountID = account.ID
 		result.Endpoint = payload.successfulEndpoint()
 		if err != nil {
+			h.recordCapabilityObservation(account.ID, result.Endpoint, model, capabilityFeatureForProbe(kind), false, err, startedAt)
 			lastErr = err
-			attempts.excluded[account.ID] = true
+			if attempts != nil {
+				attempts.excluded[account.ID] = true
+			}
 			if !shouldRetryAcrossAccounts(err) {
 				break
 			}
@@ -245,6 +285,7 @@ func (h *Handler) runModelHealthProbe(parent context.Context, model string, kind
 				result.Error = "no visible text was observed"
 			}
 		}
+		h.recordCapabilityObservation(account.ID, result.Endpoint, model, capabilityFeatureForProbe(kind), result.Supported, result.Error, startedAt)
 		return result
 	}
 

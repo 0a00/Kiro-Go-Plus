@@ -4601,6 +4601,9 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 	case strings.HasPrefix(path, "/accounts/") && strings.HasSuffix(path, "/models/cached") && r.Method == "GET":
 		id := strings.TrimSuffix(strings.TrimPrefix(path, "/accounts/"), "/models/cached")
 		h.apiGetAccountModelsCached(w, r, id)
+	case strings.HasPrefix(path, "/accounts/") && strings.HasSuffix(path, "/capabilities") && r.Method == "GET":
+		id := strings.TrimSuffix(strings.TrimPrefix(path, "/accounts/"), "/capabilities")
+		h.apiGetAccountCapabilities(w, r, id)
 	case strings.HasPrefix(path, "/accounts/") && strings.HasSuffix(path, "/models") && r.Method == "GET":
 		id := strings.TrimSuffix(strings.TrimPrefix(path, "/accounts/"), "/models")
 		h.apiGetAccountModels(w, r, id)
@@ -4688,6 +4691,8 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 		h.apiUpdateModelFallback(w, r)
 	case path == "/model-health" && r.Method == "GET":
 		h.apiGetModelHealth(w, r)
+	case path == "/capabilities" && r.Method == "GET":
+		h.apiGetCapabilities(w, r)
 	case path == "/model-health/test" && r.Method == "POST":
 		h.apiTestModelHealth(w, r)
 	case path == "/health-config" && r.Method == "GET":
@@ -7734,7 +7739,19 @@ func (h *Handler) apiTestAccount(w http.ResponseWriter, r *http.Request, id stri
 	learnedEndpoint := false
 	preferredEndpoint := preferredEndpointForAccount(account)
 	routeModel := endpointRouteModel(kiroPayload)
-	for _, endpoint := range getRequestEndpointsForAccount(preferredEndpoint, kiroPayload, account) {
+	selectedEndpoints := getRequestEndpointsForAccount(preferredEndpoint, kiroPayload, account)
+	selected := make(map[string]bool, len(selectedEndpoints))
+	for _, endpoint := range selectedEndpoints {
+		selected[endpoint.Key] = true
+	}
+	for _, endpoint := range getRequestEndpoints(preferredEndpoint, kiroPayload) {
+		if selected[endpoint.Key] || !endpoint.RequiresProfileArn || !endpointRequiresProfileArnForAccount(endpoint, account) {
+			continue
+		}
+		profileErr := &UpstreamError{Kind: UpstreamErrorProfileUnavailable, Endpoint: endpoint.Name, Message: "profileArn is required by this endpoint"}
+		h.recordCapabilityObservation(account.ID, endpoint.Name, routeModel, pool.CapabilityText, false, profileErr, time.Now())
+	}
+	for _, endpoint := range selectedEndpoints {
 		check, endpointErr := h.testKiroGenerationEndpoint(account, kiroPayload, endpoint)
 		checks = append(checks, check)
 		if check.Success && content == "" {
@@ -7755,13 +7772,16 @@ func (h *Handler) apiTestAccount(w http.ResponseWriter, r *http.Request, id stri
 	}
 
 	if config.GetWebSearchConfig().Enabled {
+		webSearchStartedAt := time.Now()
 		if results, err := callMCPWebSearch(account, "Kiro IDE release notes"); err != nil {
 			if isWebSearchCapabilityUnavailable(err) {
 				h.pool.RecordModelUnavailable(account.ID, webSearchEndpointRouteModel)
 			}
+			h.recordCapabilityObservation(account.ID, "websearch", webSearchEndpointRouteModel, pool.CapabilityWebSearch, false, err, webSearchStartedAt)
 			checks = append(checks, failedAccountTestCheck("websearch", err.Error()))
 		} else {
 			h.pool.ClearModelUnavailable(account.ID, webSearchEndpointRouteModel)
+			h.recordCapabilityObservation(account.ID, "websearch", webSearchEndpointRouteModel, pool.CapabilityWebSearch, true, "", webSearchStartedAt)
 			checks = append(checks, accountTestCheck{Name: "websearch", Success: true, Count: len(results.Results)})
 		}
 	}
@@ -7809,8 +7829,20 @@ func failedAccountTestCheck(name, err string) accountTestCheck {
 	return accountTestCheck{Name: name, Success: false, Error: truncateDiagnosticText(err, 800)}
 }
 
-func (h *Handler) testKiroGenerationEndpoint(account *config.Account, payload *KiroPayload, endpoint kiroEndpoint) (accountTestCheck, error) {
-	check := accountTestCheck{Name: "generation", Endpoint: endpoint.Name}
+func (h *Handler) testKiroGenerationEndpoint(account *config.Account, payload *KiroPayload, endpoint kiroEndpoint) (check accountTestCheck, returnErr error) {
+	startedAt := time.Now()
+	check = accountTestCheck{Name: "generation", Endpoint: endpoint.Name}
+	defer func() {
+		model := endpointRouteModel(payload)
+		if model == "" && payload != nil {
+			model = payload.ConversationState.CurrentMessage.UserInputMessage.ModelID
+		}
+		reason := interface{}(check.Error)
+		if returnErr != nil {
+			reason = returnErr
+		}
+		h.recordCapabilityObservation(account.ID, endpoint.Name, model, pool.CapabilityText, check.Success, reason, startedAt)
+	}()
 	payloadCopy := cloneKiroPayloadForTest(payload)
 	if payloadCopy == nil {
 		err := fmt.Errorf("invalid Kiro payload")
@@ -7895,6 +7927,15 @@ func (h *Handler) testKiroGenerationEndpoint(account *config.Account, payload *K
 		classified := classifyTransportError(endpoint.Name, err)
 		check.Error = classified.Error()
 		return check, classified
+	}
+	if strings.TrimSpace(content) == "" {
+		err := &UpstreamError{
+			Kind:     UpstreamErrorEmptyResponse,
+			Endpoint: endpoint.Name,
+			Message:  "upstream returned no visible text",
+		}
+		check.Error = err.Error()
+		return check, err
 	}
 	check.Success = true
 	check.Reply = content

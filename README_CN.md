@@ -24,7 +24,7 @@ Kiro-Go Plus 保留原 Kiro-Go 的接口兼容性和部署方式，重点增强�
 - 流式解析：AWS EventStream 长度与 CRC 校验、空闲超时、截断响应检测
 - 认证方式：Builder ID、IAM Identity Center、Kiro 托管 SSO、Microsoft 365 / Entra ID、SSO Token、API Key，以及 Web 后台直接多选 Kiro 原生/KAM JSON 文件导入；OAuth 认证区域与 Profile ARN 数据面区域独立处理，`ksk_` Key 落盘前自动发现并验证数据面区域
 - Prompt Cache：支持上游真实统计、旧版匹配前缀效率和兼容 New API/Sub2API 的总输入目标区间，并提供 5m/1h TTL、分片 LRU、API Key 隔离、指纹持久化和诊断
-- 扩展能力：Claude Opus 5 与 Sonnet 5 元数据、GPT-5.6 别名、动态模型能力与 effort 发现、可选安全格式未列出模型透传、文本/思考/工具能力自检、多轮 Web Search、外部 Token 计数和 Responses 历史存储
+- 扩展能力：Claude Opus 5 与 Sonnet 5 元数据、GPT-5.6 别名、动态模型能力与 effort 发现、可选安全格式未列出模型透传、文本/思考/工具能力自检、账号级端点/模型/能力矩阵、多轮 Web Search、外部 Token 计数和 Responses 历史存储
 - 运维能力：账号库存诊断（延迟/错误 EWMA 与粘性命中率）、持久化请求元数据、有界长期 JSONL 日志归档、账号选择/排队与首 SSE/思考/文本/工具输出耗时、有效上游事件间隔、工具分片和组装等待、可选完整日志（脱敏请求/输出、重试和流时间线）、诊断事件、Webhook 告警、`/health`、`/ready`
 - Token 与 Agent 稳定性：支持 Kiro 原生 reasoning effort，可配置默认思考、最大输出和上下文预算；客户端显式值优先；Claude 工具流支持安全、自适应、平衡和实时四档策略
 - Claude Code 兼容：透明兼容模式默认开启，保留结构化工具历史、会话 ID 和原始流语义；可在 Web 的 Thinking 设置中关闭并回退到旧版策略
@@ -53,6 +53,19 @@ Token 预算优先级为：请求显式参数、模型专属配置、Web 全局�
 - API Key、配额、管理密码、监听地址和客户端指纹
 
 代理池凭据会随账号配置使用 `KIRO_MASTER_KEY` 加密；健康检查只验证代理链路，不会自动启用、解封或删除账号。目录自动导入也不会绕过当前凭据校验，文件必须先完成稳定写入才会处理。
+
+### 账号能力矩阵
+
+实际请求、账号测试和模型能力自检会记录账号、端点、模型和能力的最近观测，覆盖文本、思考、工具调用和 WebSearch。记录只保存有限时间，并按账号和全局数量上限淘汰；限流、额度和瞬态错误使用更短的 TTL，不会因为一次 429 或 503 永久禁用账号。矩阵是路由诊断依据，不替代实时上游校验。
+
+管理员可以查询全部记录或单个账号：
+
+```text
+GET /admin/api/capabilities?accountId=<id>&model=<model>&endpoint=<runtime|kiro|codewhisperer|amazonq>&feature=<text|thinking|tools|websearch>
+GET /admin/api/accounts/<id>/capabilities
+```
+
+模型能力自检接口支持传入 `accountId`，例如 `POST /admin/api/model-health/test` 的请求体可包含 `{"accountId":"...","model":"claude-sonnet-4-6"}`，此时只测试指定账号，不会用其他账号的成功结果覆盖它。
 
 除监听地址等需要进程重启的项目外，设置保存后会立即生效。
 

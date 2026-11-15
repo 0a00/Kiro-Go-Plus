@@ -1,5 +1,5 @@
 {
-  "version": "1.3.12",
+  "version": "1.3.13",
   "changelog": "Recover OAuth/IDC generation when the legacy route now requires a profile ARN, cache the discovered profile, and avoid retrying the same profile capability failure across accounts. Disable profileless model metadata refresh in production when no profile is available.\n兼容上游对旧生成端点新增的 Profile ARN 要求，自动发现并缓存 Profile 后重试当前账号，避免同一能力错误反复换号重试；无 Profile 账号关闭无效的模型元数据刷新。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }

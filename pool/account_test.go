@@ -1211,6 +1211,7 @@ func TestRuntimeStatePersistsCooldownModelsAndRefreshCursor(t *testing.T) {
 	original.RecordError("a", true)
 	original.SetModelList("a", []string{"claude-sonnet-4.6"})
 	original.RecordModelUnavailable("a", "claude-opus-4.6")
+	original.RecordCapability("a", "runtime", "claude-sonnet-4.6", CapabilityTools, CapabilitySupported, "", 12*time.Millisecond)
 	original.SetRefreshCursor(37)
 	original.SetRefreshFailureCooldown("a", time.Now().Add(10*time.Minute))
 	original.saveRuntimeState()
@@ -1231,6 +1232,10 @@ func TestRuntimeStatePersistsCooldownModelsAndRefreshCursor(t *testing.T) {
 	}
 	if restored.accountHasModel("a", "claude-opus-4.6") {
 		t.Fatalf("model negative cache was not restored")
+	}
+	capabilities := restored.AccountCapabilities("a")
+	if len(capabilities) != 1 || capabilities[0].Endpoint != "runtime" || capabilities[0].Feature != CapabilityTools {
+		t.Fatalf("capability state was not restored: %+v", capabilities)
 	}
 	if restored.RefreshFailureCooldowns()["a"] <= time.Now().Unix() {
 		t.Fatalf("refresh failure cooldown was not restored")

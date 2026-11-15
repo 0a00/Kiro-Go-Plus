@@ -492,6 +492,9 @@ func (p *AccountPool) ensureProtectionMapsLocked() {
 	if p.modelNegative == nil {
 		p.modelNegative = make(map[modelAvailabilityKey]time.Time)
 	}
+	if p.capabilities == nil {
+		p.capabilities = make(map[capabilityKey]AccountCapability)
+	}
 	if p.lastSuccess == nil {
 		p.lastSuccess = make(map[string]time.Time)
 	}

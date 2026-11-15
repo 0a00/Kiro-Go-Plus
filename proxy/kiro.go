@@ -1057,7 +1057,22 @@ func callKiroAPISingleModel(account *config.Account, payload *KiroPayload, callb
 	// Build endpoint list before profile lookup. Legacy/custom endpoints that do
 	// not require a profile must not pay for a potentially slow profile probe.
 	preferredEndpoint := preferredEndpointForAccount(account)
+	allEndpoints := getRequestEndpoints(preferredEndpoint, payload)
 	endpoints := getRequestEndpointsForAccount(preferredEndpoint, payload, account)
+	selectedEndpoints := make(map[string]bool, len(endpoints))
+	for _, endpoint := range endpoints {
+		selectedEndpoints[endpoint.Key] = true
+	}
+	for _, endpoint := range allEndpoints {
+		if selectedEndpoints[endpoint.Key] || !endpoint.RequiresProfileArn || !endpointRequiresProfileArnForAccount(endpoint, account) {
+			continue
+		}
+		recordKiroCapabilityObservation(account, endpoint.Name, payload, capabilityStatusForError(&UpstreamError{
+			Kind:     UpstreamErrorProfileUnavailable,
+			Endpoint: endpoint.Name,
+			Message:  "profileArn is required by this endpoint",
+		}), &UpstreamError{Kind: UpstreamErrorProfileUnavailable, Endpoint: endpoint.Name, Message: "profileArn is required by this endpoint"}, time.Now())
+	}
 	accountID := ""
 	accountEmail := ""
 	if account != nil {
@@ -1149,6 +1164,7 @@ endpointLoop:
 				RetryAcrossEndpoints: true,
 				RetryAcrossAccounts:  true,
 			}
+			recordKiroCapabilityObservation(account, ep.Name, payload, capabilityStatusForError(lastErr), lastErr, attemptStartedAt)
 			detailTrace.recordAttempt(accountID, accountEmail, ep.Name, "", attemptStartedAt, 0, "skipped", lastErr, requestDetailRetryReason(lastErr))
 			continue
 		}
@@ -1196,6 +1212,7 @@ endpointLoop:
 				cancelRequest()
 				sharedUpstreamHealth.releaseEndpoint(endpointCircuitKey)
 				lastErr = err
+				recordKiroCapabilityObservation(account, ep.Name, payload, capabilityStatusForError(lastErr), lastErr, attemptStartedAt)
 				if payload != nil {
 					payload.attemptBudget.recordFailure(ep.Name, lastErr)
 				}
@@ -1325,6 +1342,7 @@ endpointLoop:
 						err = context.DeadlineExceeded
 					}
 					lastErr = classifyTransportError(ep.Name, err)
+					recordKiroCapabilityObservation(account, ep.Name, payload, capabilityStatusForError(lastErr), lastErr, attemptStartedAt)
 				}
 				detailTrace.recordAttempt(accountID, accountEmail, ep.Name, endpointHost, attemptStartedAt, 0, "error", lastErr, requestDetailRetryReason(lastErr))
 				if isLocalConfigurationError(lastErr) {
@@ -1368,6 +1386,7 @@ endpointLoop:
 				cancelRequest()
 				classifiedErr := classifyKiroHTTPResponseError(resp, ep.Name, errBody)
 				lastErr = classifiedErr
+				recordKiroCapabilityObservation(account, ep.Name, payload, capabilityStatusForError(lastErr), lastErr, attemptStartedAt)
 				lastAttemptError = lastErr
 				detailTrace.recordAttempt(accountID, accountEmail, ep.Name, endpointHost, attemptStartedAt, resp.StatusCode, "http_error", lastErr, requestDetailRetryReason(lastErr))
 				if payload != nil {
@@ -1530,6 +1549,7 @@ endpointLoop:
 					err = classifyTransportError(ep.Name, err)
 				}
 				lastErr = err
+				recordKiroCapabilityObservation(account, ep.Name, payload, capabilityStatusForError(lastErr), lastErr, attemptStartedAt)
 				lastAttemptError = lastErr
 				retrySameEndpoint := !toolAssemblyTimedOut && endpointAttempt < preOutputStreamRetries &&
 					isRetryablePreOutputStreamError(err, meaningfulGate)
@@ -1582,6 +1602,7 @@ endpointLoop:
 				// same-endpoint empty retries are exhausted, try the remaining endpoint
 				// variants for this account before spending another account attempt.
 				lastErr = newEmptyResponseErrorWithDiagnostics(ep.Name, true, attemptDiagnostics)
+				recordKiroCapabilityObservation(account, ep.Name, payload, capabilityStatusForError(lastErr), lastErr, attemptStartedAt)
 				lastAttemptError = lastErr
 				if payload != nil {
 					payload.attemptBudget.recordFailure(ep.Name, lastErr)
@@ -1621,6 +1642,7 @@ endpointLoop:
 			}
 			sharedUpstreamHealth.endpointSuccess(endpointCircuitKey, time.Since(attemptStartedAt))
 			sharedAccountEndpointRoutes.recordSuccess(accountID, modelKey, ep)
+			recordKiroCapabilityObservation(account, ep.Name, payload, capabilityStatusForError(nil), nil, attemptStartedAt)
 			payload.setSuccessfulEndpoint(ep.Name)
 			detailTrace.recordAttempt(accountID, accountEmail, ep.Name, endpointHost, attemptStartedAt, http.StatusOK, "success", nil, "")
 			return nil

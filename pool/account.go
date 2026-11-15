@@ -61,6 +61,7 @@ type AccountPool struct {
 	weightedCurrent map[string]int64
 	affinity        map[string]routeAffinityEntry
 	modelNegative   map[modelAvailabilityKey]time.Time
+	capabilities    map[capabilityKey]AccountCapability
 	lastSuccess     map[string]time.Time
 	healthStats     map[string]accountHealthState
 	refreshFailures map[string]time.Time
@@ -108,6 +109,7 @@ func GetPool() *AccountPool {
 			weightedCurrent:    make(map[string]int64),
 			affinity:           make(map[string]routeAffinityEntry),
 			modelNegative:      make(map[modelAvailabilityKey]time.Time),
+			capabilities:       make(map[capabilityKey]AccountCapability),
 			lastSuccess:        make(map[string]time.Time),
 			healthStats:        make(map[string]accountHealthState),
 			refreshFailures:    make(map[string]time.Time),

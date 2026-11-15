@@ -34,6 +34,18 @@ type persistedUpstreamState struct {
 	LastCooldownMs int    `json:"lastCooldownMs,omitempty"`
 }
 
+type persistedCapabilityState struct {
+	AccountID string `json:"accountId"`
+	Endpoint  string `json:"endpoint"`
+	Model     string `json:"model"`
+	Feature   string `json:"feature"`
+	Status    string `json:"status"`
+	Reason    string `json:"reason,omitempty"`
+	CheckedAt int64  `json:"checkedAt"`
+	ExpiresAt int64  `json:"expiresAt"`
+	LatencyMs int64  `json:"latencyMs,omitempty"`
+}
+
 type persistedRuntimeState struct {
 	Version       int                                     `json:"version"`
 	SavedAt       int64                                   `json:"savedAt"`
@@ -44,6 +56,7 @@ type persistedRuntimeState struct {
 	ModelNegative []persistedModelNegativeState           `json:"modelNegative,omitempty"`
 	Upstream      []persistedUpstreamState                `json:"upstream,omitempty"`
 	Profiles      []persistedUpstreamState                `json:"profiles,omitempty"`
+	Capabilities  []persistedCapabilityState              `json:"capabilities,omitempty"`
 }
 
 func runtimeStatePath() string {
@@ -114,6 +127,28 @@ func (p *AccountPool) loadRuntimeState() {
 			lastCooldownMs: entry.LastCooldownMs,
 		}
 	}
+	for _, entry := range state.Capabilities {
+		if entry.AccountID == "" || entry.Endpoint == "" || entry.Model == "" || entry.Feature == "" || entry.ExpiresAt <= now.Unix() {
+			continue
+		}
+		p.capabilities[capabilityKey{
+			accountID: entry.AccountID,
+			endpoint:  strings.ToLower(strings.TrimSpace(entry.Endpoint)),
+			model:     strings.ToLower(strings.TrimSpace(entry.Model)),
+			feature:   strings.ToLower(strings.TrimSpace(entry.Feature)),
+		}] = AccountCapability{
+			AccountID: entry.AccountID,
+			Endpoint:  strings.ToLower(strings.TrimSpace(entry.Endpoint)),
+			Model:     strings.ToLower(strings.TrimSpace(entry.Model)),
+			Feature:   strings.ToLower(strings.TrimSpace(entry.Feature)),
+			Status:    CapabilityStatus(entry.Status),
+			Reason:    entry.Reason,
+			CheckedAt: entry.CheckedAt,
+			ExpiresAt: entry.ExpiresAt,
+			LatencyMs: entry.LatencyMs,
+		}
+	}
+	p.evictCapabilitiesLocked(now)
 	p.mu.Unlock()
 }
 
@@ -219,6 +254,22 @@ func (p *AccountPool) saveRuntimeStateTo(path string) {
 				CooldownUntil: entry.cooldownUntil.Unix(), LastCooldownMs: entry.lastCooldownMs,
 			})
 		}
+	}
+	for key, entry := range p.capabilities {
+		if capabilityRecordExpired(entry, now) {
+			continue
+		}
+		state.Capabilities = append(state.Capabilities, persistedCapabilityState{
+			AccountID: key.accountID,
+			Endpoint:  key.endpoint,
+			Model:     key.model,
+			Feature:   key.feature,
+			Status:    string(entry.Status),
+			Reason:    entry.Reason,
+			CheckedAt: entry.CheckedAt,
+			ExpiresAt: entry.ExpiresAt,
+			LatencyMs: entry.LatencyMs,
+		})
 	}
 	p.mu.RUnlock()
 
