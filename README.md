@@ -375,7 +375,15 @@ readable. See [test changes](docs/development-testing.md#1297-acceptance-changes
 
 Compose uses `/health`, so account exhaustion does not cause a restart loop. Reverse proxies and load balancers should use `/ready` when deciding whether to route new requests.
 
-1.3.11 keeps OAuth authentication and Kiro API data-plane regions independent,
+1.3.12 adapts to upstream Kiro IDE generation endpoints that now require a
+`profileArn`. When the upstream returns that explicit capability error, the
+request discovers and caches a profile, then replays the same account once.
+Only an unsuccessful discovery enters the existing account cooldown path,
+avoiding repeated account rotation for the same missing capability. Production
+model metadata refresh is disabled for profileless accounts while token refresh
+remains enabled.
+
+1.3.11 separates OAuth authentication regions from Kiro API data-plane regions,
 preserves region metadata across import, refresh, export, and admin edits, and
 adds normalization and regression coverage for profileless credentials.
 

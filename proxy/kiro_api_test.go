@@ -814,6 +814,78 @@ func TestCallKiroAPIUsesLegacyRouteForProfilelessBuilderID(t *testing.T) {
 	}
 }
 
+func TestCallKiroAPIRecoversProfileAfterLegacyRouteRequirement(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	clearProfileArnResolutionCooldowns()
+	t.Cleanup(clearProfileArnResolutionCooldowns)
+
+	account := config.Account{
+		ID: "profile-recovery", Email: "profile-recovery@example.com",
+		AccessToken: "access-token", AuthMethod: "idc", Provider: "BuilderId",
+		Region: "us-east-1", Enabled: true,
+	}
+	if err := config.AddAccount(account); err != nil {
+		t.Fatalf("add account: %v", err)
+	}
+
+	previousREST := kiroRestHttpStore.Load()
+	previousStream := kiroHttpStore.Load()
+	t.Cleanup(func() {
+		kiroRestHttpStore.Store(previousREST)
+		kiroHttpStore.Store(previousStream)
+	})
+	kiroRestHttpStore.Store(&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Path != "/ListAvailableProfiles" {
+			t.Fatalf("unexpected profile lookup path: %s", req.URL.Path)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"profiles":[{"arn":"arn:aws:codewhisperer:us-east-1:123:profile/recovered"}]}`)),
+			Header:     make(http.Header),
+		}, nil
+	})})
+
+	var generationCalls atomic.Int32
+	kiroHttpStore.Store(&http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if generationCalls.Add(1) == 1 {
+			return &http.Response{
+				StatusCode: http.StatusBadRequest,
+				Body:       io.NopCloser(strings.NewReader(`{"message":"profileArn is required for this request"}`)),
+				Header:     make(http.Header),
+			}, nil
+		}
+		body := append(
+			awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "profile-recovered"}),
+			awsEventStreamFrame(t, "metadataEvent", map[string]interface{}{"stopReason": "end_turn"})...,
+		)
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(bytes.NewReader(body)),
+			Header:     make(http.Header),
+		}, nil
+	})})
+
+	oldEndpoints := kiroEndpoints
+	kiroEndpoints = []kiroEndpoint{{Key: "kiro", URL: "https://q.us-east-1.amazonaws.com/generateAssistantResponse", Name: "Kiro IDE"}}
+	t.Cleanup(func() { kiroEndpoints = oldEndpoints })
+
+	var output strings.Builder
+	err := CallKiroAPI(&account, &KiroPayload{}, &KiroStreamCallback{
+		OnText: func(text string, _ bool) { output.WriteString(text) },
+	})
+	if err != nil {
+		t.Fatalf("profile recovery request failed: %v", err)
+	}
+	if generationCalls.Load() != 2 || output.String() != "profile-recovered" {
+		t.Fatalf("unexpected profile recovery result: calls=%d output=%q", generationCalls.Load(), output.String())
+	}
+	if account.ProfileArn != "arn:aws:codewhisperer:us-east-1:123:profile/recovered" {
+		t.Fatalf("profile ARN was not cached on request account: %q", account.ProfileArn)
+	}
+}
+
 func TestResolveProfileArnFetchesAndCachesProfile(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	if err := config.Init(configPath); err != nil {

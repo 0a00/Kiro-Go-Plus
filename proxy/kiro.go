@@ -1394,6 +1394,21 @@ endpointLoop:
 					sharedUpstreamHealth.releaseEndpoint(endpointCircuitKey)
 					return retryErr
 				}
+				// Kiro IDE used to accept profile-less OAuth/IDC requests. Some
+				// upstream data planes now reject that legacy route with an explicit
+				// profile requirement. Discover the profile once and replay the same
+				// account before spending an account retry or cooling the endpoint.
+				if upstreamErr, ok := asUpstreamError(lastErr); ok &&
+					upstreamErr.Kind == UpstreamErrorProfileUnavailable &&
+					payload != nil && strings.TrimSpace(payload.ProfileArn) == "" &&
+					!isKiroAPIKeyAccount(account) {
+					if profileArn, profileErr := ResolveProfileArnContext(requestContext, account); profileErr == nil && strings.TrimSpace(profileArn) != "" {
+						payload.ProfileArn = profileArn
+						sharedUpstreamHealth.releaseEndpoint(endpointCircuitKey)
+						logger.Infof("[ProfileArn] Recovered a generation profile for account %s after an upstream profile requirement", accountEmailForLog(account))
+						return callKiroAPISingleModel(account, payload, callback)
+					}
+				}
 				if cooldown := sharedAccountEndpointRoutes.recordFailure(accountID, modelKey, ep, lastErr); cooldown > 0 {
 					logger.Warnf("[EndpointRouting] Account %s model %s endpoint %s cooling for %s after %v", accountID, modelKey, ep.Name, cooldown, lastErr)
 				}
