@@ -323,6 +323,9 @@ func (h *Handler) callWebSearchMCP(ctx context.Context, model, query string) (*w
 		attempts.maxAttempts = maxInt(h.pool.Count(), 1)
 	}
 	excluded := attempts.excluded
+	// WebSearch/MCP requires a profile for OAuth/IDC accounts even when the
+	// generation path can use the legacy Kiro IDE/Q route without one.
+	h.pool.ExcludeProfilelessAccounts(excluded)
 	var lastErr error
 	for {
 		if err := ctx.Err(); err != nil {

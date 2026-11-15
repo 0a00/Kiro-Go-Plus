@@ -785,10 +785,10 @@ func (h *Handler) refreshOneAccountContext(ctx context.Context, account *config.
 		result.CooldownUntil = until
 		return result
 	}
-	if pool.AccountRequiresGenerationProfile(account) {
-		// The generation profile is required before this identity can be routed,
-		// and the usage endpoint rejects profileless OAuth/IDC records. Keep the
-		// token refresh path alive, but avoid a guaranteed control-plane 400.
+	if pool.AccountNeedsProfileDiscovery(account) {
+		// The usage endpoint rejects profileless OAuth/IDC records. Keep the
+		// token refresh and profile discovery path alive, but avoid a guaranteed
+		// control-plane 400 during metadata refresh.
 		result.Reason = "profileArn required for metadata refresh"
 		result.Info = &config.AccountInfo{
 			LastRefresh:         time.Now().Unix(),
@@ -896,7 +896,7 @@ func (h *Handler) dueAutoRefreshAccounts(accounts []config.Account, autoRefresh 
 		if h.isAutoRefreshCooling(account.ID, now.Unix()) {
 			continue
 		}
-		if pool.AccountRequiresGenerationProfile(&account) {
+		if pool.AccountNeedsProfileDiscovery(&account) {
 			// Retry profile discovery on a slow cadence. The deferred checkpoint
 			// branch above prevents an urgent token condition from bypassing it.
 			due = append(due, account)
@@ -953,7 +953,7 @@ func (h *Handler) hasUrgentAutoRefreshAccount(autoRefresh config.AutoRefreshConf
 }
 
 func profilelessRefreshDeferred(account *config.Account, now time.Time) bool {
-	if account == nil || !pool.AccountRequiresGenerationProfile(account) || account.LastRefresh == 0 {
+	if account == nil || !pool.AccountNeedsProfileDiscovery(account) || account.LastRefresh == 0 {
 		return false
 	}
 	return now.Sub(time.Unix(account.LastRefresh, 0)) < profilelessMetadataRetryInterval

@@ -545,13 +545,11 @@ func (p *AccountPool) accountSelectableBasicLocked(acc *config.Account, model st
 	return !isQuotaBlocked(*acc, allowOverUsage)
 }
 
-// AccountRequiresGenerationProfile reports whether an account is known to use
-// OAuth/IDC credentials but has not yet obtained the profile required by the
-// generation APIs. API-key accounts are intentionally exempt: their key-bound
-// route has different profile requirements. Accounts with no authentication
-// metadata are left alone for backwards compatibility with legacy imports; the
-// request path will still classify an upstream profile error when it occurs.
-func AccountRequiresGenerationProfile(acc *config.Account) bool {
+// AccountNeedsProfileDiscovery reports whether an account is an OAuth/IDC
+// identity without a cached generation profile. This is used by metadata
+// refresh and WebSearch, where the profile is still required. API-key accounts
+// use a key-bound upstream identity and are intentionally exempt.
+func AccountNeedsProfileDiscovery(acc *config.Account) bool {
 	if acc == nil || strings.TrimSpace(acc.ProfileArn) != "" {
 		return false
 	}
@@ -566,6 +564,41 @@ func AccountRequiresGenerationProfile(acc *config.Account) bool {
 		strings.TrimSpace(acc.Provider) != "" ||
 		strings.TrimSpace(acc.RefreshToken) != "" ||
 		strings.TrimSpace(acc.StartUrl) != ""
+}
+
+// AccountRequiresGenerationProfile reports whether the current generation
+// endpoint configuration leaves this account without a compatible route. A
+// profileless OAuth/IDC account may still use the legacy Kiro IDE/Q routes;
+// runtime and CodeWhisperer require a profile only when endpoint fallback is
+// disabled. This keeps account selection aligned with endpoint filtering.
+func AccountRequiresGenerationProfile(acc *config.Account) bool {
+	if !AccountNeedsProfileDiscovery(acc) {
+		return false
+	}
+	preferred := strings.ToLower(strings.TrimSpace(acc.EndpointPreference))
+	if preferred == "" || preferred == "auto" {
+		preferred = strings.ToLower(strings.TrimSpace(config.GetPreferredEndpoint()))
+	}
+	if preferred != "runtime" && preferred != "codewhisperer" {
+		return false
+	}
+	return !config.GetEndpointFallback()
+}
+
+// ExcludeProfilelessAccounts marks accounts that cannot serve profile-bound
+// capabilities such as WebSearch/MCP. Generation selection uses the endpoint
+// aware AccountRequiresGenerationProfile check instead.
+func (p *AccountPool) ExcludeProfilelessAccounts(excluded map[string]bool) {
+	if p == nil || excluded == nil {
+		return
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	for i := range p.accounts {
+		if AccountNeedsProfileDiscovery(&p.accounts[i]) {
+			excluded[p.accounts[i].ID] = true
+		}
+	}
 }
 
 func (p *AccountPool) profileUnavailableLocked(accountID string, now time.Time) bool {

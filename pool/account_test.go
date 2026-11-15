@@ -325,7 +325,7 @@ func TestProfileUnavailableTemporarilyRemovesAccountFromSelection(t *testing.T) 
 	}
 }
 
-func TestProfilelessOAuthAccountsAreSkippedFromGenerationSelection(t *testing.T) {
+func TestProfilelessOAuthAccountsUseCompatibleGenerationSelection(t *testing.T) {
 	initAccountSelectionConfig(t)
 	profileless := config.Account{
 		ID: "profileless-oauth", Enabled: true, AccessToken: "access-token",
@@ -342,27 +342,49 @@ func TestProfilelessOAuthAccountsAreSkippedFromGenerationSelection(t *testing.T)
 	}
 	p := newTestPool(profileless, profiled, apiKey)
 
+	profilelessSeen := false
 	for i := 0; i < 8; i++ {
 		got := p.GetNext()
-		if got == nil || got.ID == profileless.ID {
-			t.Fatalf("profileless OAuth account was selected: %+v", got)
+		if got == nil {
+			t.Fatal("expected a selectable account")
 		}
+		if got.ID == profileless.ID {
+			profilelessSeen = true
+		}
+	}
+	if !profilelessSeen {
+		t.Fatal("profileless OAuth account was never selected for compatible generation")
 	}
 }
 
-func TestProfileUpdateRestoresProfilelessOAuthAccount(t *testing.T) {
+func TestProfilelessOAuthAccountRespectsProfileBoundEndpoint(t *testing.T) {
 	initAccountSelectionConfig(t)
-	p := newTestPool(config.Account{
+	account := config.Account{
 		ID: "profile-restored", Enabled: true, AccessToken: "access-token",
 		AuthMethod: "idc", Provider: "BuilderId", Region: "us-east-1",
-	})
+		EndpointPreference: "runtime",
+	}
+	if err := config.UpdatePreferredEndpoint("runtime"); err != nil {
+		t.Fatalf("set preferred endpoint: %v", err)
+	}
+	if err := config.UpdateEndpointFallback(false); err != nil {
+		t.Fatalf("disable endpoint fallback: %v", err)
+	}
+	p := newTestPool(account)
 	if got := p.GetNext(); got != nil {
-		t.Fatalf("profileless OAuth account was selectable before profile update: %+v", got)
+		t.Fatalf("profileless OAuth account used a profile-bound endpoint: %+v", got)
 	}
 
-	p.UpdateProfileArn("profile-restored", "arn:aws:codewhisperer:us-east-1:123:profile/restored")
+	if err := config.UpdateEndpointFallback(true); err != nil {
+		t.Fatalf("enable endpoint fallback: %v", err)
+	}
+	if got := p.GetNext(); got == nil || got.ID != account.ID {
+		t.Fatalf("compatible endpoint fallback did not restore selection: %+v", got)
+	}
+
+	p.UpdateProfileArn(account.ID, "arn:aws:codewhisperer:us-east-1:123:profile/restored")
 	if got := p.GetNext(); got == nil || got.ID != "profile-restored" {
-		t.Fatalf("profile update did not restore generation selection: %+v", got)
+		t.Fatalf("profile update did not preserve generation selection: %+v", got)
 	}
 }
 

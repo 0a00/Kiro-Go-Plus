@@ -321,6 +321,50 @@ func TestMCPWebSearchFixedRuntimeWithoutProfileUsesCompatibleQRoute(t *testing.T
 	}
 }
 
+func TestWebSearchSkipsProfilelessOAuthAccountsBeforeDispatch(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	_ = config.UpdateEndpointFallback(true)
+	_ = config.UpdatePreferredEndpoint("auto")
+	_ = config.UpdateRetryConfig(config.RetryConfig{MaxAccountAttempts: 0})
+	if err := config.AddAccount(config.Account{
+		ID: "profileless-oauth", Enabled: true, AccessToken: "oauth-token",
+		RefreshToken: "oauth-refresh", AuthMethod: "idc", Provider: "BuilderId",
+	}); err != nil {
+		t.Fatalf("add profileless account: %v", err)
+	}
+	if err := config.AddAccount(config.Account{
+		ID: "websearch-api-key", Enabled: true, AccessToken: "ksk-test",
+		KiroApiKey: "ksk-test", AuthMethod: "api_key",
+	}); err != nil {
+		t.Fatalf("add API key account: %v", err)
+	}
+	p := accountpool.GetPool()
+	p.Reload()
+	sharedAccountEndpointRoutes.reset()
+	t.Cleanup(sharedAccountEndpointRoutes.reset)
+
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","result":{"content":[{"type":"text","text":"{\"results\":[]}"}]}}`))
+	}))
+	defer server.Close()
+	oldEndpoints := webSearchRouteEndpoints
+	webSearchRouteEndpoints = []kiroEndpoint{{Key: "q-mcp", URL: server.URL, Name: "Kiro Q MCP"}}
+	t.Cleanup(func() { webSearchRouteEndpoints = oldEndpoints })
+
+	h := &Handler{pool: p}
+	if _, err := h.callWebSearchMCP(context.Background(), "claude-sonnet-4.5", "query"); err != nil {
+		t.Fatalf("web search failed: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("profileless OAuth account was dispatched to WebSearch: calls=%d", calls)
+	}
+}
+
 func TestMCPWebSearchQRouteUsesStreamingClientHeaders(t *testing.T) {
 	var userAgent string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

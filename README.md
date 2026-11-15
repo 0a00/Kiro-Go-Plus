@@ -375,6 +375,11 @@ readable. See [test changes](docs/development-testing.md#1297-acceptance-changes
 
 Compose uses `/health`, so account exhaustion does not cause a restart loop. Reverse proxies and load balancers should use `/ready` when deciding whether to route new requests.
 
+1.3.10 restores generation routing for profileless OAuth/IDC accounts when a
+compatible Kiro IDE/Q endpoint is available. Runtime, CodeWhisperer, and
+WebSearch/MCP remain profile-gated; explicitly fixed profile-bound endpoints
+with fallback disabled continue to skip profileless accounts.
+
 1.3.9 defers repeated urgent refresh wakeups for profileless OAuth/IDC accounts
 after a profile discovery checkpoint, while preserving the initial discovery
 attempt and automatic recovery after a profile is obtained.
