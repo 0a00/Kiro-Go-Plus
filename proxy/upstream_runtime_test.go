@@ -177,8 +177,58 @@ func TestClassifyProfileArnRequiredAsAccountCapabilityFailure(t *testing.T) {
 	if err.Kind != UpstreamErrorProfileUnavailable {
 		t.Fatalf("profile requirement kind = %q, want %q", err.Kind, UpstreamErrorProfileUnavailable)
 	}
-	if !err.RetryAcrossAccounts || err.RetryAcrossEndpoints {
+	if !err.RetryAcrossAccounts || !err.RetryAcrossEndpoints {
 		t.Fatalf("profile requirement retry policy = accounts=%v endpoints=%v", err.RetryAcrossAccounts, err.RetryAcrossEndpoints)
+	}
+}
+
+func TestCallKiroAPIFallsBackAfterProfileRequiredOnLegacyEndpoint(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	if err := config.UpdatePreferredEndpoint("auto"); err != nil {
+		t.Fatalf("set endpoint: %v", err)
+	}
+	if err := config.UpdateEndpointFallback(true); err != nil {
+		t.Fatalf("set endpoint fallback: %v", err)
+	}
+	sharedAccountEndpointRoutes.reset()
+	t.Cleanup(sharedAccountEndpointRoutes.reset)
+
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if requests.Add(1) == 1 {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"message":"profileArn is required for this request"}`))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{"content": "legacy fallback"}))
+		_, _ = w.Write(awsEventStreamFrame(t, "metadataEvent", map[string]interface{}{"stopReason": "end_turn"}))
+	}))
+	defer server.Close()
+
+	oldEndpoints := kiroEndpoints
+	kiroEndpoints = []kiroEndpoint{
+		{Key: "kiro", URL: server.URL, Name: "Kiro IDE"},
+		{Key: "amazonq", URL: server.URL, Name: "AmazonQ"},
+	}
+	t.Cleanup(func() { kiroEndpoints = oldEndpoints })
+
+	var output strings.Builder
+	err := CallKiroAPI(&config.Account{
+		ID:          "profileless-api-key",
+		AccessToken: "token",
+		AuthMethod:  "api_key",
+		KiroApiKey:  "kiro-key",
+	}, &KiroPayload{}, &KiroStreamCallback{
+		OnText: func(text string, _ bool) { output.WriteString(text) },
+	})
+	if err != nil {
+		t.Fatalf("profile-required endpoint fallback failed: %v", err)
+	}
+	if requests.Load() != 2 || output.String() != "legacy fallback" {
+		t.Fatalf("unexpected profile-required fallback: requests=%d output=%q", requests.Load(), output.String())
 	}
 }
 

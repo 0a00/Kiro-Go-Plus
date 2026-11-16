@@ -373,11 +373,13 @@ func classifyUpstreamHTTPError(statusCode int, endpoint string, body []byte) *Up
 		err.RetryAcrossEndpoints = true
 	case strings.Contains(combined, "profilearn is required") ||
 		(strings.Contains(combined, "profile arn") && strings.Contains(combined, "required")):
-		// The current Kiro data plane rejects profile-less generation/MCP calls.
-		// Do not retry the same payload across endpoints; the account must be
-		// replaced or obtain a profile ARN first.
+		// A profile requirement can be scoped to one Kiro data plane. Profileless
+		// accounts may still work on another compatible endpoint (for example the
+		// Amazon Q/legacy route), so exhaust this account's endpoint candidates
+		// before rotating the account. The account-level failover decision remains
+		// enabled when every candidate rejects the missing profile.
 		err.Kind = UpstreamErrorProfileUnavailable
-		err.RetryAcrossEndpoints = false
+		err.RetryAcrossEndpoints = true
 		err.RetryAcrossAccounts = true
 	case strings.Contains(combined, "content_length_exceeds_threshold") ||
 		strings.Contains(combined, "input is too long") || statusCode == 422:
