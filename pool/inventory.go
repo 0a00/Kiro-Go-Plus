@@ -59,6 +59,11 @@ func (p *AccountPool) InventorySnapshot() AccountInventory {
 				cooling[id] = true
 			}
 		}
+		for id, until := range p.profileUnavailable {
+			if until.After(now) {
+				cooling[id] = true
+			}
+		}
 		p.mu.RUnlock()
 	}
 

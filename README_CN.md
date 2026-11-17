@@ -224,7 +224,7 @@ ssh -L 3128:127.0.0.1:3128 user@server
 可通过以下变量调整 Profile 探测区域：
 
 ```dotenv
-KIRO_PROFILE_REGIONS=us-east-1,eu-central-1
+KIRO_PROFILE_REGIONS=us-east-1,eu-central-1,eu-north-1
 ```
 
 ## 更新已有 Docker Compose 部署
@@ -422,7 +422,7 @@ Flush 成功不等于客户端已收到；这些计数不依赖完整详情开�
 | `ALLOW_INSECURE_PUBLIC_BIND` | 允许公网监听时使用默认管理密码，仅用于紧急排障 | `false` |
 | `ALLOW_UNAUTHENTICATED_API` | 显式允许公网匿名调用兼容 API | `false` |
 | `KIRO_SSO_CALLBACK_BIND` | 托管 SSO 回调监听地址 | 仅回环地址 |
-| `KIRO_PROFILE_REGIONS` | Entra Profile 与 `ksk_` API Key 的逗号分隔探测区域 | `us-east-1,eu-central-1` |
+| `KIRO_PROFILE_REGIONS` | Entra Profile 与 `ksk_` API Key 的逗号分隔探测区域 | `us-east-1,eu-central-1,eu-north-1` |
 
 ## 上游与致谢
 

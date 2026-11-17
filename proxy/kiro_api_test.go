@@ -133,24 +133,24 @@ func TestKiroProfileRegionCandidates(t *testing.T) {
 		{
 			name:    "external idp probes built-in fallbacks",
 			account: &config.Account{AuthMethod: "external_idp", Region: "eu-central-1"},
-			want:    []string{"us-east-1", "eu-central-1"},
+			want:    []string{"us-east-1", "eu-central-1", "eu-north-1"},
 		},
 		{
 			name:    "account without region probes defaults",
 			account: &config.Account{},
-			want:    []string{"us-east-1", "eu-central-1"},
+			want:    []string{"us-east-1", "eu-central-1", "eu-north-1"},
 		},
 		{
 			name:    "OAuth authentication region is not a profile region",
 			account: &config.Account{AuthMethod: "idc", Region: "ap-southeast-2"},
-			want:    []string{"us-east-1", "eu-central-1"},
+			want:    []string{"us-east-1", "eu-central-1", "eu-north-1"},
 		},
 		{
 			name: "enterprise account probes management fallbacks",
 			account: &config.Account{
 				AuthMethod: "idc", Provider: "Enterprise", Region: "eu-north-1",
 			},
-			want: []string{"us-east-1", "eu-central-1"},
+			want: []string{"us-east-1", "eu-central-1", "eu-north-1"},
 		},
 		{
 			name: "cached profile region is tried first",
@@ -158,7 +158,7 @@ func TestKiroProfileRegionCandidates(t *testing.T) {
 				AuthMethod: "idc", Region: "eu-north-1",
 				ProfileArn: "arn:aws:codewhisperer:eu-central-1:123456789012:profile/test",
 			},
-			want: []string{"eu-central-1", "us-east-1"},
+			want: []string{"eu-central-1", "us-east-1", "eu-north-1"},
 		},
 	}
 	for _, test := range tests {

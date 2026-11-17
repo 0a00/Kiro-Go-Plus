@@ -66,6 +66,28 @@ func TestInventorySnapshotSeparatesProfilelessOAuthAccounts(t *testing.T) {
 	}
 }
 
+func TestInventorySnapshotCountsProfileUnavailableAsCooling(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	account := config.Account{
+		ID: "profile-cooling", UserId: "profile-cooling", AuthMethod: "idc",
+		Provider: "BuilderId", Enabled: true, AccessToken: "token",
+	}
+	if err := config.AddAccount(account); err != nil {
+		t.Fatalf("AddAccount: %v", err)
+	}
+	p := &AccountPool{
+		accounts:           []config.Account{account},
+		profileUnavailable: map[string]time.Time{"profile-cooling": time.Now().Add(time.Minute)},
+		refreshFailures:    make(map[string]time.Time),
+	}
+	got := p.InventorySnapshot()
+	if got.Routable != 0 || got.Cooling != 1 {
+		t.Fatalf("profile-unavailable account was not counted as cooling: %+v", got)
+	}
+}
+
 func TestClearAccountCooldownsRemovesHardBackoff(t *testing.T) {
 	p := &AccountPool{
 		cooldowns:       map[string]time.Time{"a": time.Now().Add(24 * time.Hour)},

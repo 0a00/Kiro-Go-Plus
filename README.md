@@ -212,7 +212,7 @@ Then open the admin panel in the local browser and start sign-in. One instance c
 Configure additional discovery regions with:
 
 ```dotenv
-KIRO_PROFILE_REGIONS=us-east-1,eu-central-1
+KIRO_PROFILE_REGIONS=us-east-1,eu-central-1,eu-north-1
 ```
 
 ## Updating an Existing Compose Deployment
@@ -464,7 +464,7 @@ See [admin login flow](docs/admin-login-flow.md) for verification and rollback.
 | `ALLOW_INSECURE_PUBLIC_BIND` | Allow the default admin password on a public bind; emergency use only | `false` |
 | `ALLOW_UNAUTHENTICATED_API` | Explicitly allow anonymous compatible API calls on a public bind | `false` |
 | `KIRO_SSO_CALLBACK_BIND` | Hosted SSO callback listener | loopback only |
-| `KIRO_PROFILE_REGIONS` | Comma-separated Entra Profile and `ksk_` API-key discovery regions | `us-east-1,eu-central-1` |
+| `KIRO_PROFILE_REGIONS` | Comma-separated Entra Profile and `ksk_` API-key discovery regions | `us-east-1,eu-central-1,eu-north-1` |
 
 ## Upstream and Credits
 

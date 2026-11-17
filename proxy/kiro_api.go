@@ -136,7 +136,11 @@ func regionalizeURLForRegion(rawURL, region string) string {
 	).Replace(rawURL)
 }
 
-var defaultKiroProfileRegions = []string{"us-east-1", "eu-central-1"}
+// These are data-plane profile regions, not necessarily the account's OIDC
+// authentication region. Keep the current Kiro-hosted regions here so an old
+// deployment with no KIRO_PROFILE_REGIONS override can still discover a
+// profile created in Europe.
+var defaultKiroProfileRegions = []string{"us-east-1", "eu-central-1", "eu-north-1"}
 
 func kiroAPIKeyCandidateRegions() []string {
 	configured := strings.TrimSpace(os.Getenv("KIRO_PROFILE_REGIONS"))
