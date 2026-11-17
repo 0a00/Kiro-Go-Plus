@@ -16,6 +16,8 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -ldflags "-X kiro-go/config.BuildCommit=${BUILD_COMMIT}" -o kiro-go .
 
 FROM alpine:3.21
+ARG BUILD_COMMIT=unknown
+LABEL org.opencontainers.image.revision="${BUILD_COMMIT}"
 RUN apk --no-cache add ca-certificates \
     && addgroup -S -g 1000 kiro \
     && adduser -S -D -H -u 1000 -G kiro kiro

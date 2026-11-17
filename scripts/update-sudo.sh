@@ -162,6 +162,29 @@ wait_for_service() {
   return 1
 }
 
+verify_deployed_identity() {
+  local expected_commit="${TARGET_COMMIT:0:12}"
+  local container_id=""
+  local actual_commit=""
+
+  container_id="$(${COMPOSE[@]} ps -q "$SERVICE_NAME" 2>/dev/null || true)"
+  if [[ -z "$container_id" ]]; then
+    printf 'ERROR: service is healthy but its container identity could not be inspected\n' >&2
+    return 1
+  fi
+
+  actual_commit="$(${DOCKER[@]} inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$container_id" 2>/dev/null || true)"
+  if [[ -z "$actual_commit" || "$actual_commit" == "unknown" ]]; then
+    printf 'ERROR: service is healthy but its image has no build revision label\n' >&2
+    return 1
+  fi
+  if [[ "$actual_commit" != "$expected_commit" && "$actual_commit" != "$TARGET_COMMIT" ]]; then
+    printf 'ERROR: running image revision %s does not match target %s\n' "$actual_commit" "$expected_commit" >&2
+    return 1
+  fi
+  info "deployed image revision: $actual_commit"
+}
+
 timestamp="$(date +%Y%m%d-%H%M%S)"
 BACKUP_DIR="$PROJECT_DIR/.update-backups/self-$timestamp"
 OLD_COMMIT="$(git rev-parse HEAD)"
@@ -217,7 +240,7 @@ rollback_update() {
     info "rebuilding previous Docker image"
     if ! "${COMPOSE[@]}" config --quiet; then
       failed=1
-    elif ! "${COMPOSE[@]}" build; then
+    elif ! "${COMPOSE[@]}" build --build-arg "BUILD_COMMIT=${OLD_COMMIT:0:12}"; then
       failed=1
     elif ! "${COMPOSE[@]}" up -d --remove-orphans; then
       failed=1
@@ -278,12 +301,14 @@ if [[ "$PULL_BASE_IMAGES" -eq 1 ]]; then
 fi
 export BUILD_COMMIT="${TARGET_COMMIT:0:12}"
 info "build commit: $BUILD_COMMIT"
+BUILD_ARGS+=(--build-arg "BUILD_COMMIT=$BUILD_COMMIT")
 "${COMPOSE[@]}" build "${BUILD_ARGS[@]}"
 
 info "starting updated service"
 DEPLOY_STARTED=1
 "${COMPOSE[@]}" up -d --remove-orphans
 wait_for_service
+verify_deployed_identity
 
 info "service status"
 "${COMPOSE[@]}" ps

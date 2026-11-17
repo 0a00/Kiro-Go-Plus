@@ -36,7 +36,11 @@ cat >"$FAKE_BIN/docker" <<'EOF'
 set -e
 printf '%s\n' "$*" >>"$FAKE_DOCKER_LOG"
 if [[ "${1:-}" == "inspect" ]]; then
-  printf 'healthy\n'
+  if [[ "$*" == *'.Config.Labels'* ]]; then
+    printf '%s\n' "${FAKE_DOCKER_IMAGE_REVISION:-unknown}"
+  else
+    printf 'healthy\n'
+  fi
   exit 0
 fi
 [[ "${1:-}" == "compose" ]] || exit 1
@@ -72,6 +76,7 @@ SOURCE_REPO="$TMP_DIR/source"
 REMOTE_REPO="$TMP_DIR/remote.git"
 SUCCESS_REPO="$TMP_DIR/deploy-success"
 FAILURE_REPO="$TMP_DIR/deploy-failure"
+IDENTITY_REPO="$TMP_DIR/deploy-identity"
 
 git init -q -b main "$SOURCE_REPO"
 git -C "$SOURCE_REPO" config user.name "Update Test"
@@ -88,8 +93,9 @@ BASE_COMMIT="$(git -C "$SOURCE_REPO" rev-parse HEAD)"
 git clone -q --bare "$SOURCE_REPO" "$REMOTE_REPO"
 git clone -q "$REMOTE_REPO" "$SUCCESS_REPO"
 git clone -q "$REMOTE_REPO" "$FAILURE_REPO"
+git clone -q "$REMOTE_REPO" "$IDENTITY_REPO"
 
-for repo in "$SUCCESS_REPO" "$FAILURE_REPO"; do
+for repo in "$SUCCESS_REPO" "$FAILURE_REPO" "$IDENTITY_REPO"; do
   mkdir -p "$repo/data"
   printf 'ADMIN_PASSWORD=test-only\n' >"$repo/.env"
   printf '{"preserved":true}\n' >"$repo/data/config.json"
@@ -104,6 +110,7 @@ TARGET_COMMIT="$(git -C "$SOURCE_REPO" rev-parse HEAD)"
 
 SUCCESS_LOG="$TMP_DIR/docker-success.log"
 if ! PATH="$FAKE_BIN:$PATH" FAKE_DOCKER_LOG="$SUCCESS_LOG" \
+  FAKE_DOCKER_IMAGE_REVISION="${TARGET_COMMIT:0:12}" \
   bash "$SUCCESS_REPO/scripts/update-sudo.sh" --health-timeout 10 --no-pull >"$TMP_DIR/success.log" 2>&1; then
   cat "$TMP_DIR/success.log" >&2
   fail "successful update returned an error"
@@ -113,6 +120,7 @@ fi
 [[ "$(cat "$SUCCESS_REPO/.env")" == "ADMIN_PASSWORD=test-only" ]] || fail ".env was not preserved"
 [[ "$(cat "$SUCCESS_REPO/data/config.json")" == '{"preserved":true}' ]] || fail "data/config.json was not preserved"
 grep -q '^compose build' "$SUCCESS_LOG" || fail "Docker build was not called"
+grep -q -- '--build-arg BUILD_COMMIT=' "$SUCCESS_LOG" || fail "build commit was not passed explicitly"
 grep -q '^compose up -d --remove-orphans' "$SUCCESS_LOG" || fail "Docker Compose up was not called"
 
 FAILURE_LOG="$TMP_DIR/docker-failure.log"
@@ -128,5 +136,15 @@ fi
 [[ "$(cat "$FAILURE_REPO/.env")" == "ADMIN_PASSWORD=test-only" ]] || fail "rollback changed .env"
 [[ "$(cat "$FAILURE_REPO/data/config.json")" == '{"preserved":true}' ]] || fail "rollback changed data/config.json"
 [[ "$(grep -c '^compose build' "$FAILURE_LOG")" -eq 2 ]] || fail "rollback did not rebuild the previous image"
+
+IDENTITY_LOG="$TMP_DIR/docker-identity.log"
+if PATH="$FAKE_BIN:$PATH" FAKE_DOCKER_LOG="$IDENTITY_LOG" FAKE_DOCKER_IMAGE_REVISION="wrong0000000" \
+  bash "$IDENTITY_REPO/scripts/update-sudo.sh" --health-timeout 10 --no-pull >"$TMP_DIR/identity.log" 2>&1; then
+  cat "$TMP_DIR/identity.log" >&2
+  fail "identity mismatch unexpectedly returned success"
+fi
+[[ "$(git -C "$IDENTITY_REPO" rev-parse HEAD)" == "$BASE_COMMIT" ]] || fail "identity rollback did not restore HEAD"
+[[ "$(cat "$IDENTITY_REPO/app.txt")" == "old" ]] || fail "identity rollback did not restore source"
+[[ "$(grep -c '^compose build' "$IDENTITY_LOG")" -eq 2 ]] || fail "identity rollback did not rebuild the previous image"
 
 printf 'update-sudo tests passed\n'

@@ -654,7 +654,7 @@ const (
 )
 
 // Version current version
-const Version = "1.3.13"
+const Version = "1.3.15"
 
 // Kiro client versions are sent in the outbound KiroIDE user-agent. Keep the
 // default above the service's published minimum; operators can still override

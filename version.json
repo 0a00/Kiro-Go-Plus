@@ -1,5 +1,5 @@
 {
-  "version": "1.3.14",
-  "changelog": "Try remaining compatible endpoints when one Kiro data plane requires a profile ARN, then rotate accounts only after endpoint candidates are exhausted.\n当单个 Kiro 数据平面要求 Profile ARN 时继续尝试同一账号的兼容端点，端点全部失败后再轮换账号，减少 profile 缺失导致的无效长时间重试。",
+  "version": "1.3.15",
+  "changelog": "Synchronize runtime version metadata and verify the deployed Docker image revision after updates.\n同步运行版本元数据；更新后校验实际运行容器的 Docker 镜像提交标识，避免宿主代码已更新但旧镜像或 unknown 镜像仍被误判为成功。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }
