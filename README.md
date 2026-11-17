@@ -375,6 +375,12 @@ readable. See [test changes](docs/development-testing.md#1297-acceptance-changes
 
 Compose uses `/health`, so account exhaustion does not cause a restart loop. Reverse proxies and load balancers should use `/ready` when deciding whether to route new requests.
 
+1.3.17 treats the current Kiro IDE/Q and AmazonQ generation routes as
+profile-bound for OAuth/IDC accounts. Profileless accounts are excluded before
+generation instead of consuming the retry budget; API-key accounts keep their
+key-bound route. This reflects the production capability observations where
+all current generation routes returned `profileArn is required`.
+
 1.3.12 adapts to upstream Kiro IDE generation endpoints that now require a
 `profileArn`. When the upstream returns that explicit capability error, the
 request discovers and caches a profile, then replays the same account once.

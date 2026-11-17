@@ -1,5 +1,5 @@
 {
-  "version": "1.3.16",
-  "changelog": "Expand Kiro Profile discovery to eu-north-1 and expose temporary profile-unavailable accounts as cooling in inventory.\n扩展 Kiro Profile 探测到 eu-north-1，并将临时缺少 Profile 的账号正确计入冷却状态，避免误判为可路由。",
+  "version": "1.3.17",
+  "changelog": "Treat current Kiro generation routes as Profile-bound for OAuth/IDC accounts and avoid blind account rotation.\n将当前 Kiro 生成端点统一按 Profile 绑定处理 OAuth/IDC 账号，避免无 Profile 账号被盲目轮询。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }

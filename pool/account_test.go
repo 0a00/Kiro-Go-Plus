@@ -325,7 +325,7 @@ func TestProfileUnavailableTemporarilyRemovesAccountFromSelection(t *testing.T) 
 	}
 }
 
-func TestProfilelessOAuthAccountsUseCompatibleGenerationSelection(t *testing.T) {
+func TestProfilelessOAuthAccountsAreExcludedFromGenerationSelection(t *testing.T) {
 	initAccountSelectionConfig(t)
 	profileless := config.Account{
 		ID: "profileless-oauth", Enabled: true, AccessToken: "access-token",
@@ -352,8 +352,8 @@ func TestProfilelessOAuthAccountsUseCompatibleGenerationSelection(t *testing.T) 
 			profilelessSeen = true
 		}
 	}
-	if !profilelessSeen {
-		t.Fatal("profileless OAuth account was never selected for compatible generation")
+	if profilelessSeen {
+		t.Fatal("profileless OAuth account was selected despite lacking a generation profile")
 	}
 }
 
@@ -378,8 +378,8 @@ func TestProfilelessOAuthAccountRespectsProfileBoundEndpoint(t *testing.T) {
 	if err := config.UpdateEndpointFallback(true); err != nil {
 		t.Fatalf("enable endpoint fallback: %v", err)
 	}
-	if got := p.GetNext(); got == nil || got.ID != account.ID {
-		t.Fatalf("compatible endpoint fallback did not restore selection: %+v", got)
+	if got := p.GetNext(); got != nil {
+		t.Fatalf("profileless OAuth account was selected after enabling endpoint fallback: %+v", got)
 	}
 
 	p.UpdateProfileArn(account.ID, "arn:aws:codewhisperer:us-east-1:123:profile/restored")

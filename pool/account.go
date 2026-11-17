@@ -568,28 +568,16 @@ func AccountNeedsProfileDiscovery(acc *config.Account) bool {
 		strings.TrimSpace(acc.StartUrl) != ""
 }
 
-// AccountRequiresGenerationProfile reports whether the current generation
-// endpoint configuration leaves this account without a compatible route. A
-// profileless OAuth/IDC account may still use the legacy Kiro IDE/Q routes;
-// runtime and CodeWhisperer require a profile only when endpoint fallback is
-// disabled. This keeps account selection aligned with endpoint filtering.
+// AccountRequiresGenerationProfile reports whether the account can enter the
+// current generation pool. All current OAuth/IDC generation endpoints require
+// a profile ARN; API-key accounts use their key-bound upstream identity and
+// remain eligible without the OAuth profile field.
 func AccountRequiresGenerationProfile(acc *config.Account) bool {
-	if !AccountNeedsProfileDiscovery(acc) {
-		return false
-	}
-	preferred := strings.ToLower(strings.TrimSpace(acc.EndpointPreference))
-	if preferred == "" || preferred == "auto" {
-		preferred = strings.ToLower(strings.TrimSpace(config.GetPreferredEndpoint()))
-	}
-	if preferred != "runtime" && preferred != "codewhisperer" {
-		return false
-	}
-	return !config.GetEndpointFallback()
+	return AccountNeedsProfileDiscovery(acc)
 }
 
 // ExcludeProfilelessAccounts marks accounts that cannot serve profile-bound
-// capabilities such as WebSearch/MCP. Generation selection uses the endpoint
-// aware AccountRequiresGenerationProfile check instead.
+// capabilities such as generation, WebSearch, or MCP.
 func (p *AccountPool) ExcludeProfilelessAccounts(excluded map[string]bool) {
 	if p == nil || excluded == nil {
 		return

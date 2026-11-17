@@ -117,11 +117,11 @@ func classifyInventoryAccount(account config.Account, resident, cooling, allowOv
 	if isQuotaBlocked(account, allowOverUsage) {
 		return inventoryQuotaBlocked
 	}
-	if AccountRequiresGenerationProfile(&account) {
-		return inventoryProfileless
-	}
 	if cooling || !resident {
 		return inventoryCooling
+	}
+	if AccountRequiresGenerationProfile(&account) {
+		return inventoryProfileless
 	}
 	return inventoryRoutable
 }

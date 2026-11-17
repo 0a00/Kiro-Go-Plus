@@ -61,7 +61,7 @@ func TestInventorySnapshotSeparatesProfilelessOAuthAccounts(t *testing.T) {
 	}
 	p := &AccountPool{accounts: accounts, refreshFailures: make(map[string]time.Time)}
 	got := p.InventorySnapshot()
-	if got.Routable != 2 || got.Profileless != 0 {
+	if got.Routable != 1 || got.Profileless != 1 {
 		t.Fatalf("unexpected profile inventory: %+v", got)
 	}
 }
