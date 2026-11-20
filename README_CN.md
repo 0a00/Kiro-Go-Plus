@@ -373,7 +373,9 @@ Flush 成功不等于客户端已收到；这些计数不依赖完整详情开�
 此提示不会自动扩容或删除文件。本版无需迁移配置或凭据，回退 1.2.96 可恢复旧行为。
 生产测试会核对专用测试 Key 的日志，避免客户端自动重试掩盖 400 错误。
 
-1.3.17 根据生产能力探测结果，将当前 Kiro IDE/Q 与 AmazonQ 生成端点统一按 Profile 绑定处理 OAuth/IDC 账号。无 Profile 账号会在生成前跳过，不再消耗大量重试预算；API Key 账号继续使用 key-bound 路由。
+1.3.18 恢复已验证的 Builder ID 无 Profile 兼容路径。Kiro IDE/AmazonQ 的 Q 生成端点和 Q MCP 可以在没有缓存 Profile 时尝试；Runtime 与 CodeWhisperer 仍要求 Profile。固定到需要 Profile 的端点时，必须开启端点回退，才会允许无 Profile 的 Builder ID 账号切换到兼容 Q 端点。API Key 继续使用 key-bound 路由，其他 OAuth 身份仍要求真实 Profile。
+
+1.3.17 曾根据生产能力探测结果，临时将当前 Kiro 生成端点统一按 Profile 绑定处理 OAuth/IDC 账号；现在仅在相关实现和本地协议测试都验证过的 Q 兼容路径上恢复无 Profile 使用。
 
 1.3.12 兼容上游对旧 Kiro IDE 生成端点新增的 `profileArn` 要求。请求收到明确的 Profile 缺失错误时，会先尝试发现并缓存 Profile，再重放当前账号一次；发现失败才进入账号切换和冷却，避免对同一能力错误反复换号重试。生产环境对大量无 Profile 账号关闭无效的模型元数据刷新，Token 刷新不受影响。
 

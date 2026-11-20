@@ -276,10 +276,12 @@ func TestMCPWebSearchFallsBackFromRuntimeToQAndLearnsRoute(t *testing.T) {
 	}
 }
 
-func TestMCPWebSearchQRouteRequiresProfileArnForOAuth(t *testing.T) {
+func TestMCPWebSearchRuntimeIsProfileBoundButQIsCompatibleForBuilderID(t *testing.T) {
+	account := &config.Account{AuthMethod: "idc", Provider: "BuilderId"}
 	for _, endpoint := range webSearchRouteEndpoints {
-		if !endpoint.RequiresProfileArn {
-			t.Fatalf("MCP endpoint %q must require profileArn for OAuth/IDC accounts", endpoint.Key)
+		want := endpoint.Key == "runtime-mcp"
+		if got := endpointRequiresProfileArnForAccount(endpoint, account); got != want {
+			t.Fatalf("MCP endpoint %q profile requirement=%v, want %v", endpoint.Key, got, want)
 		}
 	}
 }
@@ -321,7 +323,7 @@ func TestMCPWebSearchFixedRuntimeWithoutProfileUsesCompatibleQRoute(t *testing.T
 	}
 }
 
-func TestWebSearchSkipsProfilelessOAuthAccountsBeforeDispatch(t *testing.T) {
+func TestWebSearchUsesQRouteForProfilelessBuilderID(t *testing.T) {
 	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatalf("init config: %v", err)
 	}
@@ -361,7 +363,7 @@ func TestWebSearchSkipsProfilelessOAuthAccountsBeforeDispatch(t *testing.T) {
 		t.Fatalf("web search failed: %v", err)
 	}
 	if calls != 1 {
-		t.Fatalf("profileless OAuth account was dispatched to WebSearch: calls=%d", calls)
+		t.Fatalf("profileless Builder ID account did not use the Q WebSearch route: calls=%d", calls)
 	}
 }
 

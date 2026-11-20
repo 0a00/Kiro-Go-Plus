@@ -1,5 +1,5 @@
 {
-  "version": "1.3.17",
-  "changelog": "Treat current Kiro generation routes as Profile-bound for OAuth/IDC accounts and avoid blind account rotation.\n将当前 Kiro 生成端点统一按 Profile 绑定处理 OAuth/IDC 账号，避免无 Profile 账号被盲目轮询。",
+  "version": "1.3.18",
+  "changelog": "Restore the verified Builder ID profileless compatibility path: Kiro IDE/AmazonQ Q generation and Q MCP may run without a cached profile; Runtime and CodeWhisperer remain profile-bound, and fixed profile endpoints still require fallback to be enabled.\n恢复已验证的 Builder ID 无 Profile 兼容路径：Kiro IDE/AmazonQ Q 生成端点与 Q MCP 可在没有缓存 Profile 时尝试；Runtime 与 CodeWhisperer 仍要求 Profile，固定 Profile 端点仍需开启回退才能切换兼容端点。",
   "download": "https://github.com/0a00/Kiro-Go-Plus"
 }

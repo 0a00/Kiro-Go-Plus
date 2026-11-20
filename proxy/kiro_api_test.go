@@ -758,7 +758,7 @@ func TestEnsureRestProfileArnSuppressesUnsupportedBuilderIDLookup(t *testing.T) 
 	}
 }
 
-func TestCallKiroAPIRejectsProfilelessBuilderIDBeforeDataPlane(t *testing.T) {
+func TestCallKiroAPIUsesQRouteForProfilelessBuilderID(t *testing.T) {
 	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatalf("config.Init: %v", err)
 	}
@@ -803,14 +803,14 @@ func TestCallKiroAPIRejectsProfilelessBuilderIDBeforeDataPlane(t *testing.T) {
 		ID: "profileless-builder", AccessToken: "access-token", AuthMethod: "idc",
 		Provider: "BuilderId", Region: "us-east-1",
 	}, &KiroPayload{}, &KiroStreamCallback{OnText: func(text string, _ bool) { output.WriteString(text) }})
-	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "profile arn") {
-		t.Fatalf("expected profile requirement error, got %v", err)
+	if err != nil {
+		t.Fatalf("profileless Q generation failed: %v", err)
 	}
-	if profileLookupCalls.Load() == 0 {
-		t.Fatal("profileless generation did not attempt bounded profile discovery")
+	if profileLookupCalls.Load() != 0 {
+		t.Fatalf("profileless Q generation unexpectedly probed profile discovery: calls=%d", profileLookupCalls.Load())
 	}
-	if dataPlaneCalls.Load() != 0 || output.String() != "" {
-		t.Fatalf("profileless generation reached the data plane: calls=%d output=%q", dataPlaneCalls.Load(), output.String())
+	if dataPlaneCalls.Load() != 1 || output.String() != "profileless-ok" {
+		t.Fatalf("profileless generation did not use the Q data plane: calls=%d output=%q", dataPlaneCalls.Load(), output.String())
 	}
 }
 

@@ -325,7 +325,7 @@ func TestProfileUnavailableTemporarilyRemovesAccountFromSelection(t *testing.T) 
 	}
 }
 
-func TestProfilelessOAuthAccountsAreExcludedFromGenerationSelection(t *testing.T) {
+func TestProfilelessBuilderIDAccountsUseQGenerationFallback(t *testing.T) {
 	initAccountSelectionConfig(t)
 	profileless := config.Account{
 		ID: "profileless-oauth", Enabled: true, AccessToken: "access-token",
@@ -352,8 +352,8 @@ func TestProfilelessOAuthAccountsAreExcludedFromGenerationSelection(t *testing.T
 			profilelessSeen = true
 		}
 	}
-	if profilelessSeen {
-		t.Fatal("profileless OAuth account was selected despite lacking a generation profile")
+	if !profilelessSeen {
+		t.Fatal("profileless Builder ID account was not selected for the Q compatibility route")
 	}
 }
 
@@ -378,8 +378,8 @@ func TestProfilelessOAuthAccountRespectsProfileBoundEndpoint(t *testing.T) {
 	if err := config.UpdateEndpointFallback(true); err != nil {
 		t.Fatalf("enable endpoint fallback: %v", err)
 	}
-	if got := p.GetNext(); got != nil {
-		t.Fatalf("profileless OAuth account was selected after enabling endpoint fallback: %+v", got)
+	if got := p.GetNext(); got == nil || got.ID != "profile-restored" {
+		t.Fatalf("profileless Builder ID account was not restored to Q fallback: %+v", got)
 	}
 
 	p.UpdateProfileArn(account.ID, "arn:aws:codewhisperer:us-east-1:123:profile/restored")

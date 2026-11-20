@@ -46,7 +46,7 @@ func TestInventorySnapshotPartitionsAndDeduplicatesAccounts(t *testing.T) {
 	}
 }
 
-func TestInventorySnapshotSeparatesProfilelessOAuthAccounts(t *testing.T) {
+func TestInventorySnapshotRoutesProfilelessBuilderIDThroughQ(t *testing.T) {
 	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatalf("config.Init: %v", err)
 	}
@@ -61,7 +61,7 @@ func TestInventorySnapshotSeparatesProfilelessOAuthAccounts(t *testing.T) {
 	}
 	p := &AccountPool{accounts: accounts, refreshFailures: make(map[string]time.Time)}
 	got := p.InventorySnapshot()
-	if got.Routable != 1 || got.Profileless != 1 {
+	if got.Routable != 2 || got.Profileless != 0 {
 		t.Fatalf("unexpected profile inventory: %+v", got)
 	}
 }

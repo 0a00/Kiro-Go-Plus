@@ -60,12 +60,11 @@ var kiroEndpoints = []kiroEndpoint{
 		RequiresProfileArn: true,
 	},
 	{
-		Key:                "kiro",
-		URL:                "https://q.us-east-1.amazonaws.com/generateAssistantResponse",
-		Origin:             "AI_EDITOR",
-		AmzTarget:          "",
-		Name:               "Kiro IDE",
-		RequiresProfileArn: true,
+		Key:       "kiro",
+		URL:       "https://q.us-east-1.amazonaws.com/generateAssistantResponse",
+		Origin:    "AI_EDITOR",
+		AmzTarget: "",
+		Name:      "Kiro IDE",
 	},
 	{
 		Key:                "codewhisperer",
@@ -76,12 +75,11 @@ var kiroEndpoints = []kiroEndpoint{
 		RequiresProfileArn: true,
 	},
 	{
-		Key:                "amazonq",
-		URL:                "https://q.us-east-1.amazonaws.com/generateAssistantResponse",
-		Origin:             "AI_EDITOR",
-		AmzTarget:          "AmazonQDeveloperStreamingService.SendMessage",
-		Name:               "AmazonQ",
-		RequiresProfileArn: true,
+		Key:       "amazonq",
+		URL:       "https://q.us-east-1.amazonaws.com/generateAssistantResponse",
+		Origin:    "AI_EDITOR",
+		AmzTarget: "AmazonQDeveloperStreamingService.SendMessage",
+		Name:      "AmazonQ",
 	},
 }
 
@@ -892,8 +890,8 @@ func isProfilelessBuilderIDAccount(account *config.Account) bool {
 
 func accountAutoEndpointHint(account *config.Account) string {
 	if isProfilelessBuilderIDAccount(account) {
-		// Keep stable ordering for diagnostics; the account pool excludes this
-		// account until a generation profile is discovered.
+		// Builder ID accounts without a cached profile use the legacy Q surface.
+		// Keep that route first while still allowing discovery to restore Runtime.
 		return "kiro"
 	}
 	if accountPrefersRuntime(account) {
@@ -902,12 +900,44 @@ func accountAutoEndpointHint(account *config.Account) string {
 	return "kiro"
 }
 
+func accountHasExplicitOAuthIdentity(account *config.Account) bool {
+	if account == nil {
+		return false
+	}
+	method := strings.ToLower(strings.TrimSpace(account.AuthMethod))
+	if method == "idc" || method == "social" || method == "external_idp" || method == "oauth" {
+		return true
+	}
+	return strings.TrimSpace(account.Provider) != "" ||
+		strings.TrimSpace(account.StartUrl) != "" ||
+		strings.TrimSpace(account.RefreshToken) != ""
+}
+
 // API-key credentials use a key-bound upstream profile and do not expose the
-// OAuth profile ARN field. All current Kiro generation endpoints require a
-// profile for OAuth/IDC credentials; endpointRequiresProfileArnForAccount
-// keeps API-key routing independent of that OAuth capability gate.
+// OAuth profile ARN field. Builder ID OAuth credentials can also use the
+// legacy Q surface without a profile ARN; Runtime and CodeWhisperer remain
+// profile-bound. Legacy records that predate auth metadata retain the old
+// endpoint behavior and are allowed to reach the configured test/compatibility
+// route; the upstream response remains the final capability check.
 func endpointRequiresProfileArnForAccount(endpoint kiroEndpoint, account *config.Account) bool {
-	return endpoint.RequiresProfileArn && !isKiroAPIKeyAccount(account)
+	if isKiroAPIKeyAccount(account) {
+		return false
+	}
+	if !accountHasExplicitOAuthIdentity(account) {
+		return false
+	}
+	if endpoint.RequiresProfileArn {
+		return true
+	}
+	// Only the known legacy Q surfaces have this compatibility behavior. A
+	// custom/test endpoint with RequiresProfileArn=false keeps the historical
+	// meaning of that flag and must remain usable without a profile.
+	switch endpoint.Key {
+	case "kiro", "amazonq", "q-mcp":
+		return !isProfilelessBuilderIDAccount(account)
+	default:
+		return false
+	}
 }
 
 func filterGenerationEndpointsForAccount(endpoints []kiroEndpoint, account *config.Account) []kiroEndpoint {
@@ -915,10 +945,9 @@ func filterGenerationEndpointsForAccount(endpoints []kiroEndpoint, account *conf
 		return endpoints
 	}
 
-	// API keys use the key-bound Kiro/Q profile. OAuth/IDC credentials without
-	// a cached profile have no currently supported generation route, so retain
-	// the full list only to let the request path perform one bounded discovery
-	// attempt and record the capability failure without sending a blind route.
+	// API keys use the key-bound Kiro/Q profile. Builder ID OAuth credentials
+	// without a cached profile may use the legacy Q routes, while other OAuth
+	// families must resolve a real profile before entering the data plane.
 	compatible := make([]kiroEndpoint, 0, len(endpoints))
 	for _, endpoint := range endpoints {
 		if isKiroAPIKeyAccount(account) {
@@ -927,7 +956,7 @@ func filterGenerationEndpointsForAccount(endpoints []kiroEndpoint, account *conf
 			}
 			continue
 		}
-		if !endpoint.RequiresProfileArn {
+		if !endpointRequiresProfileArnForAccount(endpoint, account) {
 			compatible = append(compatible, endpoint)
 		}
 	}

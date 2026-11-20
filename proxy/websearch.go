@@ -26,7 +26,7 @@ var errMCPWebSearchPayload = errors.New("MCP web_search payload error")
 
 var webSearchRouteEndpoints = []kiroEndpoint{
 	{Key: "runtime-mcp", URL: "https://runtime.us-east-1.kiro.dev/mcp", Name: "Kiro Runtime MCP", RequiresProfileArn: true},
-	{Key: "q-mcp", URL: "https://q.us-east-1.amazonaws.com/mcp", Name: "Kiro Q MCP", RequiresProfileArn: true},
+	{Key: "q-mcp", URL: "https://q.us-east-1.amazonaws.com/mcp", Name: "Kiro Q MCP"},
 }
 
 type mcpRequest struct {
@@ -323,8 +323,9 @@ func (h *Handler) callWebSearchMCP(ctx context.Context, model, query string) (*w
 		attempts.maxAttempts = maxInt(h.pool.Count(), 1)
 	}
 	excluded := attempts.excluded
-	// WebSearch/MCP requires a profile for OAuth/IDC accounts even when the
-	// generation path can use the legacy Kiro IDE/Q route without one.
+	// Keep Builder ID accounts eligible for the Q compatibility MCP route;
+	// accounts that cannot use a profileless route are excluded here and will
+	// continue to be retried by the profile discovery scheduler.
 	h.pool.ExcludeProfilelessAccounts(excluded)
 	var lastErr error
 	for {
@@ -429,14 +430,6 @@ func callMCPWebSearchContext(ctx context.Context, account *config.Account, query
 	if query == "" {
 		return nil, fmt.Errorf("web_search query must not be empty")
 	}
-	if !isKiroAPIKeyAccount(account) && strings.TrimSpace(account.ProfileArn) == "" {
-		if profileArn, err := ResolveProfileArnContext(ctx, account); err == nil {
-			account.ProfileArn = profileArn
-		} else {
-			logger.Warnf("[WebSearch] Account %s is not generation-ready: %v", accountEmailForLog(account), err)
-			return nil, newProfileUnavailableError("Kiro MCP WebSearch", err)
-		}
-	}
 	body, err := json.Marshal(mcpRequest{
 		ID:      "web_search_tooluse_" + uuid.New().String(),
 		JSONRPC: "2.0",
@@ -488,6 +481,16 @@ func callMCPWebSearchContext(ctx context.Context, account *config.Account, query
 	}
 	var lastErr error
 	for _, endpoint := range endpoints {
+		if endpointRequiresProfileArnForAccount(endpoint, account) && strings.TrimSpace(account.ProfileArn) == "" {
+			profileArn, resolveErr := ResolveProfileArnContext(ctx, account)
+			if resolveErr != nil {
+				lastErr = newProfileUnavailableError(endpoint.Name, resolveErr)
+				logger.Warnf("[WebSearch] Account %s cannot use %s without a profile ARN: %v", accountEmailForLog(account), endpoint.Name, resolveErr)
+				sharedAccountEndpointRoutes.recordFailure(account.ID, webSearchEndpointRouteModel, endpoint, lastErr)
+				continue
+			}
+			account.ProfileArn = profileArn
+		}
 		for _, region := range webSearchRegionCandidates(account) {
 			rawURL := regionalizeURLForRegion(endpoint.URL, region)
 			results, callErr := callMCPWebSearchURL(ctx, account, rawURL, body, query)

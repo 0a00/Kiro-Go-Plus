@@ -94,7 +94,7 @@ func TestAPIKeyAccountEndpointsUseKeyBoundProfileCompatibility(t *testing.T) {
 	}
 }
 
-func TestProfilelessBuilderIDAccountHasNoGenerationRoute(t *testing.T) {
+func TestProfilelessBuilderIDAccountUsesQGenerationRoutes(t *testing.T) {
 	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatalf("init config: %v", err)
 	}
@@ -104,8 +104,11 @@ func TestProfilelessBuilderIDAccountHasNoGenerationRoute(t *testing.T) {
 		t.Fatal("profileless Builder ID unexpectedly returned no endpoint candidates")
 	}
 	for _, endpoint := range endpoints {
-		if !endpoint.RequiresProfileArn {
-			t.Fatalf("profileless Builder ID received an unbound generation route: %+v", endpoints)
+		if endpoint.Key != "kiro" && endpoint.Key != "amazonq" {
+			t.Fatalf("profileless Builder ID received an incompatible generation route: %+v", endpoints)
+		}
+		if endpointRequiresProfileArnForAccount(endpoint, account) {
+			t.Fatalf("profileless Builder ID Q route still requires profile ARN: %+v", endpoint)
 		}
 	}
 	if got := accountAutoEndpointHint(account); got != "kiro" {
@@ -115,7 +118,7 @@ func TestProfilelessBuilderIDAccountHasNoGenerationRoute(t *testing.T) {
 
 func TestOnlyProfileBoundGenerationEndpointsRequireProfileArnForOAuth(t *testing.T) {
 	for _, endpoint := range kiroEndpoints {
-		want := true
+		want := endpoint.Key == "runtime" || endpoint.Key == "codewhisperer"
 		if endpoint.RequiresProfileArn != want {
 			t.Fatalf("endpoint %q RequiresProfileArn=%v, want %v", endpoint.Key, endpoint.RequiresProfileArn, want)
 		}

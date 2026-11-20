@@ -375,11 +375,17 @@ readable. See [test changes](docs/development-testing.md#1297-acceptance-changes
 
 Compose uses `/health`, so account exhaustion does not cause a restart loop. Reverse proxies and load balancers should use `/ready` when deciding whether to route new requests.
 
-1.3.17 treats the current Kiro IDE/Q and AmazonQ generation routes as
-profile-bound for OAuth/IDC accounts. Profileless accounts are excluded before
-generation instead of consuming the retry budget; API-key accounts keep their
-key-bound route. This reflects the production capability observations where
-all current generation routes returned `profileArn is required`.
+1.3.18 restores the verified Builder ID profileless compatibility path. Kiro
+IDE/AmazonQ Q generation and Q MCP can be tried without a cached profile;
+Runtime and CodeWhisperer remain profile-bound. A fixed profile-bound endpoint
+still requires endpoint fallback to be enabled before a profileless Builder ID
+account can use a compatible Q route. API-key accounts keep their key-bound
+route, while other OAuth identities still require a real profile.
+
+1.3.17 temporarily treated all current Kiro generation routes as profile-bound
+for OAuth/IDC accounts after production observations showed
+`profileArn is required` responses. The compatibility path is now restored only
+where the related implementations and local protocol tests verify it.
 
 1.3.12 adapts to upstream Kiro IDE generation endpoints that now require a
 `profileArn`. When the upstream returns that explicit capability error, the

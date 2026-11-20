@@ -3,6 +3,7 @@
 package pool
 
 import (
+	"kiro-go/auth"
 	"kiro-go/config"
 	"sort"
 	"strings"
@@ -568,16 +569,44 @@ func AccountNeedsProfileDiscovery(acc *config.Account) bool {
 		strings.TrimSpace(acc.StartUrl) != ""
 }
 
-// AccountRequiresGenerationProfile reports whether the account can enter the
-// current generation pool. All current OAuth/IDC generation endpoints require
-// a profile ARN; API-key accounts use their key-bound upstream identity and
-// remain eligible without the OAuth profile field.
-func AccountRequiresGenerationProfile(acc *config.Account) bool {
-	return AccountNeedsProfileDiscovery(acc)
+func isProfilelessBuilderIDAccount(acc *config.Account) bool {
+	if acc == nil || strings.TrimSpace(acc.ProfileArn) != "" {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(acc.Provider), "builderid") ||
+		auth.IsBuilderIDStartURL(acc.StartUrl)
 }
 
-// ExcludeProfilelessAccounts marks accounts that cannot serve profile-bound
-// capabilities such as generation, WebSearch, or MCP.
+// profilelessQFallbackEnabled reports whether the selected endpoint policy
+// leaves a Q compatibility route available for a Builder ID account without a
+// cached profile ARN. A fixed Runtime/CodeWhisperer route with fallback off
+// must continue to require a real profile.
+func profilelessQFallbackEnabled(acc *config.Account) bool {
+	if !isProfilelessBuilderIDAccount(acc) {
+		return false
+	}
+	preferred := strings.ToLower(strings.TrimSpace(acc.EndpointPreference))
+	if preferred == "" {
+		preferred = strings.ToLower(strings.TrimSpace(config.GetPreferredEndpoint()))
+	}
+	if preferred == "runtime" || preferred == "codewhisperer" {
+		return config.GetEndpointFallback()
+	}
+	return true
+}
+
+// AccountRequiresGenerationProfile reports whether the account can enter the
+// current generation pool. Builder ID accounts without a cached ARN may use
+// the legacy Q compatibility route; Runtime and CodeWhisperer still require
+// a real profile. API-key accounts use their key-bound upstream identity.
+func AccountRequiresGenerationProfile(acc *config.Account) bool {
+	return AccountNeedsProfileDiscovery(acc) && !profilelessQFallbackEnabled(acc)
+}
+
+// ExcludeProfilelessAccounts marks accounts that cannot serve the currently
+// selectable generation/MCP routes. Builder ID accounts remain eligible for
+// the Q compatibility route while their profile discovery continues in the
+// background.
 func (p *AccountPool) ExcludeProfilelessAccounts(excluded map[string]bool) {
 	if p == nil || excluded == nil {
 		return
@@ -585,7 +614,7 @@ func (p *AccountPool) ExcludeProfilelessAccounts(excluded map[string]bool) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	for i := range p.accounts {
-		if AccountNeedsProfileDiscovery(&p.accounts[i]) {
+		if AccountRequiresGenerationProfile(&p.accounts[i]) {
 			excluded[p.accounts[i].ID] = true
 		}
 	}
